@@ -11,9 +11,9 @@
 // e.g. from Claude Code); --bump overrides Claude's level. The first release (no tag yet) publishes
 // the current version.
 //
-// Signing key: DEN_SIGNING_KEY (path), else ~/.tauri/den.key; its password in
+// Signing key: DEN_SIGNING_KEY (path), else ~/.keys/den.key; its password (if any) in
 // DEN_SIGNING_KEY_PASSWORD. Make one with
-//   pnpm dlx @tauri-apps/cli signer generate -w %USERPROFILE%\.tauri\den.key
+//   pnpm dlx @tauri-apps/cli signer generate -w %USERPROFILE%\.keys\den.key
 // Its public half goes into packaging/updater.pub (done here on the first release), which den
 // builds in to check downloads. Global TAURI_SIGNING_* variables are ignored: they may belong to
 // another app. NSIS comes from Tauri's tool cache (%LOCALAPPDATA%\tauri\NSIS) or PATH.
@@ -153,9 +153,9 @@ function preflight(dryRun: boolean): Tools {
   if (behind > 0) fail(`${BRANCH} is ${behind} commit(s) behind origin/${BRANCH}: pull first.`);
   if (tryOut("gh", ["auth", "status"]) === null) fail("The GitHub CLI is not logged in: run `gh auth login`.");
   if (tryOut("claude", ["--version"]) === null) fail("The `claude` CLI is not on PATH (it picks the bump and writes the notes).");
-  const key = process.env.DEN_SIGNING_KEY ?? join(homedir(), ".tauri", "den.key");
+  const key = process.env.DEN_SIGNING_KEY ?? join(homedir(), ".keys", "den.key");
   if (!existsSync(key)) {
-    fail(`Signing key not found: ${key}. Make one with:\n  pnpm dlx @tauri-apps/cli signer generate -w "${join(homedir(), ".tauri", "den.key")}"`);
+    fail(`Signing key not found: ${key}. Make one with:\n  pnpm dlx @tauri-apps/cli signer generate -w "${join(homedir(), ".keys", "den.key")}"`);
   }
   // The public half is built into den; the first release puts it there.
   const pub = existsSync(PUB_FILE) ? readFileSync(PUB_FILE, "utf8").trim() : "";
@@ -224,7 +224,8 @@ function build(version: string, { key, nsis }: Tools): string {
     run("cargo", ["build", "--release"]);
     run(nsis, ["-V2", `-DVERSION=${version}`, `-DEXE=${join(OUT_DIR, "den.exe")}`, `-DOUTFILE=${join(OUT_DIR, setup)}`, join(ROOT, "packaging", "installer.nsi")]);
     const { cmd, args } = signer();
-    run(cmd, [...args, "signer", "sign", "-f", key, "-p", process.env.DEN_SIGNING_KEY_PASSWORD ?? "", join(OUT_DIR, setup)], {
+    // `--password=` keeps the password one argument: the pnpm shim drops an empty one (no password).
+    run(cmd, [...args, "signer", "sign", "-f", key, `--password=${process.env.DEN_SIGNING_KEY_PASSWORD ?? ""}`, join(OUT_DIR, setup)], {
       shell: true,
       env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: undefined, TAURI_SIGNING_PRIVATE_KEY_PATH: undefined, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: undefined },
     });

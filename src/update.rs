@@ -5,7 +5,7 @@
 //! dialog, downloaded, checked against the public key built into den, and
 //! installed silently, after which den starts again.
 //!
-//! The key is `packaging/updater.pub` (the public half of `~/.tauri/den.key`,
+//! The key is `packaging/updater.pub` (the public half of `~/.keys/den.key`,
 //! which scripts/release.ts signs with). While that file is empty, a build
 //! does not update.
 
