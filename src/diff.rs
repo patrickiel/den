@@ -1,0 +1,446 @@
+//! Diff tabs, as in den: a change clicked in Source Control opens read-only,
+//! side by side. `name (Working Tree)` compares the file on disk with the
+//! index, `name (Index)` the index with HEAD. The header's button (or
+//! Ctrl+Enter) opens the file itself.
+
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
+
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex, v_flex,
+};
+use gpui_kit::{prelude::FluentBuilder as _, *};
+use serde_json::{Value, json};
+use similar::{ChangeTag, TextDiff};
+
+use crate::{
+    backend::git,
+    pane::{Pane, PaneEvent},
+    settings::Settings,
+};
+
+pub const DIFF: &str = "Diff";
+
+actions!(diff, [OpenDiffedFile]);
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new("ctrl-enter", OpenDiffedFile, Some("Diff"))]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Removed,
+    Added,
+    Same,
+    /// No line on this side opposite a line on the other.
+    Gap,
+}
+
+/// One row of the side-by-side view: a line (number, text) on each side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub left: Option<(usize, String)>,
+    pub right: Option<(usize, String)>,
+    pub left_kind: Side,
+    pub right_kind: Side,
+}
+
+/// Line up two texts: equal lines side by side, a run of removed lines next
+/// to the run of added lines that replaced it, gaps where one side has more.
+pub fn rows(old: &str, new: &str) -> Vec<Row> {
+    // git keeps LF where the working copy has CRLF (core.autocrlf): compare
+    // the lines, not their endings.
+    let (old, new) = (old.replace("\r\n", "\n"), new.replace("\r\n", "\n"));
+    let diff = TextDiff::from_lines(&old, &new);
+    let mut out = Vec::new();
+    let mut removed: Vec<(usize, String)> = Vec::new();
+    let mut added: Vec<(usize, String)> = Vec::new();
+    let flush = |removed: &mut Vec<(usize, String)>, added: &mut Vec<(usize, String)>, out: &mut Vec<Row>| {
+        let n = removed.len().max(added.len());
+        let mut r = removed.drain(..);
+        let mut a = added.drain(..);
+        for _ in 0..n {
+            let left = r.next();
+            let right = a.next();
+            out.push(Row {
+                left_kind: if left.is_some() { Side::Removed } else { Side::Gap },
+                right_kind: if right.is_some() { Side::Added } else { Side::Gap },
+                left,
+                right,
+            });
+        }
+    };
+    for change in diff.iter_all_changes() {
+        let text = change.value().trim_end_matches(['\n', '\r']).to_string();
+        match change.tag() {
+            ChangeTag::Delete => removed.push((change.old_index().unwrap_or(0) + 1, text)),
+            ChangeTag::Insert => added.push((change.new_index().unwrap_or(0) + 1, text)),
+            ChangeTag::Equal => {
+                flush(&mut removed, &mut added, &mut out);
+                out.push(Row {
+                    left: Some((change.old_index().unwrap_or(0) + 1, text.clone())),
+                    right: Some((change.new_index().unwrap_or(0) + 1, text)),
+                    left_kind: Side::Same,
+                    right_kind: Side::Same,
+                });
+            }
+        }
+    }
+    flush(&mut removed, &mut added, &mut out);
+    out
+}
+
+/// What a commit diff compares.
+#[derive(Clone, Debug)]
+pub struct CommitRevs {
+    pub hash: String,
+    /// None for a root commit (everything is added).
+    pub parent: Option<String>,
+    /// The file's path in the parent (differs after a rename).
+    pub old_rel: String,
+}
+
+pub struct DiffPanel {
+    path: PathBuf,
+    top: PathBuf,
+    rel: String,
+    /// The index against HEAD, else the working tree against the index.
+    staged: bool,
+    /// A commit's change instead: the commit, its parent, the path before.
+    commit: Option<CommitRevs>,
+    rows: Vec<Row>,
+    error: Option<SharedString>,
+    focus_handle: FocusHandle,
+    scroll: UniformListScrollHandle,
+}
+
+impl DiffPanel {
+    pub fn new(path: PathBuf, top: PathBuf, rel: String, staged: bool, cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
+            path,
+            top,
+            rel,
+            staged,
+            commit: None,
+            rows: Vec::new(),
+            error: None,
+            focus_handle: cx.focus_handle(),
+            scroll: UniformListScrollHandle::new(),
+        };
+        this.reload();
+        this
+    }
+
+    /// A commit's change to one file.
+    pub fn for_commit(path: PathBuf, top: PathBuf, rel: String, commit: CommitRevs, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new(path, top, rel, false, cx);
+        this.commit = Some(commit);
+        this.reload();
+        this
+    }
+
+    pub fn commit(&self) -> Option<&CommitRevs> {
+        self.commit.as_ref()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn staged(&self) -> bool {
+        self.staged
+    }
+
+    /// Read both sides again (after the file or the index changed).
+    pub fn reload(&mut self) {
+        let side = |rev: &str| git::show(&self.top, rev, &self.rel).unwrap_or_default();
+        let (old, new) = if let Some(commit) = &self.commit {
+            let old = commit.parent.as_deref().map(|p| git::show(&self.top, p, &commit.old_rel).unwrap_or_default()).unwrap_or_default();
+            (old, side(&commit.hash))
+        } else if self.staged {
+            (side("HEAD"), side(""))
+        } else {
+            (side(""), std::fs::read_to_string(&self.path).unwrap_or_default())
+        };
+        self.error = None;
+        self.rows = rows(&old, &new);
+    }
+
+    fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let line_height = px(Settings::get(cx).editor_font_size * 1.4);
+        let half = |line: &Option<(usize, String)>, kind: Side| {
+            let bg = match kind {
+                Side::Removed => theme.red.opacity(0.18),
+                Side::Added => theme.green.opacity(0.18),
+                Side::Gap => theme.muted.opacity(0.3),
+                Side::Same => transparent_black(),
+            };
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .bg(bg)
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .w(px(48.))
+                        .flex_none()
+                        .pr_2()
+                        .text_right()
+                        .text_color(theme.muted_foreground)
+                        .child(line.as_ref().map(|(n, _)| n.to_string()).unwrap_or_default()),
+                )
+                .child(div().flex_1().min_w_0().child(line.as_ref().map(|(_, t)| t.clone()).unwrap_or_default()))
+        };
+        range
+            .filter_map(|ix| {
+                let row = self.rows.get(ix)?;
+                Some(
+                    h_flex()
+                        .h(line_height)
+                        .w_full()
+                        .child(half(&row.left, row.left_kind))
+                        .child(div().w(px(1.)).h_full().bg(theme.border))
+                        .child(half(&row.right, row.right_kind))
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+}
+
+impl EventEmitter<PaneEvent> for DiffPanel {}
+
+impl Focusable for DiffPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Pane for DiffPanel {
+    fn kind(&self) -> &'static str {
+        DIFF
+    }
+
+    fn icon_element(&self, cx: &App) -> Option<AnyElement> {
+        Some(crate::file_icon::render(self.rel.rsplit('/').next().unwrap_or(&self.rel), 16., cx))
+    }
+
+    fn icon(&self, _: &App) -> IconName {
+        IconName::GitCompare
+    }
+
+    fn label(&self, _: &App) -> SharedString {
+        let name = self.rel.rsplit('/').next().unwrap_or(&self.rel);
+        let side = match &self.commit {
+            Some(commit) => commit.hash.chars().take(7).collect(),
+            None if self.staged => "Index".to_string(),
+            None => "Working Tree".to_string(),
+        };
+        format!("{name} ({side})").into()
+    }
+
+    fn dump(&self, _: &App) -> Value {
+        json!({
+            "path": self.path.to_string_lossy(),
+            "top": self.top.to_string_lossy(),
+            "rel": self.rel,
+            "staged": self.staged,
+            "hash": self.commit.as_ref().map(|c| c.hash.clone()),
+            "parent": self.commit.as_ref().and_then(|c| c.parent.clone()),
+            "old_rel": self.commit.as_ref().map(|c| c.old_rel.clone()),
+        })
+    }
+}
+
+impl Render for DiffPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let short = |rev: &str| rev.chars().take(7).collect::<String>();
+        let (left, right) = match &self.commit {
+            Some(commit) => (commit.parent.as_deref().map_or("(none)".to_string(), short), short(&commit.hash)),
+            None if self.staged => ("HEAD".into(), "Index".into()),
+            None => ("Index".into(), "Working Tree".into()),
+        };
+        let font_size = px(Settings::get(cx).editor_font_size);
+        let path = self.path.clone();
+        v_flex()
+            .id("diff")
+            .key_context("Diff")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .on_action(cx.listener(move |_, _: &OpenDiffedFile, _, cx| {
+                cx.emit(PaneEvent::OpenFile {
+                    path: path.clone(),
+                    line: None,
+                    column: None,
+                });
+            }))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .h(px(28.))
+                    .px_2()
+                    .gap_2()
+                    .text_xs()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_color(theme.muted_foreground)
+                    .child(div().flex_1().child(format!("{} — {left} ↔ {right}", self.rel)))
+                    .child(
+                        Button::new("open-file")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::FileText))
+                            .label("Open File")
+                            .tooltip("Open the file (Ctrl+Enter)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(PaneEvent::OpenFile {
+                                    path: this.path.clone(),
+                                    line: None,
+                                    column: None,
+                                });
+                            })),
+                    ),
+            )
+            .when_some(self.error.clone(), |this, error| this.child(div().p_2().text_color(theme.danger).child(error)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    // The ruler follows the list as it scrolls.
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(font_size)
+                            .child(
+                                uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
+                                    .track_scroll(&self.scroll)
+                                    .size_full(),
+                            )
+                            .child(gpui_kit::base::Scrollbar::vertical(&self.scroll)),
+                    )
+                    .child(self.render_ruler(px(Settings::get(cx).editor_font_size * 1.4), cx)),
+            )
+    }
+}
+
+impl DiffPanel {
+    /// The overview ruler beside the scrollbar, as VS Code's: where the
+    /// changes are in the whole file (removed lines red on the left, added
+    /// green on the right), the part in view shaded. Press or drag to go
+    /// there.
+    fn render_ruler(&self, line_height: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (red, green, view_color) = (theme.red, theme.green, theme.foreground.opacity(0.12));
+        let total = self.rows.len().max(1);
+        let marks: Vec<(usize, bool, bool)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, row)| {
+                let removed = row.left_kind == Side::Removed;
+                let added = row.right_kind == Side::Added;
+                (removed || added).then_some((ix, removed, added))
+            })
+            .collect();
+        let offset = -gpui_kit::base::ScrollbarHandle::offset(&self.scroll).y;
+        let bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> = Default::default();
+        let seek = {
+            let bounds = bounds.clone();
+            move |this: &mut Self, y: Pixels, cx: &mut Context<Self>| {
+                let Some(area) = bounds.get() else { return };
+                let t = ((y - area.top()) / area.size.height).clamp(0., 1.);
+                let row = ((t * this.rows.len() as f32) as usize).min(this.rows.len().saturating_sub(1));
+                this.scroll.scroll_to_item(row, ScrollStrategy::Center);
+                cx.notify();
+            }
+        };
+        let seek_move = seek.clone();
+        div()
+            .id("diff-ruler")
+            .flex_none()
+            .w(px(14.))
+            .h_full()
+            .border_l_1()
+            .border_color(theme.border)
+            .child(
+                canvas(
+                    {
+                        let bounds = bounds.clone();
+                        move |area, _, _| bounds.set(Some(area))
+                    },
+                    move |area, _, window, _| {
+                        let height = area.size.height;
+                        let row_height = (height / total as f32).max(px(2.));
+                        let half = area.size.width / 2.;
+                        // The part in view.
+                        let in_view = height / (line_height * total as f32);
+                        let top = offset / (line_height * total as f32);
+                        window.paint_quad(fill(
+                            Bounds::new(point(area.left(), area.top() + height * top.min(1.)), size(area.size.width, (height * in_view.min(1.)).max(px(4.)))),
+                            view_color,
+                        ));
+                        for &(ix, removed, added) in &marks {
+                            let y = area.top() + height * (ix as f32 / total as f32);
+                            if removed {
+                                window.paint_quad(fill(Bounds::new(point(area.left(), y), size(half, row_height)), red));
+                            }
+                            if added {
+                                window.paint_quad(fill(Bounds::new(point(area.left() + half, y), size(half, row_height)), green));
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            )
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| seek(this, event.position.y, cx)))
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    seek_move(this, event.position.y, cx);
+                }
+            }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Side, rows};
+
+    #[test]
+    fn replaced_lines_sit_side_by_side_with_gaps() {
+        let rows = rows("a\nb\nc\n", "a\nB\nB2\nc\n");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].left_kind, Side::Same);
+        assert_eq!((rows[1].left_kind, rows[1].right_kind), (Side::Removed, Side::Added));
+        assert_eq!(rows[1].left, Some((2, "b".into())));
+        assert_eq!(rows[1].right, Some((2, "B".into())));
+        assert_eq!((rows[2].left_kind, rows[2].right_kind), (Side::Gap, Side::Added));
+        assert_eq!(rows[3].right, Some((4, "c".into())));
+    }
+
+    #[test]
+    fn line_endings_are_not_changes() {
+        let rows = rows("a\nb\n", "a\r\nb\r\n");
+        assert!(rows.iter().all(|r| r.left_kind == Side::Same && r.right_kind == Side::Same));
+    }
+
+    #[test]
+    fn a_new_file_is_all_added() {
+        let rows = rows("", "x\ny\n");
+        assert!(rows.iter().all(|r| r.left_kind == Side::Gap && r.right_kind == Side::Added));
+    }
+}
