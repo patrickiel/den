@@ -6,7 +6,7 @@
 //! installed silently, after which den starts again.
 //!
 //! The key is `packaging/updater.pub` (the public half of `~/.tauri/den.key`,
-//! which scripts/release.mjs signs with). While that file is empty, a build
+//! which scripts/release.ts signs with). While that file is empty, a build
 //! does not update.
 
 use std::path::PathBuf;

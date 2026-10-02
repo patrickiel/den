@@ -49,7 +49,7 @@ State lives in `%APPDATA%\den\` (`settings.json`, `state.json`, `themes\`, `hook
 
 ## Releasing
 
-`node scripts/release.mjs [--dry-run] [--yes] [--bump major|minor|patch]`: Claude picks the bump (by `scripts/release-scale.md`) and writes the notes; the script bumps `Cargo.toml`, builds, packs the per-user NSIS installer (`packaging/installer.nsi`, NSIS from Tauri's cache), signs it with `~/.tauri/den.key` (Tauri's signer; password in `DEN_SIGNING_KEY_PASSWORD`), writes `latest.json`, tags and publishes a GitHub release on `patrickiel/den`.
+`node scripts/release.ts [--dry-run] [--yes] [--bump major|minor|patch]`: Claude picks the bump (by `scripts/release-scale.md`) and writes the notes; the script bumps `Cargo.toml`, builds, packs the per-user NSIS installer (`packaging/installer.nsi`, NSIS from Tauri's cache), signs it with `~/.tauri/den.key` (Tauri's signer; password in `DEN_SIGNING_KEY_PASSWORD`), writes `latest.json`, tags and publishes a GitHub release on `patrickiel/den`.
 
 Installed copies check `latest.json` a little after start and from ☰ ▸ Check for Updates, verify the installer against `packaging/updater.pub` (the key's public half, put there by the first release) and install it silently, then restart. Development builds and builds without a key do not update. The exe carries den's icon (its amber dev icon in debug builds).
 

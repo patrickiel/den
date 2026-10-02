@@ -4,8 +4,9 @@
 // with the updater key, writes the updater manifest (latest.json), commits, tags, pushes and
 // publishes a GitHub release that installed copies update from.
 //
-//   node scripts/release.mjs [--dry-run] [--yes] [--bump major|minor|patch]
+//   node scripts/release.ts [--dry-run] [--yes] [--bump major|minor|patch]
 //
+// Node runs the TypeScript directly (type stripping, Node 22.18+), so there is nothing to install.
 // --dry-run stops after showing the proposal; --yes skips the question (needed without a terminal,
 // e.g. from Claude Code); --bump overrides Claude's level. The first release (no tag yet) publishes
 // the current version.
@@ -33,7 +34,19 @@ const OUT_DIR = join(ROOT, "target", "release");
 const PUB_FILE = join(ROOT, "packaging", "updater.pub");
 /** Diff text for Claude is cut here; the log and the stat always go in full. */
 const DIFF_LIMIT = 150_000;
-const BUMPS = ["major", "minor", "patch"];
+const BUMPS = ["major", "minor", "patch"] as const;
+
+type Bump = (typeof BUMPS)[number];
+type Env = Record<string, string | undefined>;
+interface Tools {
+  key: string;
+  nsis: string;
+}
+interface Proposal {
+  bump: Bump;
+  reason: string;
+  notes: string;
+}
 
 const SCHEMA = {
   type: "object",
@@ -48,13 +61,17 @@ const SCHEMA = {
 
 // ---------- helpers ----------
 
-function fail(text) {
+function fail(text: string): never {
   console.error(`\n✗ ${text}`);
   process.exit(1);
 }
 
+function isBump(value: unknown): value is Bump {
+  return (BUMPS as readonly unknown[]).includes(value);
+}
+
 /** Run a program in the repo and return its trimmed stdout; throws with its stderr on failure. */
-function out(cmd, args, input) {
+function out(cmd: string, args: string[], input?: string): string {
   return execFileSync(cmd, args, {
     cwd: ROOT,
     encoding: "utf8",
@@ -65,7 +82,7 @@ function out(cmd, args, input) {
 }
 
 /** `out`, or null when the program fails (a missing tag, a missing tool). */
-function tryOut(cmd, args) {
+function tryOut(cmd: string, args: string[]): string | null {
   try {
     return out(cmd, args);
   } catch {
@@ -74,7 +91,7 @@ function tryOut(cmd, args) {
 }
 
 /** Run a command with its output on the terminal. `shell` for .cmd shims such as pnpm. */
-function run(cmd, args, opts = {}) {
+function run(cmd: string, args: string[], opts: { shell?: boolean; env?: Env } = {}): void {
   console.log(`\n> ${cmd} ${args.join(" ")}`);
   const r = opts.shell
     ? spawnSync([cmd, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" "), { cwd: ROOT, stdio: "inherit", env: opts.env, shell: true })
@@ -82,26 +99,38 @@ function run(cmd, args, opts = {}) {
   if (r.status !== 0) throw new Error(`${cmd} ${args[0]} failed${r.status === null ? "" : ` (exit ${r.status})`}`);
 }
 
-function currentVersion() {
+/**
+ * Add the saved user and machine PATH. A shell started before PATH last changed (one an IDE
+ * opened, say) misses newer entries, such as the ones for claude and pnpm.
+ */
+function refreshPath(): void {
+  const saved = tryOut("powershell", [
+    "-NoProfile", "-Command",
+    '[Environment]::GetEnvironmentVariable("PATH", "User") + ";" + [Environment]::GetEnvironmentVariable("PATH", "Machine")',
+  ]);
+  if (saved) process.env.PATH = `${process.env.PATH};${saved}`;
+}
+
+function currentVersion(): string {
   const m = /^version = "([^"]*)"/m.exec(readFileSync(join(ROOT, "Cargo.toml"), "utf8"));
   if (!m) fail("No version line in Cargo.toml.");
   return m[1];
 }
 
-function bumpVersion(version, bump) {
+function bumpVersion(version: string, bump: Bump): string {
   const [major, minor, patch] = version.split(".").map(Number);
   if ([major, minor, patch].some((n) => !Number.isInteger(n))) fail(`Cannot bump version "${version}".`);
   return bump === "major" ? `${major + 1}.0.0` : bump === "minor" ? `${major}.${minor + 1}.0` : `${major}.${minor}.${patch + 1}`;
 }
 
 /** The [package] version line, the first `version =` in Cargo.toml. */
-function setVersion(version) {
+function setVersion(version: string): void {
   const path = join(ROOT, "Cargo.toml");
   const text = readFileSync(path, "utf8");
   writeFileSync(path, text.replace(/^version = "[^"]*"/m, `version = "${version}"`));
 }
 
-function makensis() {
+function makensis(): string {
   const cached = join(process.env.LOCALAPPDATA ?? "", "tauri", "NSIS", "Bin", "makensis.exe");
   if (existsSync(cached)) return cached;
   if (tryOut("makensis", ["/VERSION"]) !== null) return "makensis";
@@ -109,13 +138,13 @@ function makensis() {
 }
 
 /** Tauri's signer, through pnpm dlx. */
-function signer() {
+function signer(): { cmd: string; args: string[] } {
   return { cmd: "pnpm", args: ["dlx", "@tauri-apps/cli@2"] };
 }
 
 // ---------- steps ----------
 
-function preflight(dryRun) {
+function preflight(dryRun: boolean): Tools {
   const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
   if (branch !== BRANCH) fail(`Releases are made from ${BRANCH}; this is ${branch}.`);
   if (!dryRun && out("git", ["status", "--porcelain"])) fail("The working tree has changes: commit or stash them first.");
@@ -141,7 +170,7 @@ function preflight(dryRun) {
 }
 
 /** The prompt for Claude: the scale, the version and what changed since `lastTag`. */
-function changesPrompt(version, lastTag, log) {
+function changesPrompt(version: string, lastTag: string | null, log: string): string {
   const scale = readFileSync(join(ROOT, "scripts/release-scale.md"), "utf8");
   const parts = [
     "Decide the version bump for the next release of den (a native Windows desktop app: a project terminal with",
@@ -165,7 +194,7 @@ function changesPrompt(version, lastTag, log) {
   return parts.join("\n");
 }
 
-function askClaude(prompt) {
+function askClaude(prompt: string): Proposal {
   console.log("Asking Claude for the bump and the release notes…");
   const raw = out("claude", [
     "-p", "--output-format", "json", "--json-schema", JSON.stringify(SCHEMA),
@@ -175,21 +204,21 @@ function askClaude(prompt) {
   const res = JSON.parse(raw);
   if (res.is_error) fail(`Claude failed: ${res.result ?? raw}`);
   const p = res.structured_output ?? JSON.parse(res.result);
-  if (!BUMPS.includes(p?.bump) || typeof p.notes !== "string") fail(`Unexpected answer from Claude: ${raw}`);
+  if (!isBump(p?.bump) || typeof p.notes !== "string") fail(`Unexpected answer from Claude: ${raw}`);
   return p;
 }
 
 /** Enter keeps the level, a level name changes it, anything else cancels. */
-async function confirm(bump) {
+async function confirm(bump: Bump): Promise<Bump | null> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const answer = (await rl.question("\nRelease? [Y/n, or major/minor/patch to change the level] ")).trim().toLowerCase();
   rl.close();
   if (answer === "" || answer === "y" || answer === "yes") return bump;
-  return BUMPS.includes(answer) ? answer : null;
+  return isBump(answer) ? answer : null;
 }
 
 /** Build den, pack and sign the installer; on failure put the release files back. Returns its name. */
-function build(version, { key, nsis }) {
+function build(version: string, { key, nsis }: Tools): string {
   const setup = `den_${version}_x64-setup.exe`;
   try {
     run("cargo", ["build", "--release"]);
@@ -201,13 +230,13 @@ function build(version, { key, nsis }) {
     });
   } catch (e) {
     out("git", ["checkout", "--", ...RELEASE_FILES]);
-    fail(`${e.message}. The release files are restored.`);
+    fail(`${(e as Error).message}. The release files are restored.`);
   }
   return setup;
 }
 
 /** The updater manifest next to the installer, in Tauri's format (src/update.rs reads it). */
-function writeManifest(version, notes, setup) {
+function writeManifest(version: string, notes: string, setup: string): string {
   const path = join(OUT_DIR, "latest.json");
   const manifest = {
     version,
@@ -226,13 +255,15 @@ function writeManifest(version, notes, setup) {
 
 // ---------- main ----------
 
-async function main() {
+async function main(): Promise<void> {
   const { values: opts } = parseArgs({
     options: { "dry-run": { type: "boolean" }, yes: { type: "boolean" }, bump: { type: "string" } },
   });
   const dryRun = opts["dry-run"] ?? false;
-  if (opts.bump !== undefined && !BUMPS.includes(opts.bump)) fail(`--bump takes major, minor or patch, not "${opts.bump}".`);
+  const forced = opts.bump;
+  if (forced !== undefined && !isBump(forced)) fail(`--bump takes major, minor or patch, not "${forced}".`);
 
+  refreshPath();
   const tools = preflight(dryRun);
 
   const current = currentVersion();
@@ -241,12 +272,12 @@ async function main() {
   if (!log) fail(`Nothing to release: no commits since ${lastTag}.`);
 
   const proposal = askClaude(changesPrompt(current, lastTag, log));
-  let bump = opts.bump ?? proposal.bump;
+  let bump: Bump = forced ?? proposal.bump;
   // The first release publishes the version the app already has, unless told otherwise.
-  const nextVersion = (b) => (lastTag || opts.bump ? bumpVersion(current, b) : current);
+  const nextVersion = (b: Bump) => (lastTag || forced ? bumpVersion(current, b) : current);
 
   console.log(`\n${current} → ${nextVersion(bump)}${lastTag ? ` (${bump})` : " (first release)"}`);
-  if (lastTag) console.log(`Claude: ${proposal.bump}: ${proposal.reason}${opts.bump ? ` (overridden by --bump ${opts.bump})` : ""}`);
+  if (lastTag) console.log(`Claude: ${proposal.bump}: ${proposal.reason}${forced ? ` (overridden by --bump ${forced})` : ""}`);
   console.log(`\n${proposal.notes}`);
   if (dryRun) return console.log("\nDry run: nothing changed.");
 
@@ -279,7 +310,7 @@ async function main() {
     run("gh", ghArgs);
   } catch (e) {
     fail(
-      `${e.message}. Steps before it are done; finish with:\n`
+      `${(e as Error).message}. Steps before it are done; finish with:\n`
       + `  git push origin ${BRANCH} ${tag}\n`
       + `  gh ${ghArgs.map((a) => (/[\s\\]/.test(a) ? `"${a}"` : a)).join(" ")}`,
     );

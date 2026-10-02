@@ -1,6 +1,6 @@
 # Release scale
 
-`node scripts/release.mjs` sends this file to Claude, along with the commits and the diff since the last release. Claude uses it to pick the version bump and to write the release notes. Edit it to change how releases are judged.
+`node scripts/release.ts` sends this file to Claude, along with the commits and the diff since the last release. Claude uses it to pick the version bump and to write the release notes. Edit it to change how releases are judged.
 
 ## Picking the bump
 

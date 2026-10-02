@@ -1,5 +1,5 @@
 ; den's installer: per user (no admin), into %LOCALAPPDATA%\Programs\den,
-; with a Start menu shortcut and an uninstaller. Built by scripts/release.mjs:
+; with a Start menu shortcut and an uninstaller. Built by scripts/release.ts:
 ;
 ;   makensis /DVERSION=0.2.0 /DEXE=target\release\den.exe /DOUTFILE=... packaging\installer.nsi
 ;
