@@ -108,7 +108,18 @@ function refreshPath(): void {
     "-NoProfile", "-Command",
     '[Environment]::GetEnvironmentVariable("PATH", "User") + ";" + [Environment]::GetEnvironmentVariable("PATH", "Machine")',
   ]);
-  if (saved) process.env.PATH = `${process.env.PATH};${saved}`;
+  if (!saved) return;
+  // Skip entries already present: cmd stops resolving commands once PATH passes 8191 characters.
+  const seen = new Set<string>();
+  process.env.PATH = `${process.env.PATH};${saved}`
+    .split(";")
+    .filter((p) => {
+      const k = p.trim().replace(/\\+$/, "").toLowerCase();
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .join(";");
 }
 
 function currentVersion(): string {
