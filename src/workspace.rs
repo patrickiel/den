@@ -1383,7 +1383,7 @@ impl Workspace {
         let Some(preset) = AppState::get(cx).presets.iter().find(|p| p.name == name).cloned() else {
             return;
         };
-        if let Err(err) = self.load_state(preset.layout, window, cx) {
+        if let Err(err) = self.load_state(crate::layout_file::preset(&preset.layout, &self.root), window, cx) {
             crate::toast::push(window, format!("Could not load layout \"{name}\": {err}"), cx);
             return;
         }
@@ -1392,6 +1392,7 @@ impl Workspace {
 
     fn save_preset(&mut self, name: String, cx: &mut Context<Self>) {
         let Ok(layout) = serde_json::to_value(self.dump_state(cx)) else { return };
+        let layout = crate::layout_file::shareable(&layout, &self.root);
         AppState::update(cx, |state| match state.presets.iter_mut().find(|p| p.name == name) {
             Some(preset) => preset.layout = layout,
             None => state.presets.push(LayoutPreset { name, layout }),

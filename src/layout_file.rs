@@ -8,6 +8,11 @@
 //! state (a terminal's scrollback) stays in den's session file and is merged
 //! back by tab id, as does where each floating window sits on this machine's
 //! screens (by the float's id).
+//!
+//! A Claude Code tab's conversation is machine state too: the file keeps a
+//! plain `claude`, and the session file's `--resume <id>` is merged back, so
+//! reopening the folder here resumes each tab's own conversation. A layout
+//! preset has no session file behind it, so its Claude tabs start anew.
 
 use std::path::{Path, PathBuf};
 
@@ -27,15 +32,13 @@ pub fn path(root: &Path) -> PathBuf {
 /// The layout as the folder keeps it: no machine state, paths relative.
 pub fn shareable(layout: &Value, root: &Path) -> Value {
     let mut layout = layout.clone();
-    if let Some(panes) = layout["panes"].as_object_mut() {
+    if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
         for pane in panes.values_mut() {
-            let Some(data) = pane["data"].as_object_mut() else { continue };
+            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else { continue };
             for key in MACHINE_KEYS {
                 data.remove(*key);
             }
-            // Claude Code conversations belong to this checkout: the folder's
-            // layout opens a new one instead of resuming any.
-            if data.contains_key("resume") {
+            if data.get("resume").is_some_and(Value::is_string) {
                 let program = data.get("program").and_then(Value::as_str).map(str::to_string);
                 let fresh = crate::backend::agent::claude_resume(program.as_deref(), None, true);
                 data.insert("program".into(), Value::String(fresh.clone()));
@@ -50,7 +53,7 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
             }
         }
     }
-    if let Some(floats) = layout["floats"].as_array_mut() {
+    if let Some(floats) = layout.get_mut("floats").and_then(Value::as_array_mut) {
         for float in floats.iter_mut().filter_map(Value::as_object_mut) {
             float.remove("bounds");
         }
@@ -62,10 +65,10 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
 /// machine state of the same tabs from `machine` (the session file's layout).
 pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
     let mut layout = layout;
-    if let Some(panes) = layout["panes"].as_object_mut() {
+    if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
         for (id, pane) in panes.iter_mut() {
             let kind = pane["kind"].clone();
-            let Some(data) = pane["data"].as_object_mut() else { continue };
+            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else { continue };
             for key in PATH_KEYS {
                 if let Some(text) = data.get(*key).and_then(Value::as_str) {
                     let path = Path::new(text);
@@ -82,10 +85,13 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
                         data.insert((*key).into(), value.clone());
                     }
                 }
+                if let Some(resume) = saved["data"].get("resume").filter(|r| r.is_string()) {
+                    data.insert("resume".into(), resume.clone());
+                }
             }
         }
     }
-    if let Some(floats) = layout["floats"].as_array_mut() {
+    if let Some(floats) = layout.get_mut("floats").and_then(Value::as_array_mut) {
         let saved = machine.and_then(|m| m["floats"].as_array());
         for float in floats.iter_mut().filter_map(Value::as_object_mut) {
             let bounds = saved
@@ -97,6 +103,12 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
         }
     }
     layout
+}
+
+/// A layout preset, saved in another project or by an older build, made fit
+/// for this one: no conversations or machine state, paths inside `root`.
+pub fn preset(layout: &Value, root: &Path) -> Value {
+    restore(shareable(layout, root), root, None)
 }
 
 /// `path` relative to `root` with forward slashes, when it is inside it.
@@ -122,7 +134,7 @@ pub fn text(layout: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{relative, restore, shareable};
+    use super::{preset, relative, restore, shareable};
     use serde_json::json;
     use std::path::Path;
 
@@ -150,6 +162,33 @@ mod tests {
         let back = restore(shared, root, Some(&full));
         assert_eq!(back["panes"]["1"]["data"]["cwd"], r"C:\repos\den\src");
         assert_eq!(back["panes"]["1"]["data"]["scrollback"], "old output");
+    }
+
+    #[test]
+    fn claude_conversations_are_not_kept() {
+        let root = Path::new(r"C:\repos\den");
+        let full = json!({
+            "root": {},
+            "panes": {
+                "1": { "kind": "Terminal", "data": { "program": "claude --resume abc-123", "resume": "claude --resume abc-123" } },
+                "2": { "kind": "Terminal", "data": { "program": null, "resume": null } }
+            }
+        });
+        let shared = shareable(&full, root);
+        assert_eq!(shared["panes"]["1"]["data"], json!({ "program": "claude", "resume": "claude" }));
+        assert_eq!(shared["panes"]["2"]["data"], json!({ "program": null, "resume": null }));
+        // Reopened on this machine, each tab resumes its own conversation.
+        let back = restore(shared.clone(), root, Some(&full));
+        assert_eq!(back["panes"]["1"]["data"]["resume"], "claude --resume abc-123");
+        assert_eq!(back["panes"]["2"]["data"]["resume"], json!(null));
+        // As a preset, with no session behind it, it starts anew.
+        assert_eq!(preset(&full, root)["panes"]["1"]["data"]["resume"], "claude");
+    }
+
+    #[test]
+    fn missing_keys_stay_missing() {
+        let old = json!({ "root": {}, "panes": { "1": { "kind": "Settings" } } });
+        assert_eq!(preset(&old, Path::new("x")), old);
     }
 
     #[test]
