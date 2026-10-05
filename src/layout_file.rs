@@ -13,6 +13,10 @@
 //! plain `claude`, and the session file's `--resume <id>` is merged back, so
 //! reopening the folder here resumes each tab's own conversation. A layout
 //! preset has no session file behind it, so its Claude tabs start anew.
+//!
+//! Every terminal, Claude Code's too, starts in the folder or a folder inside
+//! it: one saved elsewhere (a preset from another project) or whose folder
+//! is gone starts in the folder itself.
 
 use std::path::{Path, PathBuf};
 
@@ -61,8 +65,30 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
     layout
 }
 
+/// Whether a pane's data is a Claude Code tab's.
+fn is_claude(data: &serde_json::Map<String, Value>) -> bool {
+    let program = data.get("program").and_then(Value::as_str).unwrap_or("");
+    crate::backend::agent::program_of(program.split_whitespace().next().unwrap_or("")) == "claude"
+}
+
+/// Start terminal `data` in `root` when its folder is outside `root` or gone:
+/// the folder's terminals run in the folder. A Claude Code conversation from
+/// elsewhere is not found here, so such a tab starts anew.
+fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
+    let Some(cwd) = data.get("cwd").and_then(Value::as_str).map(PathBuf::from) else { return };
+    let outside = relative(&cwd, root).is_none();
+    if outside || !cwd.is_dir() {
+        data.insert("cwd".into(), Value::String(root.to_string_lossy().into_owned()));
+    }
+    if outside && is_claude(data) {
+        let program = data.get("program").and_then(Value::as_str).map(str::to_string);
+        data.insert("resume".into(), Value::String(crate::backend::agent::claude_resume(program.as_deref(), None, true)));
+    }
+}
+
 /// `layout` from the folder's file with paths made absolute again and the
 /// machine state of the same tabs from `machine` (the session file's layout).
+/// Every terminal starts inside `root`.
 pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
     let mut layout = layout;
     if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
@@ -88,6 +114,9 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
                 if let Some(resume) = saved["data"].get("resume").filter(|r| r.is_string()) {
                     data.insert("resume".into(), resume.clone());
                 }
+            }
+            if kind == crate::terminal::TERMINAL {
+                keep_inside(data, root);
             }
         }
     }
@@ -146,13 +175,19 @@ mod tests {
         assert_eq!(relative(Path::new(r"C:\repos\den2\x"), root), None);
     }
 
+    /// A real folder with a `src` folder in it: this crate's.
+    fn crate_root() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
     #[test]
     fn round_trip_keeps_machine_state_apart() {
-        let root = Path::new(r"C:\repos\den");
+        let root = crate_root();
+        let src = root.join("src").to_string_lossy().into_owned();
         let full = json!({
             "root": {},
             "panes": {
-                "1": { "kind": "Terminal", "data": { "cwd": r"C:\repos\den\src", "scrollback": "old output" } },
+                "1": { "kind": "Terminal", "data": { "cwd": src, "scrollback": "old output" } },
                 "2": { "kind": "File", "data": { "path": r"D:\elsewhere\a.txt" } }
             }
         });
@@ -160,8 +195,31 @@ mod tests {
         assert_eq!(shared["panes"]["1"]["data"], json!({ "cwd": "src" }));
         assert_eq!(shared["panes"]["2"]["data"]["path"], r"D:\elsewhere\a.txt");
         let back = restore(shared, root, Some(&full));
-        assert_eq!(back["panes"]["1"]["data"]["cwd"], r"C:\repos\den\src");
+        assert_eq!(back["panes"]["1"]["data"]["cwd"], src);
         assert_eq!(back["panes"]["1"]["data"]["scrollback"], "old output");
+    }
+
+    #[test]
+    fn terminals_start_inside_the_folder() {
+        let root = crate_root();
+        let here = root.to_string_lossy().into_owned();
+        let elsewhere = root.parent().unwrap().to_string_lossy().into_owned();
+        let layout = json!({
+            "root": {},
+            "panes": {
+                "1": { "kind": "Terminal", "data": { "cwd": elsewhere, "program": "claude", "resume": "claude --resume abc-123" } },
+                "2": { "kind": "Terminal", "data": { "cwd": elsewhere, "program": null, "resume": null } },
+                "3": { "kind": "Terminal", "data": { "cwd": root.join("gone").to_string_lossy(), "program": null } }
+            }
+        });
+        for back in [restore(layout.clone(), root, Some(&layout)), preset(&layout, root)] {
+            for id in ["1", "2", "3"] {
+                assert_eq!(back["panes"][id]["data"]["cwd"], here);
+            }
+            // Its conversation lives with the other folder: start anew.
+            assert_eq!(back["panes"]["1"]["data"]["resume"], "claude");
+            assert_eq!(back["panes"]["2"]["data"]["resume"], json!(null));
+        }
     }
 
     #[test]

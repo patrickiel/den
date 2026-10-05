@@ -300,7 +300,7 @@ impl Workspace {
         let restored = from_folder.map(|shared| crate::layout_file::restore(shared, &this.root, session.layout.as_ref()));
         let loaded = match restored.map(|layout| this.load_state(layout, window, cx)) {
             Some(Ok(())) => Ok(()),
-            _ => session.layout.map_or(Ok(()), |layout| this.load_state(layout, window, cx)),
+            _ => session.layout.map_or(Ok(()), |layout| this.load_state(crate::layout_file::restore(layout, &this.root, None), window, cx)),
         };
         if let Err(err) = loaded {
             eprintln!("den: the saved layout could not be read, starting fresh: {err}");
