@@ -33,6 +33,14 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
             for key in MACHINE_KEYS {
                 data.remove(*key);
             }
+            // Claude Code conversations belong to this checkout: the folder's
+            // layout opens a new one instead of resuming any.
+            if data.contains_key("resume") {
+                let program = data.get("program").and_then(Value::as_str).map(str::to_string);
+                let fresh = crate::backend::agent::claude_resume(program.as_deref(), None, true);
+                data.insert("program".into(), Value::String(fresh.clone()));
+                data.insert("resume".into(), Value::String(fresh));
+            }
             for key in PATH_KEYS {
                 if let Some(text) = data.get(*key).and_then(Value::as_str)
                     && let Some(rel) = relative(Path::new(text), root)
