@@ -1526,6 +1526,8 @@ dependencies = [
  "smallvec",
  "trash",
  "ureq",
+ "windows 0.62.2",
+ "windows-registry 0.6.1",
  "wry",
 ]
 

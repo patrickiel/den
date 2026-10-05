@@ -117,6 +117,8 @@ pub struct DiffPanel {
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
+    /// While the ruler's thumb is dragged: how far below its top it is held.
+    ruler_grab: Option<Pixels>,
 }
 
 impl DiffPanel {
@@ -131,6 +133,7 @@ impl DiffPanel {
             error: None,
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
+            ruler_grab: None,
         };
         this.reload();
         this
@@ -319,31 +322,35 @@ impl Render for DiffPanel {
                     // The ruler follows the list as it scrolls.
                     .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(font_size)
-                            .child(
-                                uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
-                                    .track_scroll(&self.scroll)
-                                    .size_full(),
-                            )
-                            .child(gpui_kit::base::Scrollbar::vertical(&self.scroll)),
+                        div().flex_1().min_w_0().h_full().font_family(theme.mono_font_family.clone()).text_size(font_size).child(
+                            uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
+                                .track_scroll(&self.scroll)
+                                .size_full(),
+                        ),
                     )
-                    .child(self.render_ruler(px(Settings::get(cx).editor_font_size * 1.4), cx)),
+                    .child(self.render_ruler(cx)),
             )
     }
 }
 
+/// The ruler's thumb (the part in view) within `area`: its top, its height
+/// and the list's furthest scroll offset.
+fn thumb(scroll: &UniformListScrollHandle, area: Bounds<Pixels>) -> (Pixels, Pixels, Pixels) {
+    use gpui_kit::base::ScrollbarHandle;
+    let viewport = ScrollbarHandle::viewport_bounds(scroll).size.height;
+    let content = ScrollbarHandle::content_size(scroll).height.max(viewport);
+    let max_offset = content - viewport;
+    let height = if max_offset > px(0.) { (area.size.height * (viewport / content)).max(px(16.)).min(area.size.height) } else { area.size.height };
+    let at = if max_offset > px(0.) { (-ScrollbarHandle::offset(scroll).y / max_offset).clamp(0., 1.) } else { 0. };
+    (area.top() + (area.size.height - height) * at, height, max_offset)
+}
+
 impl DiffPanel {
-    /// The overview ruler beside the scrollbar, as VS Code's: where the
+    /// The overview ruler, as VS Code's, and the view's scrollbar: where the
     /// changes are in the whole file (removed lines red on the left, added
-    /// green on the right), the part in view shaded. Press or drag to go
-    /// there.
-    fn render_ruler(&self, line_height: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+    /// green on the right), the part in view shaded. Drag the shaded part,
+    /// or press elsewhere to bring the view there.
+    fn render_ruler(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (red, green, view_color) = (theme.red, theme.green, theme.foreground.opacity(0.12));
         let total = self.rows.len().max(1);
@@ -357,19 +364,9 @@ impl DiffPanel {
                 (removed || added).then_some((ix, removed, added))
             })
             .collect();
-        let offset = -gpui_kit::base::ScrollbarHandle::offset(&self.scroll).y;
+        let scroll = self.scroll.clone();
+        let this = cx.weak_entity();
         let bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> = Default::default();
-        let seek = {
-            let bounds = bounds.clone();
-            move |this: &mut Self, y: Pixels, cx: &mut Context<Self>| {
-                let Some(area) = bounds.get() else { return };
-                let t = ((y - area.top()) / area.size.height).clamp(0., 1.);
-                let row = ((t * this.rows.len() as f32) as usize).min(this.rows.len().saturating_sub(1));
-                this.scroll.scroll_to_item(row, ScrollStrategy::Center);
-                cx.notify();
-            }
-        };
-        let seek_move = seek.clone();
         div()
             .id("diff-ruler")
             .flex_none()
@@ -387,13 +384,10 @@ impl DiffPanel {
                         let height = area.size.height;
                         let row_height = (height / total as f32).max(px(2.));
                         let half = area.size.width / 2.;
-                        // The part in view.
-                        let in_view = height / (line_height * total as f32);
-                        let top = offset / (line_height * total as f32);
-                        window.paint_quad(fill(
-                            Bounds::new(point(area.left(), area.top() + height * top.min(1.)), size(area.size.width, (height * in_view.min(1.)).max(px(4.)))),
-                            view_color,
-                        ));
+                        // Read here, not in render: the list has been laid
+                        // out by now, so the thumb is where this frame is.
+                        let (top, thumb_height, _) = thumb(&scroll, area);
+                        window.paint_quad(fill(Bounds::new(point(area.left(), top), size(area.size.width, thumb_height)), view_color));
                         for &(ix, removed, added) in &marks {
                             let y = area.top() + height * (ix as f32 / total as f32);
                             if removed {
@@ -403,16 +397,57 @@ impl DiffPanel {
                                 window.paint_quad(fill(Bounds::new(point(area.left() + half, y), size(half, row_height)), green));
                             }
                         }
+                        // A drag goes on outside the ruler: the window keeps
+                        // the mouse while the button is down.
+                        window.on_mouse_event({
+                            let this = this.clone();
+                            move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture {
+                                    _ = this.update(cx, |this, cx| {
+                                        if event.pressed_button == Some(MouseButton::Left) {
+                                            this.drag_ruler(area, event.position.y, cx);
+                                        } else {
+                                            this.ruler_grab = None;
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                                _ = this.update(cx, |this, _| this.ruler_grab = None);
+                            }
+                        });
                     },
                 )
                 .size_full(),
             )
-            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| seek(this, event.position.y, cx)))
-            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    seek_move(this, event.position.y, cx);
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let Some(area) = bounds.get() else { return };
+                    let (top, height, _) = thumb(&this.scroll, area);
+                    let y = event.position.y;
+                    // Held where it was taken; pressed elsewhere, centred there.
+                    this.ruler_grab = Some(if y >= top && y <= top + height { y - top } else { height / 2. });
+                    this.drag_ruler(area, y, cx);
+                }),
+            )
+    }
+
+    /// Scroll so the held thumb follows the mouse at `y`.
+    fn drag_ruler(&mut self, area: Bounds<Pixels>, y: Pixels, cx: &mut Context<Self>) {
+        use gpui_kit::base::ScrollbarHandle;
+        let Some(grab) = self.ruler_grab else { return };
+        let (_, height, max_offset) = thumb(&self.scroll, area);
+        let track = area.size.height - height;
+        if track <= px(0.) {
+            return;
+        }
+        let at = ((y - grab - area.top()) / track).clamp(0., 1.);
+        let x = ScrollbarHandle::offset(&self.scroll).x;
+        ScrollbarHandle::set_offset(&self.scroll, point(x, -(max_offset * at)));
+        cx.notify();
     }
 }
 

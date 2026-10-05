@@ -94,6 +94,9 @@ pub struct BrowserPanel {
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Shown by the workspace; hidden while another tab shows or a drag runs.
     shown: Rc<Cell<bool>>,
+    /// The native window the page is a child of: the one its tab is drawn
+    /// in, which changes when the tab moves to a floating window.
+    parent: Rc<Cell<Option<isize>>>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -107,6 +110,14 @@ impl HasWindowHandle for Parent {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         // SAFETY: the handle is the GPUI window's, which outlives its panes.
         Ok(unsafe { WindowHandle::borrow_raw(self.0) })
+    }
+}
+
+/// The native handle of `window`, for a page to be a child of.
+pub(crate) fn hwnd(window: &Window) -> Option<isize> {
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
     }
 }
 
@@ -187,6 +198,7 @@ impl BrowserPanel {
             url_input,
             bounds: Rc::default(),
             shown: Rc::new(Cell::new(false)),
+            parent: Rc::new(Cell::new(hwnd(window))),
             _events,
             _subscriptions,
         }
@@ -240,6 +252,15 @@ impl BrowserPanel {
         }
     }
 
+    /// The page's address.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn reload(&self) {
+        self.script("location.reload()");
+    }
+
     /// The workspace shows or hides the page (its tab showing, no drag).
     pub fn set_shown(&self, shown: bool) {
         if self.shown.replace(shown) != shown
@@ -249,6 +270,24 @@ impl BrowserPanel {
         }
     }
 
+
+    /// The page is a child of native window `from`, which is closing (its
+    /// tab moved out of a floating window): it moves to `to` now, as a
+    /// child dies with its parent, and is placed there on the next paint.
+    pub fn rehome(&self, from: isize, to: isize) {
+        if self.parent.get() != Some(from) {
+            return;
+        }
+        #[cfg(windows)]
+        if let Some(webview) = &self.webview
+            && wry::WebViewExtWindows::reparent(webview.as_ref(), to).is_ok()
+        {
+            self.parent.set(Some(to));
+            self.bounds.set(None);
+        }
+        #[cfg(not(windows))]
+        let _ = to;
+    }
 
     /// Take the keyboard back from the page.
     fn take_focus(&self) {
@@ -293,7 +332,7 @@ impl Render for BrowserPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let tool = |id: &'static str, icon: IconName, tip: &'static str| Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip);
-        let (bounds, shown, webview) = (self.bounds.clone(), self.shown.clone(), self.webview.clone());
+        let (bounds, shown, webview, parent) = (self.bounds.clone(), self.shown.clone(), self.webview.clone(), self.parent.clone());
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -324,8 +363,20 @@ impl Render for BrowserPanel {
                         // Puts the native page where this area is drawn.
                         canvas(
                             move |area, _, _| area,
-                            move |_, area, _, _| {
+                            move |_, area, window, _| {
                                 let Some(webview) = &webview else { return };
+                                // Drawn in another window (its tab moved to a
+                                // floating one, or back): the page goes along.
+                                #[cfg(windows)]
+                                if let Some(hwnd) = hwnd(window)
+                                    && parent.get() != Some(hwnd)
+                                    && wry::WebViewExtWindows::reparent(webview.as_ref(), hwnd).is_ok()
+                                {
+                                    parent.set(Some(hwnd));
+                                    bounds.set(None);
+                                }
+                                #[cfg(not(windows))]
+                                let _ = (&parent, window);
                                 if bounds.get() != Some(area) {
                                     bounds.set(Some(area));
                                     _ = webview.set_bounds(Rect {

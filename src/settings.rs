@@ -113,8 +113,11 @@ pub struct Settings {
     /// den's notification sounds were taken over once.
     pub imported_den_sounds: bool,
     /// Generate Commit Message: empty for the default model, a download URL
-    /// (one of the presets) or a local .gguf file.
+    /// (a preset's or a custom one) or a local .gguf file.
     pub ai_model: String,
+    /// Custom models added in Settings (URLs or .gguf files), listed after
+    /// the presets.
+    pub ai_custom_models: Vec<String>,
     pub ai_context_size: u32,
     /// CPU threads; 0 for llama.cpp's choice.
     pub ai_threads: u32,
@@ -165,6 +168,7 @@ impl Default for Settings {
             imported_den_buttons: false,
             imported_den_sounds: false,
             ai_model: String::new(),
+            ai_custom_models: Vec::new(),
             ai_context_size: 8192,
             ai_threads: 0,
             ai_gpu: true,

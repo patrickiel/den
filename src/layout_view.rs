@@ -11,20 +11,36 @@
 //! beside it; a group or container onto a group's side or a container's
 //! header goes beside that; anything into the band along the edge of the
 //! whole area goes beside everything.
+//!
+//! Each window (the main one, and each floating one) draws its own part of the
+//! tree this way. A tab, group or container let go outside the window moves
+//! into a new floating window there, or into the session's window under the
+//! pointer, as VS Code's editors do.
+//!
+//! The window a drag starts in keeps the mouse until it is let go, so the
+//! others never see it pass. Each window records where its drop zones were
+//! drawn (`Zones`); a drag over another window of the session works out its
+//! drop from those, and that window shows the hint and the dragged label.
+
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Side as MenuSide, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     tab::{Tab, TabBar},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
 use crate::{
+    browser::BrowserPanel,
+    diff::DiffPanel,
+    panels::FilePanel,
     settings::Settings,
+    terminal::TerminalPanel,
     defaults::Kind,
     layout::{Axis, Node, NodeId, PaneId, Side},
     workspace::Workspace,
@@ -50,6 +66,86 @@ pub struct GroupDrag {
     pub node: NodeId,
 }
 
+/// What a drag carries, as the workspace keeps it for a drop outside the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dragged {
+    Tab(PaneId),
+    Node(NodeId),
+}
+
+/// A drop zone as its window drew it, for a drag from another window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Zone {
+    /// A window's whole groups area, for its edge bands.
+    Area(NodeId),
+    /// A group's content, below its tab strip.
+    Group(NodeId),
+    /// A container's header.
+    Header(NodeId),
+    /// A group's tab strip.
+    Strip(NodeId),
+    /// Tab `ix` on a group's strip.
+    Tab(NodeId, usize),
+}
+
+/// Each window's drop zones (`None` for the main one), in its own pixels,
+/// from its last paint.
+pub(crate) type Zones = Rc<RefCell<HashMap<Option<u64>, Vec<(Zone, Bounds<Pixels>)>>>>;
+
+/// Records where `zone` is drawn: an empty box over its parent.
+fn zone_marker(zones: &Zones, float: Option<u64>, zone: Zone) -> impl IntoElement {
+    let zones = zones.clone();
+    canvas(move |bounds, _, _| zones.borrow_mut().entry(float).or_default().push((zone, bounds)), |_, _, _, _| {})
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+}
+
+/// The drop a drag at `at` would make among a window's `zones`, as the zones
+/// work it out for a drag inside that window: the edge bands first, then a
+/// tab strip (a tab goes before the tab it is over, or last), a group (a tab
+/// may join it), then a container's header (groups and containers only).
+pub(crate) fn hint_at(zones: &[(Zone, Bounds<Pixels>)], dragged: Dragged, at: Point<Pixels>) -> Option<DropHint> {
+    let edge = zones.iter().find_map(|(zone, bounds)| match zone {
+        Zone::Area(root) => edge_side(*bounds, at).map(|side| DropHint {
+            target: *root,
+            drop: Drop::Side(side),
+            edge: true,
+        }),
+        _ => None,
+    });
+    edge.or_else(|| {
+        zones.iter().find_map(|&(zone, bounds)| {
+            if !bounds.contains(&at) {
+                return None;
+            }
+            let (target, drop) = match (zone, dragged) {
+                (Zone::Strip(group), Dragged::Tab(_)) => {
+                    // Before the first tab the pointer is left of the middle of.
+                    let ix = zones
+                        .iter()
+                        .filter_map(|&(zone, tab)| match zone {
+                            Zone::Tab(g, ix) if g == group && at.x < tab.center().x => Some(ix),
+                            _ => None,
+                        })
+                        .min();
+                    (group, Drop::Tab(ix))
+                }
+                (Zone::Group(group), Dragged::Tab(_)) => (group, center_or_side(bounds, at)),
+                (Zone::Group(group), Dragged::Node(_)) => (group, Drop::Side(nearest_side(bounds, at))),
+                (Zone::Header(node), Dragged::Node(_)) => {
+                    // The side is taken against the whole container, as below.
+                    let tray = Bounds::new(bounds.origin, size(bounds.size.width, bounds.size.height * 6.));
+                    (node, Drop::Side(nearest_side(tray, at)))
+                }
+                _ => return None,
+            };
+            Some(DropHint { target, drop, edge: false })
+        })
+    })
+}
+
 /// A pinned preset's button being dragged to another place on the strip.
 #[derive(Clone)]
 pub struct PresetDrag {
@@ -68,6 +164,9 @@ pub enum Drop {
     /// Into the group (tabs only).
     Center,
     Side(Side),
+    /// Onto the group's strip, before tab `ix` or last (tabs only; set for
+    /// a drag from another window, the strip's own drops do it inside one).
+    Tab(Option<usize>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +178,7 @@ pub struct DropHint {
 }
 
 /// The side of `bounds` nearest the pointer, relative to its size.
-fn nearest_side(bounds: Bounds<Pixels>, at: Point<Pixels>) -> Side {
+pub(crate) fn nearest_side(bounds: Bounds<Pixels>, at: Point<Pixels>) -> Side {
     let u = (at.x - bounds.origin.x).as_f32() / bounds.size.width.as_f32().max(1.);
     let v = (at.y - bounds.origin.y).as_f32() / bounds.size.height.as_f32().max(1.);
     [(Side::Left, u), (Side::Right, 1. - u), (Side::Top, v), (Side::Bottom, 1. - v)]
@@ -123,7 +222,7 @@ fn drop_overlay(drop: Drop, cx: &App) -> impl IntoElement {
     let half = relative(0.5);
     let base = div().absolute().bg(cx.theme().drop_target).rounded(px(4.));
     deferred(match drop {
-        Drop::Center => base.inset_0(),
+        Drop::Center | Drop::Tab(_) => base.inset_0(),
         Drop::Side(Side::Left) => base.left_0().top_0().bottom_0().w(half),
         Drop::Side(Side::Right) => base.right_0().top_0().bottom_0().w(half),
         Drop::Side(Side::Top) => base.left_0().right_0().top_0().h(half),
@@ -164,9 +263,21 @@ impl Render for Nothing {
 }
 
 impl Workspace {
-    /// The groups area: the tree, its edge bands and where drops land.
-    pub(crate) fn render_layout(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let edge = self.drop_hint.filter(|hint| hint.edge);
+    /// A window's groups area (`root` is the main tree, or float `float`'s):
+    /// the tree, its edge bands and where drops land.
+    pub(crate) fn render_layout(&self, root: &Node, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let root_id = root.id();
+        let edge = self.drop_hint.filter(|hint| hint.edge && hint.target == root_id);
+        let this = cx.weak_entity();
+        // Drawn again from here on: the zones are recorded as they paint.
+        self.zones.borrow_mut().insert(float, Vec::new());
+        // A drag from another window, over this one: its label, as there.
+        let remote = self.remote_drag.filter(|(over, _)| *over == float).map(|(_, at)| at);
+        let remote_label = remote.and_then(|_| self.dragging).map(|dragged| match dragged {
+            Dragged::Tab(pane) => self.panes.get(&pane).map_or_else(|| SharedString::from("Tab"), |pane| pane.label(cx)),
+            Dragged::Node(node) if self.tree.find(node).is_some_and(Node::is_group) => "Group".into(),
+            Dragged::Node(_) => "Container".into(),
+        });
         div()
             .id("groups")
             .relative()
@@ -176,17 +287,24 @@ impl Workspace {
             // These run before the zones inside (capture order): the edge
             // bands win, and elsewhere the target starts empty for the zone
             // under the pointer to set.
-            .on_drag_move::<TabDrag>(cx.listener(|this, event: &DragMoveEvent<TabDrag>, _, cx| {
-                this.edge_hint(event.bounds, event.event.position, cx)
+            .on_drag_move::<TabDrag>(cx.listener(move |this, event: &DragMoveEvent<TabDrag>, window, cx| {
+                let dragged = Dragged::Tab(event.drag(cx).pane);
+                this.dragging = Some(dragged);
+                this.edge_hint(root_id, event.bounds, event.event.position, cx);
+                this.forward_drag(float, dragged, event.event.position, window, cx);
             }))
-            .on_drag_move::<GroupDrag>(cx.listener(|this, event: &DragMoveEvent<GroupDrag>, _, cx| {
-                this.edge_hint(event.bounds, event.event.position, cx)
+            .on_drag_move::<GroupDrag>(cx.listener(move |this, event: &DragMoveEvent<GroupDrag>, window, cx| {
+                let dragged = Dragged::Node(event.drag(cx).node);
+                this.dragging = Some(dragged);
+                this.edge_hint(root_id, event.bounds, event.event.position, cx);
+                this.forward_drag(float, dragged, event.event.position, window, cx);
             }))
             .on_drop::<TabDrag>(cx.listener(|this, drag: &TabDrag, _, cx| {
                 let hint = this.drop_hint.take();
                 match hint {
                     Some(DropHint { target, drop: Drop::Center, .. }) => this.move_tab(drag.pane, target, None, None, cx),
                     Some(DropHint { target, drop: Drop::Side(side), .. }) => this.move_tab(drag.pane, target, Some(side), None, cx),
+                    Some(DropHint { target, drop: Drop::Tab(ix), .. }) => this.move_tab(drag.pane, target, None, ix, cx),
                     None => cx.notify(),
                 }
             }))
@@ -197,14 +315,51 @@ impl Workspace {
                     _ => cx.notify(),
                 }
             }))
-            .child(self.render_node(&self.tree.root, window, cx))
+            .child(zone_marker(&self.zones, float, Zone::Area(root_id)))
+            .child(self.render_node(root, window, cx))
             .when_some(edge, |this, hint| this.child(drop_overlay(hint.drop, cx)))
+            .when_some(remote.zip(remote_label), |this, (at, label)| {
+                this.child(deferred(anchored().position(at).child(cx.new(|_| DragLabel(label)))).with_priority(3))
+            })
+            // A drag let go outside the window gets no drop event: the
+            // window keeps the mouse while a button is down, so the release
+            // still comes here, outside every hitbox.
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                                _ = this.update(cx, |this, cx| this.drag_released(float, event.position, window, cx));
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_0(),
+            )
             .into_any_element()
     }
 
-    fn edge_hint(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// A drag outside the window it started in (float `from`'s, or the main
+    /// one): over another window of the session, the drop it would make
+    /// there, from the zones that window drew.
+    fn forward_drag(&mut self, from: Option<u64>, dragged: Dragged, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&position);
+        let remote = if inside { None } else { self.window_under(from, crate::workspace::on_screen(window, position), cx) };
+        if let Some((float, local)) = remote {
+            let hint = self.zones.borrow().get(&float).and_then(|zones| hint_at(zones, dragged, local));
+            self.set_hint(hint, cx);
+        }
+        if self.remote_drag != remote {
+            self.remote_drag = remote;
+            cx.notify();
+        }
+    }
+
+    fn edge_hint(&mut self, root: NodeId, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let hint = edge_side(bounds, at).map(|side| DropHint {
-            target: self.tree.root.id(),
+            target: root,
             drop: Drop::Side(side),
             edge: true,
         });
@@ -228,8 +383,16 @@ impl Workspace {
 
     fn zone_overlay(&self, node: NodeId) -> Option<Drop> {
         self.drop_hint
-            .filter(|hint| !hint.edge && hint.target == node)
+            .filter(|hint| !hint.edge && hint.target == node && !matches!(hint.drop, Drop::Tab(_)))
             .map(|hint| hint.drop)
+    }
+
+    /// Where on `group`'s strip a drag from another window would put its tab.
+    fn strip_hint(&self, group: NodeId) -> Option<Option<usize>> {
+        match self.drop_hint {
+            Some(DropHint { target, drop: Drop::Tab(ix), .. }) if target == group => Some(ix),
+            _ => None,
+        }
     }
 
     fn render_node(&self, node: &Node, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -278,8 +441,8 @@ impl Workspace {
             );
         }
 
-        if id == self.tree.root.id() {
-            // The root holds every group and draws no frame.
+        if self.tree.is_root(id) {
+            // A window's root holds every group in it and draws no frame.
             return body.into_any_element();
         }
 
@@ -303,6 +466,7 @@ impl Workspace {
             .child(
                 h_flex()
                     .id(("container-header", id))
+                    .relative()
                     .flex_none()
                     .h(px(HEADER))
                     .gap_0p5()
@@ -334,7 +498,8 @@ impl Workspace {
                     )
                     .child(self.default_button(id, true, current, false, cx))
                     .children(self.container_actions(id, "container", true, cx))
-                    .child(self.container_menu(id, cx)),
+                    .child(self.container_menu(id, cx))
+                    .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Header(id))),
             )
             .child(div().flex_1().min_h_0().child(body))
             .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)))
@@ -471,6 +636,7 @@ impl Workspace {
                         .child("Open a file or a terminal here, or drag a tab in."),
                 ),
             })
+            .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Group(id)))
             .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)));
 
         v_flex()
@@ -492,6 +658,9 @@ impl Workspace {
         let theme = cx.theme();
         let close_buttons = Settings::get(cx).tab_close_button;
         let buttons = Settings::get(cx).group_buttons;
+        // A drag from another window over this strip (see `hint_at`).
+        let float = self.tree.float_of(group);
+        let strip_hint = self.strip_hint(group);
         let tab_elements: Vec<Tab> = tabs
             .iter()
             .enumerate()
@@ -503,9 +672,12 @@ impl Workspace {
                 let preview = self.preview == Some(pane_id);
                 Some(
                     Tab::new()
+                        .when(strip_hint == Some(Some(ix)), |tab| tab.border_l_2().border_color(cx.theme().drag_border))
                         .child(
                             h_flex()
+                                .relative()
                                 .gap_1p5()
+                                .child(zone_marker(&self.zones, float, Zone::Tab(group, ix)))
                                 .child(pane.icon_element(cx).unwrap_or_else(|| Icon::new(pane.icon(cx)).small().into_any_element()))
                                 .when(self.attention.contains(&pane_id), |this| {
                                     this.child(div().size(px(7.)).rounded_full().flex_none().bg(cx.theme().warning))
@@ -534,6 +706,8 @@ impl Workspace {
                             }
                             this.show_pane(pane_id, true, window, cx)
                         }))
+                        // Right-click: the strip's menu is for this tab.
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, _| this.tab_menu = Some(pane_id)))
                         // Middle-click closes, as in den.
                         .on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
@@ -641,6 +815,7 @@ impl Workspace {
                             this.open_more(group, window, cx);
                         }
                     }))
+                    .when(strip_hint == Some(None), |this| this.bg(cx.theme().drop_target))
                     .drag_over::<TabDrag>(|this, _, _, cx| this.bg(cx.theme().drop_target))
                     .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
                         this.drop_hint = None;
@@ -652,19 +827,105 @@ impl Workspace {
         // Grabbing the strip anywhere but on a tab (its empty part, the gaps
         // between the buttons) moves the whole group, as in den. A tab's own
         // drag starts first, so pressing a tab still drags just that tab.
+        //
+        // A tab's right-click menu is the strip's: the tab records itself as it
+        // is pressed (after the press clears it here) and the menu, built once
+        // the press is over, is for that tab; elsewhere on the strip it is
+        // empty and does not open.
+        let this = cx.weak_entity();
         div()
             .id(("group-grip", group))
+            .relative()
             .w_full()
             .flex_none()
             .cursor_grab()
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.tab_menu = None))
             .on_drag(GroupDrag { node: group }, |_, _, _, cx| cx.new(|_| DragLabel("Group".into())))
             .child(strip)
+            .child(zone_marker(&self.zones, float, Zone::Strip(group)))
+            .context_menu(move |menu, _, cx| {
+                let Some(workspace) = this.upgrade() else { return menu };
+                let workspace = workspace.read(cx);
+                match workspace.tab_menu {
+                    Some(pane) => workspace.tab_menu(menu, pane, &this, cx),
+                    None => menu,
+                }
+            })
             .into_any_element()
+    }
+
+    /// A tab's right-click menu, as VS Code's: closing it and the tabs beside
+    /// it, what its kind offers (its file's path, the page's address, another
+    /// terminal like it), and moving it.
+    fn tab_menu(&self, menu: PopupMenu, pane: PaneId, this: &WeakEntity<Self>, cx: &App) -> PopupMenu {
+        let (Some(group), Some(view)) = (self.tree.group_of(pane), self.panes.get(&pane).map(|p| p.view())) else { return menu };
+        let tabs = self.tree.tabs(group).to_vec();
+        let ix = tabs.iter().position(|p| *p == pane).unwrap_or(0);
+        let others: Vec<PaneId> = tabs.iter().copied().filter(|p| *p != pane).collect();
+        let right = tabs[ix + 1..].to_vec();
+        let (alone, last) = (others.is_empty(), right.is_empty());
+        let mut menu = menu
+            .item(act(this, "Close", move |ws, window, cx| ws.request_close_pane(pane, window, cx)).icon(Icon::new(IconName::X)))
+            .item(act(this, "Close Others", move |ws, window, cx| ws.request_close_panes(others.clone(), window, cx)).disabled(alone))
+            .item(act(this, "Close to the Right", move |ws, window, cx| ws.request_close_panes(right.clone(), window, cx)).disabled(last))
+            .item(act(this, "Close All", move |ws, window, cx| ws.request_close_panes(tabs.clone(), window, cx)).icon(Icon::new(IconName::ListX)));
+
+        if let Ok(file) = view.clone().downcast::<FilePanel>() {
+            let path = file.read(cx).path().to_path_buf();
+            menu = menu.separator();
+            if self.preview == Some(pane) {
+                menu = menu.item(act(this, "Keep Open", move |ws, _, cx| ws.toggle_preview(pane, cx)).icon(Icon::new(IconName::Pin)));
+            }
+            menu = path_items(menu, this, &path, &self.root);
+            let dir = path.parent().map(|dir| dir.to_path_buf()).unwrap_or_else(|| self.root.clone());
+            menu = menu.item(
+                act(this, "Open Terminal Here", move |ws, window, cx| ws.open_shell_in(dir.clone(), window, cx)).icon(Icon::new(IconName::SquareTerminal)),
+            );
+        } else if let Ok(diff) = view.clone().downcast::<DiffPanel>() {
+            let path = diff.read(cx).path().to_path_buf();
+            let open = path.clone();
+            menu = menu.separator().item(
+                act(this, "Open File", move |ws, window, cx| ws.open_file(open.clone(), false, window, cx))
+                    .icon(Icon::new(IconName::File))
+                    .disabled(!path.is_file()),
+            );
+            menu = path_items(menu, this, &path, &self.root);
+        } else if let Ok(browser) = view.clone().downcast::<BrowserPanel>() {
+            let url = browser.read(cx).url().to_string();
+            let open = url.clone();
+            menu = menu
+                .separator()
+                .item(act(this, "Copy URL", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))).icon(Icon::new(IconName::Link)))
+                .item(act(this, "Open in Default Browser", move |_, _, cx| cx.open_url(&open)).icon(Icon::new(IconName::SquareArrowOutUpRight)))
+                .item(act(this, "Reload", move |_, _, cx| browser.read(cx).reload()).icon(Icon::new(IconName::RotateCw)));
+        } else if let Ok(terminal) = view.clone().downcast::<TerminalPanel>() {
+            let cwd = terminal.read(cx).cwd().to_string_lossy().to_string();
+            menu = menu
+                .separator()
+                .item(act(this, "Duplicate", move |ws, window, cx| ws.duplicate_terminal(pane, window, cx)).icon(Icon::new(IconName::CopyPlus)))
+                .item(act(this, "Copy Working Directory", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))).icon(Icon::new(IconName::Copy)));
+        }
+
+        // Splitting moves the tab into a new group, as dragging it to a side
+        // does; a group's only tab has nowhere to split from.
+        let floating = self.tree.float_of(group).is_some();
+        let own_window = alone && floating && self.tree.is_root(group);
+        let menu = menu
+            .separator()
+            .item(act(this, "Split Right", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Right), None, cx)).icon(Icon::new(IconName::Columns2)).disabled(alone))
+            .item(act(this, "Split Down", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Bottom), None, cx)).icon(Icon::new(IconName::Rows2)).disabled(alone))
+            .separator()
+            .item(act(this, "Move into New Window", move |ws, _, cx| ws.float_tab(pane, None, cx)).icon(Icon::new(IconName::ExternalLink)).disabled(own_window));
+        if !floating {
+            return menu;
+        }
+        menu.item(act(this, "Move into Main Window", move |ws, _, cx| ws.dock_tab(pane, cx)).icon(Icon::new(IconName::Minimize)))
     }
 
     /// The container's ⋮ menu.
     fn container_menu(&self, node: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
+        let floating = self.tree.float_of(node).is_some();
         Button::new(("container-menu", node))
             .xsmall()
             .ghost()
@@ -681,6 +942,8 @@ impl Workspace {
                     .item(item("Add Group Below", |this, node, _, cx| this.split(node, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
                     .item(item("Flip Layout", |this, node, _, cx| this.flip(node, cx)).icon(Icon::new(IconName::RotateCw)))
                     .separator()
+                    .map(|menu| window_items(menu, &this, node, floating))
+                    .separator()
                     .item(item("Close Container", |this, node, window, cx| this.request_close_container(node, window, cx)))
             })
     }
@@ -688,6 +951,7 @@ impl Workspace {
     /// The group's ⋮ menu.
     fn group_menu(&self, group: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
+        let floating = self.tree.float_of(group).is_some();
         Button::new(("group-menu", group))
             .small()
             .ghost()
@@ -704,10 +968,59 @@ impl Workspace {
                     .item(item("Split Right", |this, group, _, cx| this.split(group, Side::Right, cx)).icon(Icon::new(IconName::Columns2)))
                     .item(item("Split Down", |this, group, _, cx| this.split(group, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
                     .separator()
+                    .map(|menu| window_items(menu, &this, group, floating))
+                    .separator()
                     .item(item("Close Group", |this, group, window, cx| this.request_close_group(group, window, cx)));
                 group_buttons_menu(menu, cx)
             })
     }
+}
+
+/// A menu item running `run` on the workspace.
+fn act(
+    this: &WeakEntity<Workspace>,
+    label: &'static str,
+    run: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> PopupMenuItem {
+    let this = this.clone();
+    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+        _ = this.update(cx, |ws, cx| run(ws, window, cx));
+    })
+}
+
+/// A file's paths, and showing it, as the Explorer's menu has them.
+fn path_items(menu: PopupMenu, this: &WeakEntity<Workspace>, path: &std::path::Path, root: &std::path::Path) -> PopupMenu {
+    let full = path.display().to_string();
+    let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
+    let (on_disk, inside) = (path.exists(), path.starts_with(root));
+    let (reveal, show) = (path.to_path_buf(), path.to_path_buf());
+    menu.item(act(this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.clone()))).icon(Icon::new(IconName::Copy)))
+        .item(act(this, "Copy Relative Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()))).icon(Icon::new(IconName::Copy)))
+        .item(act(this, "Reveal in File Explorer", move |_, _, _| crate::explorer::reveal(&reveal)).icon(Icon::new(IconName::FolderOpen)).disabled(!on_disk))
+        .item(
+            act(this, "Reveal in Explorer View", move |ws, window, cx| ws.reveal_in_sidebar(show.clone(), window, cx))
+                .icon(Icon::new(IconName::Files))
+                .disabled(!on_disk || !inside),
+        )
+}
+
+/// Moving a group or container into a window of its own, or (in a floating
+/// window) back into the main one, as VS Code's editor groups.
+fn window_items(menu: PopupMenu, this: &WeakEntity<Workspace>, node: NodeId, floating: bool) -> PopupMenu {
+    let new_window = this.clone();
+    let menu = menu.item(PopupMenuItem::new("Move into New Window").icon(Icon::new(IconName::ExternalLink)).on_click(move |_, _, cx| {
+        _ = new_window.update(cx, |this, cx| this.float_node(node, None, cx));
+    }));
+    if !floating {
+        return menu;
+    }
+    let main = this.clone();
+    menu.item(PopupMenuItem::new("Move into Main Window").icon(Icon::new(IconName::Minimize)).on_click(move |_, _, cx| {
+        _ = main.update(cx, |this, cx| {
+            let root = this.tree.root.id();
+            this.move_node(node, root, Side::Right, cx)
+        });
+    }))
 }
 
 /// The strip's buttons, checked when shown, as den's ⋮ menu lists them:
@@ -741,4 +1054,57 @@ fn group_buttons_menu(menu: PopupMenu, cx: &App) -> PopupMenu {
 /// program it runs, a local server's port, or its letter.
 pub fn preset_badge(preset: &crate::settings::Preset, cx: &App) -> AnyElement {
     crate::preset_icon::render(preset, preset.icon.as_deref(), 16., cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Drop, DropHint, Dragged, Zone, hint_at};
+    use crate::layout::Side;
+    use gpui_kit::{Bounds, Pixels, point, px, size};
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn drops_from_another_window_follow_its_zones() {
+        // Area 1 holds container 10 (header at the top) with groups 2 and 3 side by side.
+        let zones = [
+            (Zone::Area(1), rect(0., 0., 1000., 600.)),
+            (Zone::Header(10), rect(40., 40., 920., 24.)),
+            (Zone::Group(2), rect(40., 64., 460., 500.)),
+            (Zone::Group(3), rect(500., 64., 460., 500.)),
+        ];
+        let tab = Dragged::Tab(100);
+        let group = Dragged::Node(4);
+        let hint = |dragged, x, y| hint_at(&zones, dragged, point(px(x), px(y)));
+        // The edge bands go beside everything.
+        assert_eq!(hint(tab, 5., 300.), Some(DropHint { target: 1, drop: Drop::Side(Side::Left), edge: true }));
+        // A tab joins a group in its middle, or starts one beside it.
+        assert_eq!(hint(tab, 270., 300.), Some(DropHint { target: 2, drop: Drop::Center, edge: false }));
+        assert_eq!(hint(tab, 950., 300.), Some(DropHint { target: 3, drop: Drop::Side(Side::Right), edge: false }));
+        // A group never joins: beside the group, or the container by its header.
+        assert!(matches!(hint(group, 270., 300.), Some(DropHint { target: 2, drop: Drop::Side(_), edge: false })));
+        assert_eq!(hint(group, 60., 50.), Some(DropHint { target: 10, drop: Drop::Side(Side::Left), edge: false }));
+        assert_eq!(hint(tab, 500., 50.), None);
+    }
+
+    #[test]
+    fn tabs_from_another_window_go_onto_a_strip() {
+        let zones = [
+            (Zone::Area(1), rect(0., 0., 1000., 600.)),
+            (Zone::Strip(2), rect(100., 100., 400., 30.)),
+            (Zone::Tab(2, 0), rect(110., 105., 80., 20.)),
+            (Zone::Tab(2, 1), rect(200., 105., 80., 20.)),
+            (Zone::Group(2), rect(100., 130., 400., 300.)),
+        ];
+        let hint = |dragged, x| hint_at(&zones, dragged, point(px(x), px(115.)));
+        let onto = |ix| Some(DropHint { target: 2, drop: Drop::Tab(ix), edge: false });
+        // Before the tab whose middle is right of the pointer, else last.
+        assert_eq!(hint(Dragged::Tab(100), 120.), onto(Some(0)));
+        assert_eq!(hint(Dragged::Tab(100), 180.), onto(Some(1)));
+        assert_eq!(hint(Dragged::Tab(100), 400.), onto(None));
+        // A group does not go onto a strip.
+        assert_eq!(hint(Dragged::Node(4), 400.), None);
+    }
 }

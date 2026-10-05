@@ -224,6 +224,10 @@ pub struct TerminalPanel {
     last_alert: Option<std::time::Instant>,
     /// Wheel movement not yet sent as a page to a full-screen program.
     wheel_lines: i32,
+    /// Redrawing on focus and blur, in the window the terminal is drawn in
+    /// (it changes when its tab moves to a floating window).
+    focus_window: Option<WindowId>,
+    _focus_subscriptions: Vec<Subscription>,
     _reader: Option<Task<()>>,
 }
 
@@ -269,6 +273,8 @@ impl TerminalPanel {
             claude_session: None,
             program_running: program_is_set,
             wheel_lines: 0,
+            focus_window: None,
+            _focus_subscriptions: Vec::new(),
             _reader: None,
         };
         if let Some(history) = history.filter(|h| !h.trim().is_empty()) {
@@ -282,10 +288,22 @@ impl TerminalPanel {
         if let Err(err) = this.spawn(&shell, command, columns, lines, cx) {
             this.error = Some(format!("Could not start the shell: {err}").into());
         }
-        let focus = this.focus_handle.clone();
-        cx.on_focus(&focus, window, |_, _, cx| cx.notify()).detach();
-        cx.on_blur(&focus, window, |_, _, cx| cx.notify()).detach();
+        this.watch_focus(window, cx);
         this
+    }
+
+    /// Redraw when focus comes or goes in `window`, once per window.
+    fn watch_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = window.window_handle().window_id();
+        if self.focus_window == Some(id) {
+            return;
+        }
+        self.focus_window = Some(id);
+        let focus = self.focus_handle.clone();
+        self._focus_subscriptions = vec![
+            cx.on_focus(&focus, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&focus, window, |_, _, cx| cx.notify()),
+        ];
     }
 
     fn spawn(&mut self, shell: &str, command: Option<String>, columns: usize, lines: usize, cx: &mut Context<Self>) -> anyhow::Result<()> {
@@ -680,6 +698,11 @@ impl TerminalPanel {
         lines[lines.len().saturating_sub(max)..].join("\n")
     }
 
+    /// The folder the shell is in, as its prompt last reported.
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
     pub fn program(&self) -> Option<&str> {
         self.program.as_deref()
     }
@@ -780,6 +803,7 @@ impl Pane for TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.watch_focus(window, cx);
         let focused = self.focus_handle.is_focused(window);
         let theme = cx.theme();
         let link_cursor = self.hover_link.is_some();

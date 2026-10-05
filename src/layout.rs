@@ -8,6 +8,11 @@
 //! Splits keep their own axis, so a container can run the same way as the one
 //! around it; nothing merges them. Normalising only drops empty splits and
 //! collapses a split left with one child into that child.
+//!
+//! Besides the main window's root, the tree holds the floating windows, each
+//! with a root of its own (a group or a container moved out of the window).
+//! Lookups and edits reach into them all; moving a float's root away (or
+//! emptying it) ends that float.
 
 use std::collections::HashMap;
 
@@ -150,9 +155,20 @@ fn renormalise(sizes: &mut [f32]) {
     }
 }
 
+/// A floating window's part of the tree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Float {
+    pub id: u64,
+    pub root: Node,
+    /// Where its window was on screen: x, y, width, height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<[f32; 4]>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tree {
     pub root: Node,
+    pub floats: Vec<Float>,
     next_id: u64,
 }
 
@@ -165,15 +181,99 @@ impl Tree {
                 tabs: Vec::new(),
                 active: 0,
             },
+            floats: Vec::new(),
             next_id: 2,
         }
     }
 
+    #[cfg(test)]
     pub fn from_root(root: Node) -> Self {
-        let next_id = root.max_id() + 1;
-        let mut tree = Self { root, next_id };
+        Self::with_floats(root, Vec::new())
+    }
+
+    pub fn with_floats(root: Node, floats: Vec<Float>) -> Self {
+        let next_id = floats.iter().map(|f| f.id.max(f.root.max_id())).fold(root.max_id(), u64::max) + 1;
+        let mut tree = Self { root, floats, next_id };
         tree.normalize();
         tree
+    }
+
+    /// The main window's root, then each float's.
+    fn roots(&self) -> impl Iterator<Item = &Node> {
+        std::iter::once(&self.root).chain(self.floats.iter().map(|f| &f.root))
+    }
+
+    fn walk<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
+        for root in self.roots() {
+            root.walk(f);
+        }
+    }
+
+    fn find_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        if let Some(node) = self.root.find_mut(id) {
+            return Some(node);
+        }
+        self.floats.iter_mut().find_map(|f| f.root.find_mut(id))
+    }
+
+    /// The float `id` lies in; `None` for the main window.
+    pub fn float_of(&self, id: NodeId) -> Option<u64> {
+        self.floats.iter().find(|f| f.root.find(id).is_some()).map(|f| f.id)
+    }
+
+    /// The root of a window: the main one for `None`.
+    pub fn window_root(&self, float: Option<u64>) -> Option<&Node> {
+        match float {
+            None => Some(&self.root),
+            Some(id) => self.floats.iter().find(|f| f.id == id).map(|f| &f.root),
+        }
+    }
+
+    /// Whether `id` is the root of a window (drawn without a container's frame).
+    pub fn is_root(&self, id: NodeId) -> bool {
+        self.roots().any(|root| root.id() == id)
+    }
+
+    pub fn set_float_bounds(&mut self, float: u64, bounds: [f32; 4]) {
+        if let Some(f) = self.floats.iter_mut().find(|f| f.id == float) {
+            f.bounds = Some(bounds);
+        }
+    }
+
+    /// Move `src` into a new float; its id. The main window's root leaves
+    /// an empty group behind; a float's root is a window already.
+    pub fn float_out(&mut self, src: NodeId, bounds: Option<[f32; 4]>) -> Option<(u64, HashMap<NodeId, NodeId>)> {
+        let (node, remap) = if self.root.id() == src {
+            let empty = Node::Group {
+                id: self.mint(),
+                tabs: Vec::new(),
+                active: 0,
+            };
+            (std::mem::replace(&mut self.root, empty), HashMap::new())
+        } else if self.floats.iter().any(|f| f.root.id() == src) {
+            return None;
+        } else {
+            self.detach(src)?
+        };
+        let id = self.mint();
+        self.floats.push(Float { id, root: node, bounds });
+        Some((id, remap))
+    }
+
+    /// A new float holding one empty group: the float's id and the group's.
+    pub fn new_float(&mut self, bounds: Option<[f32; 4]>) -> (u64, NodeId) {
+        let group = self.mint();
+        let id = self.mint();
+        self.floats.push(Float {
+            id,
+            root: Node::Group {
+                id: group,
+                tabs: Vec::new(),
+                active: 0,
+            },
+            bounds,
+        });
+        (id, group)
     }
 
     /// A fresh id, for a node or a pane.
@@ -190,11 +290,12 @@ impl Tree {
     }
 
     pub fn find(&self, id: NodeId) -> Option<&Node> {
-        self.root.find(id)
+        self.roots().find_map(|root| root.find(id))
     }
 
+    /// Every group, the main window's first.
     pub fn groups(&self) -> Vec<NodeId> {
-        self.root.groups()
+        self.roots().flat_map(Node::groups).collect()
     }
 
     /// The groups under `id` (itself, for a group).
@@ -218,7 +319,7 @@ impl Tree {
 
     pub fn panes(&self) -> Vec<PaneId> {
         let mut out = Vec::new();
-        self.root.walk(&mut |node| {
+        self.walk(&mut |node| {
             if let Node::Group { tabs, .. } = node {
                 out.extend(tabs.iter().copied());
             }
@@ -228,7 +329,7 @@ impl Tree {
 
     pub fn group_of(&self, pane: PaneId) -> Option<NodeId> {
         let mut found = None;
-        self.root.walk(&mut |node| {
+        self.walk(&mut |node| {
             if let Node::Group { id, tabs, .. } = node
                 && tabs.contains(&pane)
             {
@@ -241,7 +342,7 @@ impl Tree {
     /// The split holding `id` and its index there.
     pub fn parent_of(&self, id: NodeId) -> Option<(NodeId, usize)> {
         let mut found = None;
-        self.root.walk(&mut |node| {
+        self.walk(&mut |node| {
             if let Node::Split { id: split, children, .. } = node
                 && let Some(ix) = children.iter().position(|child| child.id() == id)
             {
@@ -295,7 +396,7 @@ impl Tree {
     pub fn insert_beside(&mut self, target: NodeId, side: Side, node: Node) -> bool {
         let axis = side.axis();
         if let Some((parent, ix)) = self.parent_of(target)
-            && let Some(Node::Split { axis: parent_axis, children, sizes, .. }) = self.root.find_mut(parent)
+            && let Some(Node::Split { axis: parent_axis, children, sizes, .. }) = self.find_mut(parent)
             && *parent_axis == axis
         {
             let half = sizes[ix] / 2.0;
@@ -306,7 +407,7 @@ impl Tree {
             return true;
         }
         let split_id = self.mint();
-        let Some(slot) = self.root.find_mut(target) else { return false };
+        let Some(slot) = self.find_mut(target) else { return false };
         let existing = std::mem::replace(
             slot,
             Node::Group {
@@ -338,9 +439,13 @@ impl Tree {
 
     /// Take `id` out of the tree. The tree is normalised afterwards; the
     /// returned map names, for each split that collapsed, what took its place.
+    /// A float's root takes its float with it; the main root stays.
     pub fn detach(&mut self, id: NodeId) -> Option<(Node, HashMap<NodeId, NodeId>)> {
+        if let Some(ix) = self.floats.iter().position(|f| f.root.id() == id) {
+            return Some((self.floats.remove(ix).root, HashMap::new()));
+        }
         let (parent, ix) = self.parent_of(id)?;
-        let Some(Node::Split { children, sizes, .. }) = self.root.find_mut(parent) else {
+        let Some(Node::Split { children, sizes, .. }) = self.find_mut(parent) else {
             return None;
         };
         let node = children.remove(ix);
@@ -366,7 +471,7 @@ impl Tree {
 
     /// Lay a container's children out along its other axis.
     pub fn flip(&mut self, split: NodeId) -> bool {
-        match self.root.find_mut(split) {
+        match self.find_mut(split) {
             Some(Node::Split { axis, .. }) => {
                 *axis = axis.other();
                 true
@@ -378,7 +483,7 @@ impl Tree {
     /// Move the boundary after child `ix` of `split` to `at` (a fraction of
     /// the split from its start), keeping each side at least `min`.
     pub fn resize(&mut self, split: NodeId, ix: usize, at: f32, min: f32) {
-        let Some(Node::Split { sizes, .. }) = self.root.find_mut(split) else { return };
+        let Some(Node::Split { sizes, .. }) = self.find_mut(split) else { return };
         if ix + 1 >= sizes.len() {
             return;
         }
@@ -390,7 +495,7 @@ impl Tree {
     }
 
     pub fn add_tab(&mut self, group: NodeId, pane: PaneId, ix: Option<usize>, activate: bool) -> bool {
-        let Some(Node::Group { tabs, active, .. }) = self.root.find_mut(group) else { return false };
+        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else { return false };
         let at = ix.unwrap_or(tabs.len()).min(tabs.len());
         tabs.insert(at, pane);
         if activate || tabs.len() == 1 {
@@ -404,7 +509,7 @@ impl Tree {
     /// Take a tab out of its group (which stays, empty or not).
     pub fn remove_tab(&mut self, pane: PaneId) -> Option<NodeId> {
         let group = self.group_of(pane)?;
-        let Some(Node::Group { tabs, active, .. }) = self.root.find_mut(group) else { return None };
+        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else { return None };
         let ix = tabs.iter().position(|p| *p == pane)?;
         tabs.remove(ix);
         if ix < *active || (*active >= tabs.len() && *active > 0) {
@@ -429,7 +534,7 @@ impl Tree {
 
     pub fn activate(&mut self, pane: PaneId) {
         let Some(group) = self.group_of(pane) else { return };
-        if let Some(Node::Group { tabs, active, .. }) = self.root.find_mut(group)
+        if let Some(Node::Group { tabs, active, .. }) = self.find_mut(group)
             && let Some(ix) = tabs.iter().position(|p| *p == pane)
         {
             *active = ix;
@@ -456,6 +561,11 @@ impl Tree {
                 active: 0,
             },
         };
+        for Float { id, root, bounds } in std::mem::take(&mut self.floats) {
+            if let Some(root) = tidy(root, &mut remap) {
+                self.floats.push(Float { id, root, bounds });
+            }
+        }
         remap
     }
 }
@@ -676,6 +786,58 @@ mod tests {
         assert_eq!(tree.neighbor(3, Side::Top), Some(2));
         assert_eq!(tree.neighbor(1, Side::Left), None);
         assert_eq!(tree.neighbor(2, Side::Top), None);
+    }
+
+    #[test]
+    fn floating_out_and_back() {
+        let mut tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[100]), group(2, &[101])]));
+        let (float, remap) = tree.float_out(2, None).unwrap();
+        // 10 collapsed into 1, which is the main root now.
+        assert_eq!(remap.get(&10), Some(&1));
+        assert_eq!(tree.root.id(), 1);
+        assert_eq!(tree.float_of(2), Some(float));
+        assert_eq!(tree.group_of(101), Some(2));
+        assert_eq!(tree.panes(), vec![100, 101]);
+        // A float's root is a window already.
+        assert!(tree.float_out(2, None).is_none());
+        // Moving its root back ends the float.
+        assert!(tree.move_node(2, 1, Side::Right).is_some());
+        assert!(tree.floats.is_empty());
+        assert_eq!(tree.groups(), vec![1, 2]);
+    }
+
+    #[test]
+    fn floating_the_main_root_leaves_an_empty_group() {
+        let mut tree = Tree::from_root(group(1, &[100]));
+        let (float, _) = tree.float_out(1, None).unwrap();
+        assert_ne!(tree.root.id(), 1);
+        assert!(tree.root.is_group());
+        assert_eq!(tree.window_root(Some(float)).map(Node::id), Some(1));
+    }
+
+    #[test]
+    fn edits_reach_into_floats() {
+        let mut tree = Tree::from_root(group(1, &[100]));
+        let (float, group) = tree.new_float(None);
+        assert!(tree.move_tab(100, group, None));
+        let new = tree.split(group, Side::Bottom).unwrap();
+        assert_eq!(tree.float_of(new), Some(float));
+        assert_eq!(tree.neighbor(group, Side::Bottom), Some(new));
+        assert_eq!(tree.neighbor(group, Side::Left), None);
+        // Detaching a group of a float's split collapses it there.
+        tree.detach(new);
+        assert_eq!(tree.window_root(Some(float)).map(Node::id), Some(group));
+    }
+
+    #[test]
+    fn floats_round_trip_and_keep_their_ids() {
+        let mut tree = Tree::from_root(group(1, &[100]));
+        let (float, _) = tree.new_float(Some([1., 2., 3., 4.]));
+        let json = serde_json::to_string(&tree.floats).unwrap();
+        let back = Tree::with_floats(tree.root.clone(), serde_json::from_str(&json).unwrap());
+        assert_eq!(back.floats, tree.floats);
+        let mut back = back;
+        assert!(back.mint() > float);
     }
 
     #[test]

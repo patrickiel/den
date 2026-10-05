@@ -673,7 +673,7 @@ impl ScmView {
             return self.run_generate(config, window, cx);
         }
         let preset = ai::MODEL_PRESETS.iter().find(|p| p.url == config.model);
-        let model = preset.map_or_else(|| "the model".to_string(), |p| format!("{} ({})", p.name, p.size));
+        let model = preset.map_or_else(|| ai::model_name(&config.model), |p| format!("{} ({})", p.name, p.size));
         let mut parts = Vec::new();
         if !status.runtime {
             parts.push("the llama.cpp runtime (about 100 MB)".to_string());

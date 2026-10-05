@@ -30,8 +30,9 @@ use crate::{
     backend::watch,
     diff::DiffPanel,
     explorer::{Explorer, ExplorerEvent},
-    layout::{Node, NodeId, PaneId, Side, Tree},
-    layout_view::DropHint,
+    float::FloatWindow,
+    layout::{Float, Node, NodeId, PaneId, Side, Tree},
+    layout_view::{Drop, Dragged, DropHint, Zones},
     pane::{self, Pane as _, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::Repo,
@@ -51,6 +52,9 @@ pub struct LayoutState {
     pub defaults: Vec<GroupDefault>,
     #[serde(default)]
     pub active: Option<NodeId>,
+    /// What the floating windows hold, and where they were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floats: Vec<Float>,
 }
 
 /// The taskbar's jump list: right-click den on the taskbar
@@ -146,6 +150,24 @@ pub struct Workspace {
     pub(crate) alt_held: bool,
     /// Tabs whose program wanted the user while they looked elsewhere.
     pub(crate) attention: std::collections::HashSet<PaneId>,
+    /// The main window, and each floating window by its float's id.
+    window: AnyWindowHandle,
+    float_windows: HashMap<u64, AnyWindowHandle>,
+    /// The group last active in each window (`None` for the main one), for
+    /// coming back to that window.
+    last_active: HashMap<Option<u64>, NodeId>,
+    /// The tab or group being dragged, for a drop outside every window.
+    pub(crate) dragging: Option<Dragged>,
+    /// Where each window drew its drop zones, for a drag from another one.
+    pub(crate) zones: Zones,
+    /// A drag from another window over this float's window (`None` for the
+    /// main one): where the pointer is in it.
+    pub(crate) remote_drag: Option<(Option<u64>, Point<Pixels>)>,
+    /// The tab last right-clicked, for its strip's context menu.
+    pub(crate) tab_menu: Option<PaneId>,
+    /// The float just made, whose window comes to the front when it opens
+    /// (those coming back with the session do not).
+    activate_float: Option<u64>,
     explorer: Entity<Explorer>,
     search: Entity<SearchView>,
     scm: Entity<ScmView>,
@@ -218,7 +240,7 @@ impl Workspace {
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.repo.update(cx, |repo, cx| repo.refresh(cx));
-                    this.seen(this.active_group, cx);
+                    this.window_activated(None, cx);
                 }
             }),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
@@ -242,6 +264,14 @@ impl Workspace {
             drop_hint: None,
             alt_held: false,
             attention: Default::default(),
+            window: window.window_handle(),
+            float_windows: HashMap::new(),
+            last_active: HashMap::new(),
+            dragging: None,
+            zones: Zones::default(),
+            remote_drag: None,
+            tab_menu: None,
+            activate_float: None,
             explorer,
             search,
             scm,
@@ -283,7 +313,7 @@ impl Workspace {
     /// Replace the arrangement with a saved one, making its panes anew.
     pub fn load_state(&mut self, value: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let state: LayoutState = serde_json::from_value(value)?;
-        let mut tree = Tree::from_root(state.root);
+        let mut tree = Tree::with_floats(state.root, state.floats);
         let mut panes = HashMap::new();
         for id in tree.panes() {
             match state.panes.get(&id) {
@@ -313,6 +343,8 @@ impl Workspace {
             .or_else(|| tree.groups().first().copied())
             .unwrap_or(tree.root.id());
         self.tree = tree;
+        self.last_active.clear();
+        self.sync_floats(cx);
         cx.notify();
         Ok(())
     }
@@ -327,6 +359,7 @@ impl Workspace {
                 .collect(),
             defaults: self.defaults.saved(),
             active: Some(self.active_group),
+            floats: self.tree.floats.clone(),
         }
     }
 
@@ -344,9 +377,11 @@ impl Workspace {
         self.panes.insert(id, pane);
     }
 
-    /// After every edit of the arrangement: redraw and save.
+    /// After every edit of the arrangement: redraw, open or close floating
+    /// windows to match, and save.
     pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+        self.sync_floats(cx);
         self.schedule_save(cx);
     }
 
@@ -354,6 +389,9 @@ impl Workspace {
 
     pub(crate) fn set_active_group(&mut self, group: NodeId, cx: &mut Context<Self>) {
         self.seen(group, cx);
+        if self.tree.find(group).is_some_and(Node::is_group) {
+            self.last_active.insert(self.tree.float_of(group), group);
+        }
         if self.active_group != group && self.tree.find(group).is_some_and(Node::is_group) {
             self.active_group = group;
             self.defaults.activate(group);
@@ -376,7 +414,7 @@ impl Workspace {
         self.tree.add_tab(group, id, None, true);
         self.set_active_group(group, cx);
         if focus {
-            pane.focus_handle(cx).focus(window, cx);
+            self.focus_pane(id, window, cx);
         }
         self.changed(cx);
     }
@@ -387,10 +425,33 @@ impl Workspace {
         if let Some(group) = self.tree.group_of(pane) {
             self.set_active_group(group, cx);
         }
-        if focus && let Some(pane) = self.panes.get(&pane) {
-            pane.focus_handle(cx).focus(window, cx);
+        if focus {
+            self.focus_pane(pane, window, cx);
         }
         self.changed(cx);
+    }
+
+    /// Focus a pane in the window it is in: `window` when that is it, else
+    /// its own, brought to the front.
+    pub(crate) fn focus_pane(&self, pane: PaneId, window: &mut Window, cx: &mut App) {
+        let Some(focus) = self.panes.get(&pane).map(|p| p.focus_handle(cx)) else { return };
+        let target = self.window_of(self.tree.group_of(pane).and_then(|group| self.tree.float_of(group)));
+        if target == window.window_handle() {
+            focus.focus(window, cx);
+        } else {
+            // After this update: that window may be the one being updated.
+            cx.defer(move |cx| {
+                _ = target.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    focus.focus(window, cx);
+                });
+            });
+        }
+    }
+
+    /// The window of the main tree (`None`) or of a float.
+    fn window_of(&self, float: Option<u64>) -> AnyWindowHandle {
+        float.and_then(|id| self.float_windows.get(&id).copied()).unwrap_or(self.window)
     }
 
     /// Close a tab; its group stays, empty or not.
@@ -453,7 +514,14 @@ impl Workspace {
         if !settings.notifications {
             return;
         }
-        let focused = window.is_window_active();
+        // The window the tab is in: this one, or a floating one.
+        let float = self.tree.group_of(pane).and_then(|group| self.tree.float_of(group));
+        let target = self.window_of(float);
+        let focused = if target == window.window_handle() {
+            window.is_window_active()
+        } else {
+            target.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false)
+        };
         if focused && self.tree.active_tab(self.active_group) == Some(pane) {
             return;
         }
@@ -465,7 +533,11 @@ impl Workspace {
             crate::sound::play(kind, cx);
         }
         if !focused && settings.notify_taskbar {
-            window.request_attention();
+            if target == window.window_handle() {
+                window.request_attention();
+            } else {
+                _ = target.update(cx, |_, window, _| window.request_attention());
+            }
         }
         if settings.notify_toast {
             let Some(handle) = self.panes.get(&pane).cloned() else { return };
@@ -542,12 +614,13 @@ impl Workspace {
     }
 
     /// Move a tab into `group` (at `ix`), or into a new group beside `target`
-    /// when `side` is given. A group the tab leaves empty goes with it.
+    /// when `side` is given. A group the tab leaves empty goes with it,
+    /// unless the tab was split off beside it: a group's only tab dropped on
+    /// its own side splits it, leaving it empty.
     pub(crate) fn move_tab(&mut self, pane: PaneId, target: NodeId, side: Option<Side>, ix: Option<usize>, cx: &mut Context<Self>) {
         let Some(from) = self.tree.group_of(pane) else { return };
         let group = match side {
             None => target,
-            Some(_) if target == from && self.tree.tabs(from).len() == 1 => return,
             Some(side) => match self.tree.split(target, side) {
                 Some(group) => group,
                 None => return,
@@ -555,6 +628,7 @@ impl Workspace {
         };
         self.tree.move_tab(pane, group, ix);
         if from != group
+            && from != target
             && self.tree.tabs(from).is_empty()
             && let Some((_, remap)) = self.tree.detach(from)
         {
@@ -563,6 +637,246 @@ impl Workspace {
         self.fix_active_group();
         self.set_active_group(group, cx);
         self.changed(cx);
+    }
+
+    // -- Floating windows ----------------------------------------------------
+
+    /// Open a window for each float without one and close those whose float
+    /// is gone, once the current update is over (the window to close may be
+    /// the one being updated).
+    fn sync_floats(&mut self, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            let Some(this) = this.upgrade() else { return };
+            let (gone, missing) = this.update(cx, |this, _| {
+                let wanted: Vec<u64> = this.tree.floats.iter().map(|f| f.id).collect();
+                let gone: Vec<u64> = this.float_windows.keys().copied().filter(|id| !wanted.contains(id)).collect();
+                let gone: Vec<AnyWindowHandle> = gone.iter().filter_map(|id| this.float_windows.remove(id)).collect();
+                let missing: Vec<(u64, Option<[f32; 4]>, bool)> = this
+                    .tree
+                    .floats
+                    .iter()
+                    .filter(|f| !this.float_windows.contains_key(&f.id))
+                    .map(|f| (f.id, f.bounds, this.activate_float == Some(f.id)))
+                    .collect();
+                (gone, missing)
+            });
+            for (id, bounds, activate) in missing {
+                if let Some(window) = open_float_window(this.clone(), id, bounds, activate, cx) {
+                    this.update(cx, |this, _| {
+                        this.float_windows.insert(id, window);
+                        if activate {
+                            this.activate_float = None;
+                        }
+                    });
+                }
+            }
+            // Then the windows to close, once the pages in them have a new home.
+            for window in gone {
+                if let Ok(Some(from)) = window.update(cx, |_, window, _| crate::browser::hwnd(window)) {
+                    this.update(cx, |this, cx| this.rehome_browsers(from, cx));
+                }
+                _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+        });
+    }
+
+    /// Move a group or container into a new window: at `bounds` (on screen),
+    /// or centred.
+    pub(crate) fn float_node(&mut self, node: NodeId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
+        // The main window's groups, all empty, have nothing to take along.
+        if node == self.tree.root.id() && self.tree.root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
+            return;
+        }
+        let Some((float, remap)) = self.tree.float_out(node, bounds.map(screen_rect)) else { return };
+        self.defaults.prune(&self.tree, &remap);
+        self.activate_float = Some(float);
+        self.fix_active_group();
+        if let Some(group) = self.tree.groups_under(node).first() {
+            self.set_active_group(*group, cx);
+        }
+        self.changed(cx);
+    }
+
+    /// Move a tab into a new window, in a group of its own.
+    pub(crate) fn float_tab(&mut self, pane: PaneId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
+        let Some(from) = self.tree.group_of(pane) else { return };
+        // Alone in a window of its own already.
+        if self.tree.tabs(from).len() == 1 && self.tree.float_of(from).is_some() && self.tree.is_root(from) {
+            return;
+        }
+        let (float, group) = self.tree.new_float(bounds.map(screen_rect));
+        self.activate_float = Some(float);
+        self.move_tab(pane, group, None, None, cx);
+    }
+
+    /// Float `id`'s window closes: what it holds goes back into the main
+    /// window, beside everything (in place of a lone empty group there).
+    /// Empty groups have nothing to bring back.
+    pub(crate) fn dock_float(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(root) = self.tree.window_root(Some(id)) else { return };
+        let root_id = root.id();
+        if root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
+            if let Some((_, remap)) = self.tree.detach(root_id) {
+                self.defaults.prune(&self.tree, &remap);
+            }
+            self.fix_active_group();
+            return self.changed(cx);
+        }
+        let main = self.tree.root.id();
+        let empty_main = matches!(&self.tree.root, Node::Group { tabs, .. } if tabs.is_empty());
+        self.move_node(root_id, main, Side::Right, cx);
+        if empty_main {
+            self.close_group(main, cx);
+        }
+    }
+
+    /// Native window `from` is closing: the browser pages in it move to the
+    /// window their tab is in now (a page dies with its parent window).
+    pub(crate) fn rehome_browsers(&self, from: isize, cx: &mut App) {
+        let moves: Vec<(Entity<crate::browser::BrowserPanel>, AnyWindowHandle)> = self
+            .panes
+            .iter()
+            .filter_map(|(id, pane)| {
+                let browser = pane.view().downcast::<crate::browser::BrowserPanel>().ok()?;
+                let float = self.tree.group_of(*id).and_then(|group| self.tree.float_of(group));
+                Some((browser, self.window_of(float)))
+            })
+            .collect();
+        for (browser, target) in moves {
+            if let Ok(Some(to)) = target.update(cx, |_, window, _| crate::browser::hwnd(window))
+                && to != from
+            {
+                browser.read(cx).rehome(from, to);
+            }
+        }
+    }
+
+    /// A floating window moved or changed size: kept for the next session.
+    pub(crate) fn float_moved(&mut self, id: u64, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        self.tree.set_float_bounds(id, screen_rect(bounds));
+        self.schedule_save(cx);
+    }
+
+    /// A window of the session came to the front: its group is the active
+    /// one, as it was when the user left it.
+    pub(crate) fn window_activated(&mut self, float: Option<u64>, cx: &mut Context<Self>) {
+        if self.tree.float_of(self.active_group) != float {
+            let remembered = self
+                .last_active
+                .get(&float)
+                .copied()
+                .filter(|group| self.tree.find(*group).is_some_and(Node::is_group) && self.tree.float_of(*group) == float);
+            let group = remembered.or_else(|| self.tree.window_root(float).and_then(|root| root.groups().first().copied()));
+            if let Some(group) = group {
+                self.set_active_group(group, cx);
+            }
+        }
+        self.seen(self.active_group, cx);
+    }
+
+    /// What takes the keyboard in a window: its active group's shown tab.
+    pub(crate) fn window_focus(&self, float: Option<u64>, cx: &App) -> Option<FocusHandle> {
+        let group = if self.tree.float_of(self.active_group) == float {
+            self.active_group
+        } else {
+            *self.tree.window_root(float)?.groups().first()?
+        };
+        let pane = self.tree.active_tab(group)?;
+        Some(self.panes.get(&pane)?.focus_handle(cx))
+    }
+
+    /// The session's window under `at` (on screen, see `on_screen`), other
+    /// than float `from`'s (or the main one): its float, and where `at` is in
+    /// it. Floating windows first: they tend to be over the main one.
+    pub(crate) fn window_under(&self, from: Option<u64>, at: Point<f32>, cx: &mut App) -> Option<(Option<u64>, Point<Pixels>)> {
+        let others: Vec<Option<u64>> = self.float_windows.keys().copied().map(Some).chain([None]).filter(|w| *w != from).collect();
+        others.into_iter().find_map(|float| {
+            let (origin, scale, size) = self
+                .window_of(float)
+                .update(cx, |_, window, _| (on_screen(window, Point::default()), window.scale_factor(), window.viewport_size()))
+                .ok()?;
+            let local = point(px((at.x - origin.x) / scale), px((at.y - origin.y) / scale));
+            Bounds::new(Point::default(), size).contains(&local).then_some((float, local))
+        })
+    }
+
+    /// A drag let go outside the window it started in (float `from`'s, or
+    /// the main one): over another window of the session, what it carries
+    /// lands where that window showed it would; elsewhere, it moves into a
+    /// new window where it was let go.
+    pub(crate) fn drag_released(&mut self, from: Option<u64>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dragged) = self.dragging.take() else { return };
+        if self.remote_drag.take().is_some() {
+            cx.notify();
+        }
+        if Bounds::new(Point::default(), window.viewport_size()).contains(&position) {
+            return;
+        }
+        let hint = self.drop_hint.take();
+        let at = on_screen(window, position);
+        match self.window_under(from, at, cx) {
+            Some((float, _)) => {
+                let Some(hint) = hint.filter(|hint| self.tree.float_of(hint.target) == float) else { return cx.notify() };
+                match (dragged, hint.drop) {
+                    (Dragged::Tab(pane), Drop::Center) => self.move_tab(pane, hint.target, None, None, cx),
+                    (Dragged::Tab(pane), Drop::Side(side)) => self.move_tab(pane, hint.target, Some(side), None, cx),
+                    (Dragged::Node(node), Drop::Side(side)) => self.move_node(node, hint.target, side, cx),
+                    (Dragged::Tab(pane), Drop::Tab(ix)) => self.move_tab(pane, hint.target, None, ix, cx),
+                    (Dragged::Node(_), Drop::Center | Drop::Tab(_)) => cx.notify(),
+                }
+            }
+            None => {
+                // The new window opens with its tab strip under the pointer,
+                // placed in the pixels of the monitor there (each monitor's
+                // windows are placed by its own scale).
+                let scale = monitor_scale(at).unwrap_or_else(|| window.scale_factor());
+                let pointer = point(px(at.x / scale), px(at.y / scale));
+                let current = window.bounds().size;
+                let size = size(px(960f32.min(current.width.as_f32())), px(640f32.min(current.height.as_f32())));
+                let bounds = Bounds::new(pointer - FLOAT_GRAB, size);
+                match dragged {
+                    Dragged::Node(node) => self.float_node(node, Some(bounds), cx),
+                    Dragged::Tab(pane) => self.float_tab(pane, Some(bounds), cx),
+                }
+            }
+        }
+    }
+
+    /// A floating window's content: a title bar and its groups.
+    pub(crate) fn render_float(&self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_browsers(Some(id), window, cx);
+        let Some(root) = self.tree.window_root(Some(id)) else { return Empty.into_any_element() };
+        let root_id = root.id();
+        let groups = self.render_layout(root, Some(id), window, cx);
+        let name = self.root.file_name().map_or_else(|| self.root.display().to_string(), |name| name.to_string_lossy().to_string());
+        let title_bar = TitleBar::new()
+            .child(h_flex().flex_1().min_w_0().px_2().text_sm().text_color(cx.theme().muted_foreground).child(div().truncate().child(name)))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .px_2()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(self.container_actions(root_id, "window", !root.is_group(), cx))
+                    .child(
+                        Button::new("float-dock")
+                            .small()
+                            .ghost()
+                            .icon(Icon::new(IconName::Minimize))
+                            .tooltip("Move into Main Window")
+                            .on_click(cx.listener(move |this, _, _, cx| this.dock_float(id, cx))),
+                    ),
+            );
+        self.layout_actions(v_flex().id("float"), cx)
+            // Alt+F4 closes this window, not den.
+            .on_action(cx.listener(move |this, _: &crate::Quit, _, cx| this.dock_float(id, cx)))
+            .size_full()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(title_bar)
+            .child(div().flex_1().min_h_0().child(groups))
+            .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
+            .into_any_element()
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
@@ -825,22 +1139,27 @@ impl Workspace {
         self.add_pane(std::rc::Rc::new(browser), group, true, window, cx);
     }
 
-    /// Show the browser pages whose tab is showing; hide the others, and all
-    /// of them while a tab or group is dragged or a dialog is open (a native
-    /// page is drawn over everything).
-    fn sync_browsers(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show the browser pages in `window` (the main one, or float `float`'s)
+    /// whose tab is showing; hide the others, and all of them while a tab or
+    /// group is dragged or a dialog is open (a native page is drawn over
+    /// everything).
+    fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         // A page stays live: only a drag or a dialog hides it (menus and
         // toasts may be drawn under it).
         let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
         for (id, pane) in &self.panes {
             let Ok(browser) = pane.view().downcast::<crate::browser::BrowserPanel>() else { continue };
-            let showing = self.tree.group_of(*id).is_some_and(|group| self.tree.active_tab(group) == Some(*id));
+            let Some(group) = self.tree.group_of(*id) else { continue };
+            if self.tree.float_of(group) != float {
+                continue;
+            }
+            let showing = self.tree.active_tab(group) == Some(*id);
             browser.read(cx).set_shown(showing && !covered);
         }
     }
 
     /// A shell starting in `dir` (Open Terminal Here).
-    fn open_shell_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_shell_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let group = self.target_group(Kind::Terminals);
         let launch = Launch {
             cwd: dir,
@@ -851,6 +1170,57 @@ impl Workspace {
         };
         let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
         self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+    }
+
+    /// Another terminal beside `pane` running what it runs, in the folder its
+    /// shell is in now.
+    pub(crate) fn duplicate_terminal(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.panes.get(&pane).and_then(|p| p.view().downcast::<TerminalPanel>().ok()) else { return };
+        let Some(group) = self.tree.group_of(pane) else { return };
+        let terminal = terminal.read(cx);
+        let program = terminal.program().map(str::to_string);
+        let launch = Launch {
+            cwd: terminal.cwd().to_path_buf(),
+            program: program.clone(),
+            command: program,
+            history: None,
+            agent: terminal.is_agent(),
+        };
+        let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
+        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+    }
+
+    /// Show `path` in the Explorer view: in the main window's sidebar, which
+    /// comes to the front.
+    pub(crate) fn reveal_in_sidebar(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        AppState::update(cx, |state| {
+            state.sidebar.visible = true;
+            state.sidebar.view = SidebarView::Explorer;
+        });
+        self.explorer.update(cx, |explorer, cx| explorer.show_path(&path, cx));
+        let focus = self.explorer.focus_handle(cx);
+        if self.window == window.window_handle() {
+            focus.focus(window, cx);
+        } else {
+            let target = self.window;
+            cx.defer(move |cx| {
+                _ = target.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    focus.focus(window, cx);
+                });
+            });
+        }
+        cx.notify();
+    }
+
+    /// Move a tab from a floating window into the main one: its group last
+    /// active, else its first.
+    pub(crate) fn dock_tab(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        let groups = self.tree.root.groups();
+        let target = self.last_active.get(&None).filter(|group| groups.contains(group)).or(groups.first()).copied();
+        if let Some(target) = target {
+            self.move_tab(pane, target, None, None, cx);
+        }
     }
 
     /// Another tab like those in `group`, as den does: a group of Claude Code
@@ -930,6 +1300,12 @@ impl Workspace {
         self.confirm_discard(vec![pane], move |this, _, cx| this.close_pane(pane, cx), window, cx);
     }
 
+    /// Close several tabs, asking first when any has unsaved changes.
+    pub(crate) fn request_close_panes(&mut self, panes: Vec<PaneId>, window: &mut Window, cx: &mut Context<Self>) {
+        let close = panes.clone();
+        self.confirm_discard(panes, move |this, _, cx| close.iter().for_each(|&pane| this.close_pane(pane, cx)), window, cx);
+    }
+
     pub(crate) fn request_close_group(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let panes = self.tree.tabs(group).to_vec();
         self.confirm_discard(panes, move |this, _, cx| this.close_group(group, cx), window, cx);
@@ -996,8 +1372,8 @@ impl Workspace {
     fn focus_group(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group) = self.tree.neighbor(self.active_group, side) else { return };
         self.set_active_group(group, cx);
-        if let Some(pane) = self.tree.active_tab(group).and_then(|id| self.panes.get(&id)) {
-            pane.focus_handle(cx).focus(window, cx);
+        if let Some(pane) = self.tree.active_tab(group) {
+            self.focus_pane(pane, window, cx);
         }
     }
 
@@ -1268,7 +1644,7 @@ impl Workspace {
             .small()
             .icon(Icon::new(IconName::Menu))
             .tooltip("Menu")
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, _| {
                 type Run = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
                 let item = |label: &'static str, chord: &'static str, run: Run| {
                     let this = this.clone();
@@ -1277,7 +1653,9 @@ impl Workspace {
                         _ = this.update(cx, |this, cx| run(this, window, cx));
                     })
                 };
-                menu.max_h(px(640.))
+                // As tall as the window allows below the title bar, so the
+                // whole menu shows and it only scrolls in a short window.
+                menu.max_h(window.viewport_size().height - px(56.))
                     .scrollable(true)
                     .label("FILE")
                     .item(item("Open Folder…", "Ctrl+Shift+O", |this, window, cx| this.prompt_open_folder(false, window, cx)))
@@ -1349,27 +1727,42 @@ impl Workspace {
                     let path = path.clone();
                     let (label, full) = (SharedString::from(label.clone()), SharedString::from(path.display().to_string()));
                     let forget = path.clone();
+                    let elsewhere = (this.clone(), path.clone());
                     let item = PopupMenuItem::element(move |_, _| {
                         let full = full.clone();
                         let forget = forget.clone();
+                        let (open, path) = elsewhere.clone();
+                        let row_button = |id: &'static str, icon: IconName| {
+                            div()
+                                .id((id, ix))
+                                .flex_none()
+                                .invisible()
+                                .group_hover(SharedString::from(format!("recent-{ix}")), |this| this.visible())
+                                .rounded(px(3.))
+                                .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                                .child(Icon::new(icon).xsmall())
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        };
                         h_flex()
                             .id(("recent", ix))
                             .group(SharedString::from(format!("recent-{ix}")))
                             .w_full()
                             .gap_2()
                             .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                            // Opens the folder in a window of its own, leaving this one be.
+                            .child(
+                                row_button("open-recent-elsewhere", IconName::AppWindow)
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Open in New Window").build(window, cx))
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        _ = open.update(cx, |this, cx| this.open_session(path.clone(), true, window, cx));
+                                        window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
+                                    }),
+                            )
                             // The x takes the folder off the list (its saved session stays),
                             // as in den.
                             .child(
-                                div()
-                                    .id(("forget-recent", ix))
-                                    .flex_none()
-                                    .invisible()
-                                    .group_hover(SharedString::from(format!("recent-{ix}")), |this| this.visible())
-                                    .rounded(px(3.))
-                                    .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                                    .child(Icon::new(IconName::X).xsmall())
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                row_button("forget-recent", IconName::X)
                                     .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
                                         let forget = forget.clone();
@@ -1414,12 +1807,170 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// What every window of the session does with the groups: dropped files,
+    /// Alt for the split buttons, and the actions on groups and tabs.
+    fn layout_actions(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        root
+            // Files dropped from the system's file manager open kept; a
+            // folder opens as the session.
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                for path in paths.paths() {
+                    if path.is_dir() {
+                        this.open_session(path.clone(), false, window, cx);
+                        return;
+                    }
+                    this.open_file(path.clone(), false, window, cx);
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                if this.alt_held != event.modifiers.alt {
+                    this.alt_held = event.modifiers.alt;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                if let Some(pane) = this.tree.active_tab(this.active_group) {
+                    this.request_close_pane(pane, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseGroup, window, cx| this.request_close_group(this.active_group, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenFiles, window, cx| this.prompt_open_files(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| this.focus_group(Side::Left, window, cx)))
+            .on_action(cx.listener(|this, _: &FocusRight, window, cx| this.focus_group(Side::Right, window, cx)))
+            .on_action(cx.listener(|this, _: &FocusUp, window, cx| this.focus_group(Side::Top, window, cx)))
+            .on_action(cx.listener(|this, _: &FocusDown, window, cx| this.focus_group(Side::Bottom, window, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
+    }
+}
+
+/// A rectangle on screen as a float keeps it: x, y, width, height.
+fn screen_rect(bounds: Bounds<Pixels>) -> [f32; 4] {
+    [bounds.origin.x.as_f32(), bounds.origin.y.as_f32(), bounds.size.width.as_f32(), bounds.size.height.as_f32()]
+}
+
+/// Where `at` in `window` is on screen, in physical pixels: the one space all
+/// windows and monitors share. (A window's own pixels are the physical ones
+/// over the scale of the monitor it is on, so two windows on monitors of
+/// different scales count differently.)
+pub(crate) fn on_screen(window: &Window, at: Point<Pixels>) -> Point<f32> {
+    let scale = window.scale_factor();
+    let at = window.bounds().origin + at;
+    point(at.x.as_f32() * scale, at.y.as_f32() * scale)
+}
+
+/// The monitor under `at` (physical pixels), as gpui names it (its handle).
+#[cfg(windows)]
+fn monitor_at(at: Point<f32>) -> Option<DisplayId> {
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint},
+    };
+    // SAFETY: a plain query.
+    let monitor = unsafe { MonitorFromPoint(POINT { x: at.x as i32, y: at.y as i32 }, MONITOR_DEFAULTTONULL) };
+    (!monitor.is_invalid()).then(|| DisplayId::from(monitor.0 as u64))
+}
+
+/// A monitor's scale (its DPI over 96).
+#[cfg(windows)]
+fn display_scale(display: DisplayId) -> Option<f32> {
+    use windows::Win32::{
+        Graphics::Gdi::HMONITOR,
+        UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+    };
+    let (mut x, mut y) = (0, 0);
+    // SAFETY: a plain query; an unknown handle fails it.
+    unsafe { GetDpiForMonitor(HMONITOR(u64::from(display) as _), MDT_EFFECTIVE_DPI, &mut x, &mut y) }.ok()?;
+    Some(x as f32 / 96.)
+}
+
+#[cfg(not(windows))]
+fn monitor_at(_: Point<f32>) -> Option<DisplayId> {
+    None
+}
+
+#[cfg(not(windows))]
+fn display_scale(_: DisplayId) -> Option<f32> {
+    None
+}
+
+/// The scale of the monitor under `at` (physical pixels), if any.
+fn monitor_scale(at: Point<f32>) -> Option<f32> {
+    monitor_at(at).and_then(display_scale)
+}
+
+/// The display a window placed with `grab` (in a display's own pixels) is
+/// on. Each display counts by its own scale, so on monitors of different
+/// scales two displays' ranges can overlap: the one whose monitor really is
+/// under the point wins.
+fn display_at(grab: Point<Pixels>, cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
+    let displays = cx.displays();
+    let exact = displays.iter().find(|display| {
+        display.bounds().contains(&grab)
+            && display_scale(display.id()).is_some_and(|scale| {
+                monitor_at(point(grab.x.as_f32() * scale, grab.y.as_f32() * scale)) == Some(display.id())
+            })
+    });
+    exact.or_else(|| displays.iter().find(|display| display.bounds().contains(&grab))).cloned()
+}
+
+/// Where the pointer is in a window popped out by a drag: on its tab strip,
+/// as if it had been picked up there.
+const FLOAT_GRAB: Point<Pixels> = Point { x: px(80.), y: px(52.) };
+
+/// `bounds` moved (and shrunk if need be) to lie inside `area`.
+fn fit(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
+    let width = bounds.size.width.as_f32().min(area.size.width.as_f32());
+    let height = bounds.size.height.as_f32().min(area.size.height.as_f32());
+    let x = bounds.origin.x.as_f32().clamp(area.left().as_f32(), area.right().as_f32() - width);
+    let y = bounds.origin.y.as_f32().clamp(area.top().as_f32(), area.bottom().as_f32() - height);
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
+/// The window of float `id`, where it was (when that is still on a screen)
+/// or centred.
+fn open_float_window(workspace: Entity<Workspace>, id: u64, bounds: Option<[f32; 4]>, activate: bool, cx: &mut App) -> Option<AnyWindowHandle> {
+    // On the display under its grab point (where the pointer let go), kept
+    // inside it: the window is placed on the display it names, and one
+    // whose middle is off that display would open centred on it instead.
+    let placed = bounds.and_then(|[x, y, w, h]| {
+        let bounds = Bounds::new(point(px(x), px(y)), size(px(w.max(320.)), px(h.max(240.))));
+        let display = display_at(bounds.origin + FLOAT_GRAB, cx)
+            .or_else(|| cx.displays().into_iter().find(|display| display.bounds().intersects(&bounds)))?;
+        Some((display.id(), fit(bounds, display.visible_bounds())))
+    });
+    let bounds = placed.map_or_else(|| Bounds::centered(None, size(px(960.), px(640.)), cx), |(_, bounds)| bounds);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(320.), px(240.))),
+        display_id: placed.map(|(display, _)| display),
+        focus: activate,
+        ..TitleBar::window_options()
+    };
+    let title = format!("den — {}", workspace.read(cx).root.display());
+    let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| FloatWindow::new(workspace, id, window, cx))).ok()?;
+    _ = window.update(cx, |_, window, _| {
+        if activate {
+            window.activate_window();
+        }
+        window.set_window_title(&title);
+    });
+    Some(window)
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_browsers(window, cx);
+        self.sync_browsers(None, window, cx);
         let sidebar = AppState::get(cx).sidebar.clone();
         let side = Settings::get(cx).sidebar_position;
-        let groups = self.render_layout(window, cx);
+        let groups = self.render_layout(&self.tree.root, None, window, cx);
 
         let body = if sidebar.visible {
             let panel = resizable_panel()
@@ -1443,48 +1994,11 @@ impl Render for Workspace {
             groups
         };
 
-        v_flex()
-            .id("workspace")
-            // Files dropped from the system's file manager open kept; a
-            // folder opens as the session.
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                for path in paths.paths() {
-                    if path.is_dir() {
-                        this.open_session(path.clone(), false, window, cx);
-                        return;
-                    }
-                    this.open_file(path.clone(), false, window, cx);
-                }
-            }))
+        self.layout_actions(v_flex().id("workspace"), cx)
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                if this.alt_held != event.modifiers.alt {
-                    this.alt_held = event.modifiers.alt;
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
-            .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
-            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, window, cx)))
-            .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
-            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if let Some(pane) = this.tree.active_tab(this.active_group) {
-                    this.request_close_pane(pane, window, cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &CloseGroup, window, cx| this.request_close_group(this.active_group, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.prompt_open_folder(false, window, cx)))
-            .on_action(cx.listener(|this, _: &OpenFiles, window, cx| this.prompt_open_files(window, cx)))
-            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| this.focus_group(Side::Left, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusRight, window, cx| this.focus_group(Side::Right, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusUp, window, cx| this.focus_group(Side::Top, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusDown, window, cx| this.focus_group(Side::Bottom, window, cx)))
-            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
-            .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|this, _: &FocusExplorer, window, cx| this.focus_view(SidebarView::Explorer, window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_view(SidebarView::Search, window, cx)))
             .on_action(cx.listener(|this, _: &ReplaceInFiles, window, cx| {
@@ -1499,5 +2013,38 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &FocusScm, window, cx| this.focus_view(SidebarView::Scm, window, cx)))
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().child(body))
+            .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
     }
+}
+
+/// The title bar's minimize, maximize and close buttons, over an open
+/// dialog: its overlay makes the whole title bar a drag area, so they would
+/// not take clicks.
+fn caption_buttons(window: &Window, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let button = |id: &'static str, icon: IconName, area: WindowControlArea, hover_bg: Hsla, hover_fg: Hsla| {
+        div()
+            .id(id)
+            .flex()
+            .w(gpui_kit::component::TITLE_BAR_HEIGHT)
+            .h_full()
+            .items_center()
+            .justify_center()
+            .text_color(theme.foreground)
+            .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+            .window_control_area(area)
+            .child(Icon::new(icon).small())
+    };
+    let maximize = if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize };
+    deferred(
+        h_flex()
+            .absolute()
+            .top_0()
+            .right_0()
+            .h(gpui_kit::component::TITLE_BAR_HEIGHT)
+            .child(button("caption-min", IconName::WindowMinimize, WindowControlArea::Min, theme.secondary_hover, theme.secondary_foreground))
+            .child(button("caption-max", maximize, WindowControlArea::Max, theme.secondary_hover, theme.secondary_foreground))
+            .child(button("caption-close", IconName::WindowClose, WindowControlArea::Close, theme.danger, theme.danger_foreground)),
+    )
+    .with_priority(10)
 }

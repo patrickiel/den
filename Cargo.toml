@@ -41,6 +41,11 @@ encoding_rs = "0.8"
 raw-window-handle = "0.6"
 minisign-verify = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+# The version gpui builds; for a monitor's scale under a point (floating windows).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
+
 [build-dependencies]
 embed-resource = "3"
 

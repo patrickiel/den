@@ -43,8 +43,14 @@ pub struct Imported {
 /// Paint the window with the theme Settings name.
 pub fn apply(cx: &mut App) {
     let settings = Settings::get(cx);
-    let choice = settings.theme;
-    let imported = (!settings.color_theme.is_empty()).then(|| load(&settings.color_theme)).flatten();
+    let (choice, color_theme) = (settings.theme, settings.color_theme.clone());
+    preview(choice, &color_theme, cx);
+}
+
+/// Paint the window with a theme without choosing it (Settings' menu, on
+/// hover); `apply` goes back to the chosen one.
+pub fn preview(choice: ThemeChoice, color_theme: &str, cx: &mut App) {
+    let imported = (!color_theme.is_empty()).then(|| load(color_theme)).flatten();
     let theme = match imported {
         Some(theme) => theme,
         None => builtin(choice == ThemeChoice::Dark),
@@ -59,6 +65,7 @@ pub fn apply(cx: &mut App) {
         }
     };
     Theme::update(cx, |t| t.apply_config(&config));
+    cx.refresh_windows();
 }
 
 // -- Files -------------------------------------------------------------------

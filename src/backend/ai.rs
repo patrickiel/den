@@ -170,6 +170,75 @@ pub fn status(config: &AiConfig) -> Status {
     Status { runtime: runtime_dir().join(SERVER_EXE).is_file(), model: model_spec(&config.model).0.is_file() }
 }
 
+/// A custom model as typed or picked: a download URL (a Hugging Face page's
+/// `/blob/` link becomes its `/resolve/` download link) or a .gguf file.
+pub fn custom_model(text: &str) -> Result<String, String> {
+    let text = text.trim().trim_matches('"');
+    let gguf = |s: &str| s.split(['?', '#']).next().unwrap_or(s).to_lowercase().ends_with(".gguf");
+    if text.starts_with("http://") || text.starts_with("https://") {
+        let url = if text.contains("huggingface.co/") { text.replacen("/blob/", "/resolve/", 1) } else { text.to_string() };
+        return if gguf(&url) { Ok(url) } else { Err("The link must lead to a .gguf file.".into()) };
+    }
+    if !gguf(text) {
+        return Err("A model is a .gguf file (or a link to one).".into());
+    }
+    if !Path::new(text).is_file() {
+        return Err(format!("{text} does not exist."));
+    }
+    Ok(text.to_string())
+}
+
+/// A model's name to show: its file name without `.gguf`.
+pub fn model_name(model: &str) -> String {
+    let clean = model.split(['?', '#']).next().unwrap_or(model);
+    let name = clean.rsplit(['/', '\\']).next().unwrap_or(clean);
+    let stem = if name.to_lowercase().ends_with(".gguf") { &name[..name.len() - 5] } else { name };
+    stem.to_string()
+}
+
+pub fn is_download(model: &str) -> bool {
+    model.starts_with("http://") || model.starts_with("https://")
+}
+
+/// Whether `model` (empty for the default, else a download URL) is downloaded.
+pub fn model_downloaded(model: &str) -> bool {
+    let (path, url, _) = model_spec(model);
+    url.is_some() && path.is_file()
+}
+
+/// Delete den's download of `model`; a local file of one's own stays. The
+/// server stops first, as it holds the model open.
+pub fn remove_model(model: &str) -> Result<(), String> {
+    let (path, url, _) = model_spec(model);
+    if url.is_none() {
+        return Err("den did not download this model".into());
+    }
+    stop();
+    let part = path.with_file_name(format!("{}.part", path.file_name().unwrap_or_default().to_string_lossy()));
+    let _ = std::fs::remove_file(part);
+    remove_file(&path)
+}
+
+pub fn runtime_downloaded() -> bool {
+    runtime_dir().join(SERVER_EXE).is_file()
+}
+
+/// Delete the llama.cpp runtime; it is downloaded again on next use.
+pub fn remove_runtime() -> Result<(), String> {
+    stop();
+    match std::fs::remove_dir_all(ai_dir().join("runtime")) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn remove_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.to_string()),
+        _ => Ok(()),
+    }
+}
+
 /// Download progress: what, bytes done, bytes in all (0 when unknown).
 pub type Progress<'a> = &'a mut dyn FnMut(&'static str, u64, u64);
 
@@ -194,7 +263,7 @@ pub fn install(config: &AiConfig, cancel: &Cancel, progress: Progress) -> Result
 }
 
 /// Stream `url` into `dest` through `dest.part`, resuming a partial download.
-fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'static str, cancel: &Cancel, progress: Progress) -> Result<(), String> {
+pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'static str, cancel: &Cancel, progress: Progress) -> Result<(), String> {
     if dest.is_file() {
         return Ok(());
     }
@@ -276,13 +345,11 @@ fn sha256_file(path: &Path, cancel: &Cancel) -> Result<String, String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Unpack with the system tar (bsdtar on Windows 10+ reads zip too), then
-/// move the folder holding `llama-server` to `dest`. Older runtimes go.
-fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
-    let root = dest.parent().ok_or("bad runtime path")?;
-    let tmp = root.join(format!("{LLAMA_TAG}.tmp"));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+/// Unpack `archive` into the new folder `into` with the system tar (bsdtar on
+/// Windows 10+ reads zip too); `what` names it in the error.
+pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(into);
+    std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
     let tar = if cfg!(windows) {
         let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
         PathBuf::from(sysroot).join("System32").join("tar.exe")
@@ -290,12 +357,21 @@ fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
         PathBuf::from("tar")
     };
     let mut cmd = Command::new(tar);
-    cmd.arg(if cfg!(windows) { "-xf" } else { "-xzf" }).arg(archive).arg("-C").arg(&tmp);
+    cmd.arg(if cfg!(windows) { "-xf" } else { "-xzf" }).arg(archive).arg("-C").arg(into);
     no_window(&mut cmd);
     let out = cmd.output().map_err(|e| format!("Cannot run tar: {e}"))?;
     if !out.status.success() {
-        return Err(format!("Unpacking the AI runtime failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!("Unpacking {what} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
+    Ok(())
+}
+
+/// Unpack, then move the folder holding `llama-server` to `dest`. Older
+/// runtimes go.
+fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
+    let root = dest.parent().ok_or("bad runtime path")?;
+    let tmp = root.join(format!("{LLAMA_TAG}.tmp"));
+    unpack(archive, &tmp, "the AI runtime")?;
     let bin = find_file(&tmp, SERVER_EXE, 3).ok_or("The AI runtime archive has no llama-server")?;
     let src = bin.parent().ok_or("bad archive layout")?.to_path_buf();
     let _ = std::fs::remove_dir_all(dest);
@@ -309,7 +385,7 @@ fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+pub(crate) fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
     let candidate = dir.join(name);
     if candidate.is_file() {
         return Some(candidate);
@@ -684,5 +760,18 @@ mod tests {
     fn model_files_by_url() {
         let path = model_path("https://huggingface.co/x/resolve/main/Qwen3.5-9B-Q4_K_M.gguf?download=1").unwrap();
         assert!(path.ends_with(r"models\Qwen3.5-9B-Q4_K_M.gguf") || path.ends_with("models/Qwen3.5-9B-Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn custom_models_by_link_or_file() {
+        use super::{custom_model, model_name};
+        assert_eq!(
+            custom_model(" https://huggingface.co/u/r/blob/main/My-Model.Q4.gguf ").unwrap(),
+            "https://huggingface.co/u/r/resolve/main/My-Model.Q4.gguf"
+        );
+        assert!(custom_model("https://example.com/model.bin").is_err());
+        assert!(custom_model(r"C:\no\such\model.gguf").is_err());
+        assert_eq!(model_name("https://h/x/My-Model.Q4.gguf?download=1"), "My-Model.Q4");
+        assert_eq!(model_name(r"D:\models\tiny.GGUF"), "tiny");
     }
 }

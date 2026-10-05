@@ -14,6 +14,7 @@ mod dirty_diff;
 mod encoding;
 mod explorer;
 mod file_icon;
+mod float;
 mod layout;
 mod layout_file;
 mod layout_view;

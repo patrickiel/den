@@ -6,7 +6,8 @@
 //!
 //! Paths inside the folder are stored relative to it. Each tab's machine
 //! state (a terminal's scrollback) stays in den's session file and is merged
-//! back by tab id.
+//! back by tab id, as does where each floating window sits on this machine's
+//! screens (by the float's id).
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,11 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
             }
         }
     }
+    if let Some(floats) = layout["floats"].as_array_mut() {
+        for float in floats.iter_mut().filter_map(Value::as_object_mut) {
+            float.remove("bounds");
+        }
+    }
     layout
 }
 
@@ -68,6 +74,17 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
                         data.insert((*key).into(), value.clone());
                     }
                 }
+            }
+        }
+    }
+    if let Some(floats) = layout["floats"].as_array_mut() {
+        let saved = machine.and_then(|m| m["floats"].as_array());
+        for float in floats.iter_mut().filter_map(Value::as_object_mut) {
+            let bounds = saved
+                .and_then(|saved| saved.iter().find(|s| s["id"] == float["id"]))
+                .and_then(|s| s.get("bounds"));
+            if let Some(bounds) = bounds {
+                float.insert("bounds".into(), bounds.clone());
             }
         }
     }
@@ -125,5 +142,19 @@ mod tests {
         let back = restore(shared, root, Some(&full));
         assert_eq!(back["panes"]["1"]["data"]["cwd"], r"C:\repos\den\src");
         assert_eq!(back["panes"]["1"]["data"]["scrollback"], "old output");
+    }
+
+    #[test]
+    fn floating_windows_keep_their_place_on_this_machine() {
+        let root = Path::new(r"C:\repos\den");
+        let full = json!({
+            "root": {},
+            "panes": {},
+            "floats": [{ "id": 9, "root": {}, "bounds": [10.0, 20.0, 800.0, 600.0] }]
+        });
+        let shared = shareable(&full, root);
+        assert!(shared["floats"][0].get("bounds").is_none());
+        let back = restore(shared, root, Some(&full));
+        assert_eq!(back["floats"][0]["bounds"], json!([10.0, 20.0, 800.0, 600.0]));
     }
 }

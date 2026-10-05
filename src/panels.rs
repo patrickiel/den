@@ -289,6 +289,8 @@ impl FilePanel {
             Err(err) => {
                 if then_save {
                     self.write(window, cx);
+                } else if let Some(kit) = crate::backend::format::kit_for(&self.path) {
+                    self.offer_formatter(kit, window, cx);
                 } else {
                     crate::toast::push(window, format!("Format: {err}"), cx);
                 }
@@ -316,6 +318,34 @@ impl FilePanel {
                 if then_save {
                     this.write(window, cx);
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// Ask to download the missing formatter, then format with it.
+    fn offer_formatter(&mut self, kit: &'static crate::backend::format::Kit, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let what = format!("Format Document uses {name} for {}. Download {name} ({}) into den's data folder?", kit.formats, kit.download_size(), name = kit.name);
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let this = this.clone();
+            dialog.title("Format Document").description(what.clone()).ok_text("Download").show_cancel(true).on_ok(move |_, window, cx| {
+                _ = this.update(cx, |this, cx| this.install_formatter(kit, window, cx));
+                true
+            })
+        });
+    }
+
+    fn install_formatter(&mut self, kit: &'static crate::backend::format::Kit, window: &mut Window, cx: &mut Context<Self>) {
+        crate::toast::push(window, format!("Downloading {}…", kit.name), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { crate::backend::format::install(kit, &crate::backend::ai::Cancel::default(), &mut |_, _, _| {}) })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => this.format(false, window, cx),
+                Err(err) => crate::toast::push(window, format!("Could not download {}: {err}", kit.name), cx),
             });
         })
         .detach();
@@ -996,6 +1026,48 @@ impl SettingsPanel {
     }
 
     /// Ask for a VS Code theme file, import it and switch to it.
+    /// Ask for a custom model's download link.
+    fn add_model_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("https://huggingface.co/…/model.gguf"));
+        window.open_alert_dialog(cx, {
+            let input = input.clone();
+            move |dialog, _, _| {
+                let input = input.clone();
+                dialog
+                    .title("Add Model from Link")
+                    .description("A link to a .gguf file, such as a Hugging Face file page. It downloads on first use, or with its download button.")
+                    .show_cancel(true)
+                    .child(Input::new(&input))
+                    .on_ok(move |_, window, cx| match crate::backend::ai::custom_model(&input.read(cx).value()) {
+                        Ok(model) => {
+                            add_custom_model(model, cx);
+                            true
+                        }
+                        Err(err) => {
+                            crate::toast::push(window, err, cx);
+                            false
+                        }
+                    })
+            }
+        });
+        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+    }
+
+    /// Pick a custom model's .gguf file.
+    fn add_model_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Add Model".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            _ = this.update_in(cx, |_, window, cx| match crate::backend::ai::custom_model(&path.to_string_lossy()) {
+                Ok(model) => add_custom_model(model, cx),
+                Err(err) => crate::toast::push(window, err, cx),
+            });
+        })
+        .detach();
+    }
+
     fn import_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -1255,12 +1327,150 @@ fn setting_row(name: &'static str, description: &'static str, control: impl Into
         .border_b_1()
         .border_color(cx.theme().border)
         .child(
+            // Wraps, so a long description never pushes the control out of view.
             v_flex()
+                .flex_1()
+                .min_w(px(200.))
                 .gap_0p5()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name))
                 .child(div().text_xs().text_color(cx.theme().muted_foreground).child(description)),
         )
         .child(control)
+}
+
+type MenuAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// What the end of a download's menu entry offers.
+enum Download {
+    Get(MenuAction),
+    Remove(MenuAction),
+    /// Take it off the list (a custom model).
+    Forget(MenuAction),
+    /// Running: its progress.
+    Busy(String),
+}
+
+/// A download's menu entry: its name, a muted detail, and at the end its
+/// buttons (download, bin, forget), or the progress while it downloads.
+fn menu_entry(id: String, name: impl Into<SharedString>, detail: &str, actions: Vec<Download>, cx: &App) -> Div {
+    let muted = cx.theme().muted_foreground;
+    let button = |suffix: &str, icon: IconName, tooltip: &'static str, action: MenuAction| {
+        Button::new(SharedString::from(format!("{id}-{suffix}"))).xsmall().ghost().icon(Icon::new(icon)).tooltip(tooltip).on_click(move |_, window, cx| {
+            // Not the entry's own click (choosing it).
+            cx.stop_propagation();
+            action(window, cx);
+            window.refresh();
+        })
+    };
+    h_flex()
+        .w_full()
+        .gap_4()
+        .justify_between()
+        .child(
+            // A long detail ends in an ellipsis rather than pushing the buttons out.
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(div().flex_shrink_0().child(name.into()))
+                .child(div().min_w_0().truncate().text_xs().text_color(muted).child(detail.to_string())),
+        )
+        .child(h_flex().flex_shrink_0().gap_1().children(actions.into_iter().map(|action| match action {
+            Download::Get(action) => button("get", IconName::Download, "Download", action).into_any_element(),
+            Download::Remove(action) => button("remove", IconName::Trash, "Remove the download", action).into_any_element(),
+            Download::Forget(action) => button("forget", IconName::Close, "Take off the list", action).into_any_element(),
+            Download::Busy(progress) => div().text_xs().text_color(muted).child(progress).into_any_element(),
+        })))
+}
+
+/// A model's download button, bin, or progress (the runtime downloads
+/// with it when missing).
+fn model_download(model: &str) -> Download {
+    use crate::backend::ai;
+    let key = format!("ai-model-{model}");
+    if let Some(progress) = download_progress(&key) {
+        return Download::Busy(progress);
+    }
+    let model = model.to_string();
+    let name = ai::MODEL_PRESETS.iter().find(|p| p.url == model).map_or_else(|| ai::model_name(&model), |p| p.name.to_string());
+    if ai::model_downloaded(&model) {
+        Download::Remove(Rc::new(move |window, cx| {
+            if let Err(err) = ai::remove_model(&model) {
+                crate::toast::push(window, format!("Could not remove {name}: {err}"), cx);
+            }
+        }))
+    } else {
+        Download::Get(Rc::new(move |window, cx| {
+            let mut config = Settings::get(cx).ai_config();
+            config.model = model.clone();
+            start_download(key.clone(), name.clone(), window, cx, move |cancel, progress| ai::install(&config, cancel, progress))
+        }))
+    }
+}
+
+/// Put a custom model on the list and choose it.
+fn add_custom_model(model: String, cx: &mut App) {
+    Settings::update(cx, |s| {
+        if !s.ai_custom_models.contains(&model) {
+            s.ai_custom_models.push(model.clone());
+        }
+        s.ai_model = model;
+    });
+}
+
+/// Downloads started from Settings, by key, with their progress.
+static DOWNLOADS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+fn download_progress(key: &str) -> Option<String> {
+    DOWNLOADS.lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, progress)| progress.clone())
+}
+
+fn set_download_progress(key: &str, progress: Option<String>) {
+    if let Ok(mut downloads) = DOWNLOADS.lock() {
+        downloads.retain(|(k, _)| k != key);
+        if let Some(progress) = progress {
+            downloads.push((key.to_string(), progress));
+        }
+    }
+}
+
+/// Run `job` (a download) on its own thread, its progress shown in the menu
+/// entry `key` meanwhile; a failure becomes a toast.
+fn start_download(
+    key: String,
+    what: impl Into<String>,
+    window: &mut Window,
+    cx: &mut App,
+    job: impl FnOnce(&crate::backend::ai::Cancel, crate::backend::ai::Progress) -> Result<(), String> + Send + 'static,
+) {
+    if download_progress(&key).is_some() {
+        return;
+    }
+    set_download_progress(&key, Some("Starting…".into()));
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Result<(), String>>>();
+    std::thread::spawn(move || {
+        let result = job(&crate::backend::ai::Cancel::default(), &mut |stage, done, total| {
+            let progress = if total == 0 { format!("{stage}…") } else { format!("{}%", done * 100 / total) };
+            set_download_progress(&key, Some(progress));
+            _ = tx.unbounded_send(None);
+        });
+        set_download_progress(&key, None);
+        _ = tx.unbounded_send(Some(result));
+    });
+    let what = what.into();
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while let Some(update) = rx.next().await {
+            _ = handle.update(cx, |_, window, cx| {
+                if let Some(Err(err)) = update {
+                    crate::toast::push(window, format!("Could not download {what}: {err}"), cx);
+                }
+                window.refresh();
+            });
+        }
+    })
+    .detach();
 }
 
 fn choice<T: Copy + PartialEq + 'static>(
@@ -1284,64 +1494,69 @@ impl Render for SettingsPanel {
         let words: Vec<String> = self.search.read(cx).value().to_lowercase().split_whitespace().map(str::to_string).collect();
         FILTER.with(|filter| *filter.borrow_mut() = (words, "", 0));
 
+        // Theme: a select of the built-in and imported themes, with Import and Remove.
         let builtin = settings.color_theme.is_empty();
-        let pick = |id: &'static str, label: &'static str, value: ThemeChoice| {
-            Button::new(id)
-                .small()
-                .label(label)
-                .map(|b| if builtin && settings.theme == value { b.primary() } else { b.outline() })
-                .on_click(move |_, _, cx| {
-                    Settings::update(cx, |s| {
-                        s.theme = value;
-                        s.color_theme.clear();
-                    })
-                })
+        let imported: Vec<(String, String, bool)> = self.themes.iter().map(|t| (t.id.clone(), t.theme.name.clone(), t.theme.dark)).collect();
+        let current_theme = if builtin {
+            if settings.theme == ThemeChoice::Dark { "Dark".to_string() } else { "Light".to_string() }
+        } else {
+            imported.iter().find(|(id, ..)| *id == settings.color_theme).map_or_else(|| settings.color_theme.clone(), |(_, name, _)| name.clone())
         };
-        let theme = h_flex()
-            .gap_1()
-            .flex_wrap()
-            .justify_end()
-            .child(pick("theme-dark", "Dark", ThemeChoice::Dark))
-            .child(pick("theme-light", "Light", ThemeChoice::Light))
-            .children(self.themes.iter().map(|imported| {
-                let id = imported.id.clone();
-                let dark = imported.theme.dark;
-                let current = settings.color_theme == id;
-                Button::new(SharedString::from(format!("theme-{id}")))
-                    .small()
-                    .label(imported.theme.name.clone())
-                    .map(|b| if current { b.primary() } else { b.outline() })
+        let (base, color_theme) = (settings.theme, settings.color_theme.clone());
+        let this = cx.weak_entity();
+        let theme = Button::new("theme")
+            .small()
+            .outline()
+            .label(current_theme)
+            .icon(Icon::new(IconName::ChevronDown))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                // Hovering a theme previews it; closing the menu goes back to the chosen one.
+                cx.subscribe_self(|_, _: &DismissEvent, cx| crate::theme::apply(cx)).detach();
+                let item = |label: String, choice: ThemeChoice, id: String, checked: bool| {
+                    let hover_id = id.clone();
+                    PopupMenuItem::element(move |_, _| {
+                        let id = hover_id.clone();
+                        div().id(SharedString::from(format!("theme-item-{label}"))).w_full().child(label.clone()).on_hover(move |hovered, _, cx| {
+                            if *hovered {
+                                crate::theme::preview(choice, &id, cx);
+                            }
+                        })
+                    })
+                    .checked(checked)
                     .on_click(move |_, _, cx| {
                         let id = id.clone();
                         Settings::update(cx, |s| {
+                            s.theme = choice;
                             s.color_theme = id;
-                            s.theme = if dark { ThemeChoice::Dark } else { ThemeChoice::Light };
                         })
                     })
-            }))
-            .child(
-                Button::new("theme-import")
-                    .small()
-                    .ghost()
-                    .icon(Icon::new(IconName::FolderOpen))
-                    .label("Import…")
-                    .tooltip("A VS Code color theme file (*.json)")
-                    .on_click(cx.listener(|this, _, window, cx| this.import_theme(window, cx))),
-            )
-            .when(!builtin, |this| {
-                this.child(
-                    Button::new("theme-remove")
-                        .small()
-                        .ghost()
-                        .icon(Icon::new(IconName::Trash))
-                        .label("Remove")
-                        .on_click(cx.listener(|this, _, _, cx| {
+                };
+                let mut menu = menu
+                    .item(item("Dark".into(), ThemeChoice::Dark, String::new(), builtin && base == ThemeChoice::Dark))
+                    .item(item("Light".into(), ThemeChoice::Light, String::new(), builtin && base == ThemeChoice::Light));
+                if !imported.is_empty() {
+                    menu = menu.separator();
+                }
+                for (id, name, dark) in &imported {
+                    let choice = if *dark { ThemeChoice::Dark } else { ThemeChoice::Light };
+                    menu = menu.item(item(name.clone(), choice, id.clone(), color_theme == *id));
+                }
+                let import = this.clone();
+                menu = menu.separator().item(PopupMenuItem::new("Import VS Code Theme…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
+                    _ = import.update(cx, |this, cx| this.import_theme(window, cx));
+                }));
+                if !builtin {
+                    let remove = this.clone();
+                    menu = menu.item(PopupMenuItem::new("Remove This Theme").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
+                        _ = remove.update(cx, |this, cx| {
                             let id = Settings::get(cx).color_theme.clone();
                             crate::theme::remove(&id);
                             this.themes = crate::theme::imported();
                             Settings::update(cx, |s| s.color_theme.clear());
-                        })),
-                )
+                        });
+                    }));
+                }
+                menu
             });
         let sidebar = h_flex()
             .gap_1()
@@ -1411,11 +1626,50 @@ impl Render for SettingsPanel {
                     ))
                     .child(setting_row(
                         "Format on save",
-                        "Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: the project's Prettier, rustfmt, Ruff, gofmt, shfmt, clang-format or PSScriptAnalyzer.",
+                        "Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded.",
                         Switch::new("format-on-save").checked(settings.format_on_save).on_click(|checked, _, cx| {
                             let checked = *checked;
                             Settings::update(cx, |s| s.format_on_save = checked)
                         }),
+                        cx,
+                    ))
+                    .child(setting_row(
+                        "Downloaded formatters",
+                        "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
+                        {
+                            let kits = crate::backend::format::kits();
+                            let downloaded = kits.iter().filter(|kit| kit.is_installed()).count();
+                            Button::new("formatters")
+                                .small()
+                                .outline()
+                                .label(format!("{downloaded} of {} downloaded", kits.len()))
+                                .icon(Icon::new(IconName::ChevronDown))
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                                    for &kit in crate::backend::format::kits() {
+                                        menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                                            let key = format!("formatter-{}", kit.name);
+                                            let installed = kit.is_installed();
+                                            let detail = format!("{} · {}", kit.formats, if installed { kit.version() } else { kit.size });
+                                            let download = if let Some(progress) = download_progress(&key) {
+                                                Download::Busy(progress)
+                                            } else if installed {
+                                                Download::Remove(Rc::new(move |window, cx| {
+                                                    if let Err(err) = crate::backend::format::remove(kit) {
+                                                        crate::toast::push(window, format!("Could not remove {}: {err}", kit.name), cx);
+                                                    }
+                                                }))
+                                            } else {
+                                                let key = key.clone();
+                                                Download::Get(Rc::new(move |window, cx| {
+                                                    start_download(key.clone(), kit.name, window, cx, move |cancel, progress| crate::backend::format::install(kit, cancel, progress))
+                                                }))
+                                            };
+                                            menu_entry(key, kit.name, &detail, vec![download], cx)
+                                        }));
+                                    }
+                                    menu
+                                })
+                        },
                         cx,
                     ))
                     .child(section_title("Source Control", cx))
@@ -1432,22 +1686,102 @@ impl Render for SettingsPanel {
                     .child(section_title("AI", cx))
                     .child(setting_row(
                         "Model",
-                        "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder).",
-                        v_flex().gap_1().items_end().children(crate::backend::ai::MODEL_PRESETS.iter().map(|preset| {
-                            let url = preset.url;
-                            let context = preset.context;
-                            let current = settings.ai_model == url;
-                            Button::new(SharedString::from(format!("ai-model-{}", preset.name)))
+                        "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder). Add your own GGUF model by link or file.",
+                        {
+                            use crate::backend::ai;
+                            let current = settings.ai_model.clone();
+                            let label = ai::MODEL_PRESETS.iter().find(|p| p.url == current).map_or_else(|| ai::model_name(&current), |p| p.name.to_string());
+                            // The added models, and the chosen one when it is neither a preset nor on the list.
+                            let mut customs = settings.ai_custom_models.clone();
+                            if !ai::MODEL_PRESETS.iter().any(|p| p.url == current) && !customs.contains(&current) {
+                                customs.push(current.clone());
+                            }
+                            let this = cx.weak_entity();
+                            Button::new("ai-model")
                                 .small()
-                                .label(format!("{} · {} · {}", preset.name, preset.size, preset.fits))
-                                .map(|b| if current { b.primary() } else { b.outline() })
-                                .on_click(move |_, _, cx| {
-                                    Settings::update(cx, |s| {
-                                        s.ai_model = url.to_string();
-                                        s.ai_context_size = context;
-                                    })
+                                .outline()
+                                .label(label)
+                                .icon(Icon::new(IconName::ChevronDown))
+                                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                                    for preset in ai::MODEL_PRESETS {
+                                        let (url, name, context) = (preset.url, preset.name, preset.context);
+                                        let detail = format!("{} · {}", preset.size, preset.fits);
+                                        menu = menu.item(
+                                            PopupMenuItem::element(move |_, cx| menu_entry(format!("ai-model-{name}"), name, &detail, vec![model_download(url)], cx))
+                                                .checked(current == url)
+                                                .on_click(move |_, _, cx| {
+                                                    Settings::update(cx, |s| {
+                                                        s.ai_model = url.to_string();
+                                                        s.ai_context_size = context;
+                                                    })
+                                                }),
+                                        );
+                                    }
+                                    if !customs.is_empty() {
+                                        menu = menu.separator();
+                                    }
+                                    for model in &customs {
+                                        let (model, pick) = (model.clone(), model.clone());
+                                        let checked = current == model;
+                                        menu = menu.item(
+                                            PopupMenuItem::element(move |_, cx| {
+                                                let detail = if ai::is_download(&model) { "link" } else { "file" };
+                                                let forget = model.clone();
+                                                let forget = Download::Forget(Rc::new(move |_, cx| {
+                                                    Settings::update(cx, |s| {
+                                                        s.ai_custom_models.retain(|m| *m != forget);
+                                                        if s.ai_model == forget {
+                                                            s.ai_model.clear();
+                                                        }
+                                                    })
+                                                }));
+                                                let mut actions = Vec::new();
+                                                if ai::is_download(&model) {
+                                                    actions.push(model_download(&model));
+                                                }
+                                                if !ai::model_downloaded(&model) {
+                                                    actions.push(forget);
+                                                }
+                                                menu_entry(format!("ai-model-{model}"), ai::model_name(&model), detail, actions, cx)
+                                            })
+                                            .checked(checked)
+                                            .on_click(move |_, _, cx| {
+                                                let pick = pick.clone();
+                                                Settings::update(cx, |s| s.ai_model = pick)
+                                            }),
+                                        );
+                                    }
+                                    let (by_link, by_file) = (this.clone(), this.clone());
+                                    menu.separator()
+                                        .item(PopupMenuItem::new("Add Model from Link…").icon(Icon::new(IconName::Globe)).on_click(move |_, window, cx| {
+                                            _ = by_link.update(cx, |this, cx| this.add_model_link(window, cx));
+                                        }))
+                                        .item(PopupMenuItem::new("Add GGUF File…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
+                                            _ = by_file.update(cx, |this, cx| this.add_model_file(window, cx));
+                                        }))
                                 })
-                        })),
+                        },
+                        cx,
+                    ))
+                    .child(setting_row(
+                        "Runtime",
+                        "llama.cpp, which runs the model (about 100 MB); downloaded again on next use when removed.",
+                        if crate::backend::ai::runtime_downloaded() {
+                            Button::new("ai-runtime-remove")
+                                .small()
+                                .ghost()
+                                .icon(Icon::new(IconName::Trash))
+                                .label("Remove")
+                                .on_click(cx.listener(|_, _, window, cx| {
+                                    if let Err(err) = crate::backend::ai::remove_runtime() {
+                                        crate::toast::push(window, format!("Could not remove the AI runtime: {err}"), cx);
+                                    }
+                                    cx.notify();
+                                }))
+                                .into_any_element()
+                        } else {
+                            div().text_xs().text_color(cx.theme().muted_foreground).child("not downloaded").into_any_element()
+                        },
                         cx,
                     ))
                     .child(setting_row(

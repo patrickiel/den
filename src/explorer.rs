@@ -193,6 +193,23 @@ impl Explorer {
         }
     }
 
+    /// Show `path` in the tree: the folders down to it expanded, its row
+    /// selected and scrolled to.
+    pub fn show_path(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if !path.starts_with(&self.root) {
+            return;
+        }
+        for dir in path.ancestors().skip(1).take_while(|dir| *dir != self.root) {
+            self.expanded.insert(dir.to_path_buf());
+        }
+        self.rebuild();
+        if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
+            self.select(ix, cx);
+        }
+        cx.emit(ExplorerEvent::ExpandedChanged);
+        cx.notify();
+    }
+
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
         self.rebuild();
