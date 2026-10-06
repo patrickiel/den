@@ -433,6 +433,7 @@ pub fn fetch_index() -> Result<Vec<Listing>, String> {
         std::fs::read_to_string(&source).map_err(|e| format!("Cannot read {source}: {e}"))?
     };
     let listings = parse_index(&text)?;
+    let _ = std::fs::create_dir_all(crate::settings::data_dir());
     let _ = std::fs::write(index_cache(), text);
     Ok(listings)
 }
@@ -702,6 +703,47 @@ mod tests {
         assert!(log.contains("[hello-extension] opened C:\\project"), "{log}");
         assert!(log.contains("[hello-extension] goodbye"), "{log}");
         assert!(crate::settings::data_dir().join("extensions-data").join("hello-extension").is_dir());
+    }
+
+    /// Installs task-buttons from the live index as the Extensions view does,
+    /// then loads it: `cargo test -- --ignored installs_from_the_live_index`.
+    #[test]
+    #[ignore]
+    fn installs_from_the_live_index() {
+        let appdata = temp("live-index");
+        // SAFETY: only this ignored test reads APPDATA while it runs.
+        unsafe { std::env::set_var("APPDATA", &appdata) };
+        let listings = fetch_index().unwrap();
+        let listing = listings.iter().find(|l| l.id == "task-buttons").expect("task-buttons is in the index");
+        assert!(listing.loadable());
+        assert!(cached_index().is_some_and(|(cached, _)| cached == listings));
+        fetch_icon(listing).unwrap();
+        assert!(fetch_readme(&listing.readme_url).unwrap().contains("Task Buttons"));
+
+        let manifest = fetch_manifest(&listing.repo).unwrap();
+        assert_eq!((manifest.version.as_str(), manifest.repository.as_str()), (listing.version.as_str(), "patrickiel/task-buttons"));
+        assert_eq!(manifest.sha256.len(), 64, "the release's extension.json carries the zip's sha256");
+        install(&manifest, &crate::backend::ai::Cancel::default(), &mut |_, _, _| {}).unwrap();
+        assert!(dir().join("task-buttons.pending").join(manifest.library()).is_file());
+
+        apply_pending();
+        let found = installed();
+        let ext = found.iter().find(|i| i.id == "task-buttons").unwrap();
+        let installed = ext.manifest.clone().unwrap();
+        assert_eq!(installed.repository, "patrickiel/task-buttons");
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let messages = start(installed, ext.dir.clone(), Default::default(), tx);
+        loop {
+            match futures::executor::block_on(futures::StreamExt::next(&mut rx)).unwrap() {
+                Report::Loaded(id) if id == "task-buttons" => break,
+                Report::Failed(_, err) => panic!("failed to load: {err}"),
+                _ => {}
+            }
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+        messages.send(Message::Deactivate(done_tx)).unwrap();
+        done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(std::fs::read_to_string(log_path()).unwrap().contains("[task-buttons] loaded 0.1.0"));
     }
 
     #[test]

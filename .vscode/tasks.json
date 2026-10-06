@@ -1,0 +1,42 @@
+{
+  // The repo's GitHub pages, as buttons in den's title bar (Task Buttons) or
+  // VS Code's status bar (actboy168.tasks).
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "GitHub: repo",
+      "type": "shell",
+      "command": "start https://github.com/patrickiel/den",
+      "presentation": { "reveal": "never" },
+      "options": { "statusbar": { "label": "$(github)", "detail": "Open patrickiel/den on GitHub" } }
+    },
+    {
+      "label": "GitHub: issues",
+      "type": "shell",
+      "command": "start https://github.com/patrickiel/den/issues",
+      "presentation": { "reveal": "never" },
+      "options": { "statusbar": { "label": "$(circle-dot)", "detail": "Issues" } }
+    },
+    {
+      "label": "GitHub: pull requests",
+      "type": "shell",
+      "command": "start https://github.com/patrickiel/den/pulls",
+      "presentation": { "reveal": "never" },
+      "options": { "statusbar": { "label": "$(git-pull-request)", "detail": "Pull requests" } }
+    },
+    {
+      "label": "GitHub: actions",
+      "type": "shell",
+      "command": "start https://github.com/patrickiel/den/actions",
+      "presentation": { "reveal": "never" },
+      "options": { "statusbar": { "label": "$(play)", "detail": "Actions" } }
+    },
+    {
+      "label": "GitHub: releases",
+      "type": "shell",
+      "command": "start https://github.com/patrickiel/den/releases",
+      "presentation": { "reveal": "never" },
+      "options": { "statusbar": { "label": "$(tag)", "detail": "Releases" } }
+    }
+  ]
+}
