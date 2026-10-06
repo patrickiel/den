@@ -3,7 +3,7 @@ members = [".", "crates/den-extension", "examples/hello-extension", "examples/wo
 
 [package]
 name = "den"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "A project terminal for Windows: split panes, editor, browser, explorer, search and source control"
 
