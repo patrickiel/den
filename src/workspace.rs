@@ -11,6 +11,7 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, TitleBar, WindowExt as _,
+    badge::Badge,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -61,11 +62,12 @@ pub struct LayoutState {
 
 /// The taskbar's jump list: right-click den on the taskbar
 /// for its recent folders, each opening in a new window. Entries removed
-/// there leave the title bar's list too.
+/// there leave the title bar's list too. GPUI fails the whole list without
+/// a task, so there is New Window too, which starts den as `--dock-action 0`.
 pub(crate) fn sync_jump_list(cx: &mut App) {
     let entries: Vec<smallvec::SmallVec<[PathBuf; 2]>> =
         AppState::get(cx).recent.iter().take(12).map(|path| smallvec::smallvec![path.clone()]).collect();
-    let removed = cx.update_jump_list(Vec::new(), entries);
+    let removed = cx.update_jump_list(vec![MenuItem::action("New Window", crate::OpenFolder)], entries);
     cx.spawn(async move |cx| {
         let removed = removed.await;
         if removed.is_empty() {
@@ -385,6 +387,8 @@ impl Workspace {
                 }
             }),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            // The Source Control button counts the changes.
+            cx.observe(&repo, |_, _, cx| cx.notify()),
             cx.on_app_quit(|this, cx| {
                 crate::backend::ai::stop();
                 this.save_session(cx);
@@ -1799,7 +1803,14 @@ impl Workspace {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(view_button("view-explorer", IconName::Files, "Explorer (Ctrl+Shift+E)", SidebarView::Explorer, cx))
                             .child(view_button("view-search", IconName::Search, "Search (Ctrl+Shift+F)", SidebarView::Search, cx))
-                            .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx))
+                            .child(
+                                // As in VS Code: how many files have changed.
+                                Badge::new()
+                                    .count(self.repo.read(cx).status().map_or(0, |status| status.files.len()))
+                                    .max(999)
+                                    .color(cx.theme().primary)
+                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx)),
+                            )
                             .child(view_button("view-extensions", IconName::Blocks, "Extensions (Ctrl+Shift+X)", SidebarView::Extensions, cx)),
                     ),
             )

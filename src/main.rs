@@ -4,6 +4,8 @@
 
 // The built-in themes are large `json!` literals.
 #![recursion_limit = "512"]
+// A GUI app: no console window opens with it. Dev builds keep theirs for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod assets;
 mod backend;
@@ -95,6 +97,22 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
         .ok();
 }
 
+/// The folder to open with none given. Started from a shell, that shell's
+/// folder; from the Start menu or taskbar (whose working folder is den's own
+/// install folder), the folder last open.
+fn start_folder() -> PathBuf {
+    let cwd = std::env::current_dir().ok();
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from));
+    let from_shell = match (&cwd, &exe_dir) {
+        (Some(cwd), Some(exe_dir)) => repo::key(cwd) != repo::key(exe_dir),
+        (cwd, _) => cwd.is_some(),
+    };
+    if !from_shell && let Some(last) = settings::last_folder() {
+        return last;
+    }
+    cwd.unwrap_or_else(|| PathBuf::from("."))
+}
+
 fn main() {
     // GPUI composites its frame topmost over child windows through
     // DirectComposition, which would hide the browser tabs' WebView2.
@@ -102,11 +120,12 @@ fn main() {
     // when the platform starts, so set it before anything else.
     // SAFETY: nothing else runs yet, so no thread reads the environment.
     unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
-    let root = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = match std::env::args_os().nth(1) {
+        // The jump list's New Window task (see `workspace::sync_jump_list`).
+        Some(arg) if arg == "--dock-action" => settings::last_folder().unwrap_or_else(start_folder),
+        Some(arg) => PathBuf::from(arg),
+        None => start_folder(),
+    };
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     let root = settings::strip_verbatim(root);
 

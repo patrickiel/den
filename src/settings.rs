@@ -416,6 +416,11 @@ pub(crate) fn data_dir() -> PathBuf {
     base.join("den")
 }
 
+/// The most recent folder that still exists, read before the app starts.
+pub fn last_folder() -> Option<PathBuf> {
+    read_json::<AppState>("state.json")?.recent.into_iter().find(|p| p.is_dir())
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
     let text = std::fs::read_to_string(data_dir().join(name)).ok()?;
     serde_json::from_str(&text).ok()
