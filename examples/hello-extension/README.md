@@ -73,7 +73,7 @@ It runs on a thread of its own inside den, with your permissions, so on its own 
 
 `Context` carries den's version, `data_dir` (a folder of the extension's own that survives updates) and `settings`, the values at start. `root` is always a folder exactly as `workspace_opened` named it, which is how den finds the window again.
 
-For more than this, see [`workspace-stats`](../workspace-stats) (settings applied live, a command, saves counted, state across restarts, a worker thread, a clean shutdown) and [`task-buttons`](../task-buttons) (VS Code's `tasks.json` as title-bar buttons that run in a terminal, commands that reload and open it).
+For more than this, see [`workspace-stats`](https://github.com/patrickiel/workspace-stats) (settings applied live, a command, saves counted, state across restarts, a worker thread, a clean shutdown) and [`task-buttons`](https://github.com/patrickiel/task-buttons) (VS Code's `tasks.json` as title-bar buttons that run in a terminal, commands that reload and open it).
 
 ## Try it
 

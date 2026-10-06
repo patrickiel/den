@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/den-extension", "examples/hello-extension", "examples/workspace-stats", "examples/task-buttons"]
+members = [".", "crates/den-extension", "examples/hello-extension"]
 
 [package]
 name = "den"

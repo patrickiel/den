@@ -1,12 +1,12 @@
 # Writing den extensions
 
-This guide covers writing, testing, publishing and listing an extension for den. The examples in [`examples/`](../examples) are complete, working extensions, so it's worth reading them alongside this.
+This guide covers writing, testing, publishing and listing an extension for den. The examples below are complete, working extensions, so it's worth reading them alongside this. `hello-extension` is in this repository; the other two live in their own repositories, set up the way a published extension is.
 
 | Example | What it shows |
 | --- | --- |
 | [`hello-extension`](../examples/hello-extension) | The minimum: a toast, a setting, and a command with a keybinding that uses the active file |
-| [`workspace-stats`](../examples/workspace-stats) | A worker thread, settings applied live, state across restarts, saves counted, a clean shutdown |
-| [`task-buttons`](../examples/task-buttons) | Title-bar buttons, running commands in a terminal, opening files, a `choice` setting |
+| [`workspace-stats`](https://github.com/patrickiel/workspace-stats) | A worker thread, settings applied live, state across restarts, saves counted, a clean shutdown |
+| [`task-buttons`](https://github.com/patrickiel/task-buttons) | Title-bar buttons, running commands in a terminal, opening files, a `choice` setting |
 
 ## Contents
 

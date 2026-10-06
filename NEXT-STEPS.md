@@ -37,7 +37,7 @@ So that **Available** isn't empty on day one:
 - [x] Do the same for `workspace-stats` if you want it listed too.
 - [x] Open a PR to `den-extensions` adding `{ "repo": "patrickiel/task-buttons" }` to `extensions.json`, and check that the **check** workflow passes.
 - [x] Merge it, then check that `index.json` is rebuilt and the extension shows up under **Available** in den (the refresh button in the Extensions view fetches straight away).
-- [ ] Decide whether the copies in `examples/` stay as examples or become links to the new repos.
+- [x] Decide whether the copies in `examples/` stay as examples or become links to the new repos. They are links now; `examples/hello-extension` stays as the in-tree example.
 
 ## 4. Not verified yet
 

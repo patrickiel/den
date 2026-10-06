@@ -7610,15 +7610,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
-name = "task-buttons"
-version = "0.1.0"
-dependencies = [
- "den-extension",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tauri-winrt-notification"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9867,15 +9858,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "workspace-stats"
-version = "0.1.0"
-dependencies = [
- "den-extension",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "writeable"
