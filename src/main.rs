@@ -13,6 +13,9 @@ mod diff;
 mod dirty_diff;
 mod encoding;
 mod explorer;
+mod extension_panel;
+mod extensions;
+mod extensions_view;
 mod file_icon;
 mod float;
 mod layout;
@@ -44,6 +47,7 @@ actions!(
         FormatDocument,
         OpenSettings,
         FocusExplorer,
+        FocusExtensions,
         FocusSearch,
         FocusScm,
         SplitRight,
@@ -74,9 +78,14 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
         ..TitleBar::window_options()
     };
     let title = format!("den — {}", root.display());
-    let Ok((window, _)) = gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| workspace::Workspace::new(root, window, cx))) else {
+    extensions::broadcast(den_extension::events::WORKSPACE_OPENED, serde_json::json!({ "root": root }), cx);
+    let Ok((window, workspace)) = gpui_kit::open_window(options, cx, {
+        let root = root.clone();
+        move |window, cx| cx.new(|cx| workspace::Workspace::new(root, window, cx))
+    }) else {
         return;
     };
+    extensions::window_opened(root, workspace.downgrade(), window, cx);
     window
         .update(cx, |_, window, _| {
             window.activate_window();
@@ -109,12 +118,14 @@ fn main() {
             panels::init(cx);
             terminal::init(cx);
             diff::init(cx);
+            extensions::init(cx);
 
             cx.bind_keys([
                 KeyBinding::new("ctrl-s", SaveFile, None),
                 KeyBinding::new("shift-alt-f", FormatDocument, None),
                 KeyBinding::new("ctrl-,", OpenSettings, None),
                 KeyBinding::new("ctrl-shift-e", FocusExplorer, None),
+                KeyBinding::new("ctrl-shift-x", FocusExtensions, None),
                 KeyBinding::new("ctrl-shift-f", FocusSearch, None),
                 KeyBinding::new("ctrl-shift-g", FocusScm, None),
                 KeyBinding::new("ctrl-shift-h", ReplaceInFiles, None),

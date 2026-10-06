@@ -1,0 +1,24 @@
+{
+  "id": "hello-extension",
+  "name": "Hello",
+  "version": "0.1.0",
+  "api": 1,
+  "icon": "icon.svg",
+  "description": "Says hello when den starts, and on Ctrl+Alt+H names the file you're in.",
+  "settings": [
+    {
+      "key": "greeting",
+      "title": "Greeting",
+      "description": "What the toast says when den starts.",
+      "type": "string",
+      "default": "Hello from an extension"
+    }
+  ],
+  "commands": [
+    {
+      "id": "say-hello",
+      "title": "Say Hello",
+      "keybinding": "ctrl-alt-h"
+    }
+  ]
+}

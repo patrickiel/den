@@ -28,6 +28,8 @@ pub enum PaneEvent {
     OpenBrowser(String),
     /// The program in it wants the user.
     Alert { kind: AlertKind, message: Option<String> },
+    /// It saved this file.
+    Saved(std::path::PathBuf),
 }
 
 /// Why a terminal wants the user.
@@ -116,6 +118,7 @@ impl<T: Pane> PaneHandle for Entity<T> {
             PaneEvent::OpenFile { path, line, column } => this.open_file_at(path.clone(), *line, *column, window, cx),
             PaneEvent::OpenBrowser(url) => this.open_browser(None, Some(url.clone()), window, cx),
             PaneEvent::Alert { kind, message } => this.pane_alert(id, *kind, message.clone(), window, cx),
+            PaneEvent::Saved(path) => crate::extensions::broadcast(den_extension::events::FILE_SAVED, serde_json::json!({ "root": this.root, "path": path }), cx),
         })
     }
 }

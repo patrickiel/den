@@ -147,6 +147,10 @@ pub struct Settings {
     pub imported_den_browsers: bool,
     /// The icons of den's presets were taken over once (they came later).
     pub imported_den_icons: bool,
+    /// Installed extensions that den does not load, by id.
+    pub disabled_extensions: Vec<String>,
+    /// What the user set of each extension's settings, by id and key.
+    pub extension_settings: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Default for Settings {
@@ -195,6 +199,8 @@ impl Default for Settings {
             browser_home: "https://www.google.com".into(),
             imported_den_browsers: false,
             imported_den_icons: false,
+            disabled_extensions: Vec::new(),
+            extension_settings: Default::default(),
         }
     }
 }
@@ -237,6 +243,7 @@ pub enum SidebarView {
     Explorer,
     Search,
     Scm,
+    Extensions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

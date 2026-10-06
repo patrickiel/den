@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/den-extension", "examples/hello-extension", "examples/workspace-stats", "examples/task-buttons"]
+
 [package]
 name = "den"
 version = "0.2.1"
@@ -40,6 +43,8 @@ smallvec = "1"
 encoding_rs = "0.8"
 raw-window-handle = "0.6"
 minisign-verify = "0.2"
+libloading = "0.8"
+den-extension = { path = "crates/den-extension" }
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"

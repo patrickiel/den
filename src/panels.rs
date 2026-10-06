@@ -57,6 +57,16 @@ pub fn init(cx: &mut App) {
         Rc::new(cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx)))
     });
     pane::register(cx, SETTINGS, |_, window, cx| Rc::new(cx.new(|cx| SettingsPanel::new(window, cx))));
+    pane::register(cx, crate::extension_panel::EXTENSION, |data, window, cx| {
+        let id = data["id"].as_str().unwrap_or_default().to_string();
+        let listing = serde_json::from_value::<crate::backend::extensions::Listing>(data["listing"].clone()).ok();
+        // A preview whose extension got installed meanwhile opens as its page.
+        let installed = crate::extensions::Extensions::get(cx).entries.iter().any(|e| e.id == id);
+        match listing.filter(|_| !installed) {
+            Some(listing) => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::preview(listing, cx))),
+            None => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::new(id, window, cx))),
+        }
+    });
     pane::register(cx, terminal::TERMINAL, |data, window, cx| {
         let cwd = data["cwd"]
             .as_str()
@@ -360,6 +370,7 @@ impl FilePanel {
                 self.error = None;
                 self.refresh_git_base(cx);
                 cx.emit(PaneEvent::Changed);
+                cx.emit(PaneEvent::Saved(self.path.clone()));
             }
             Err(err) => {
                 crate::toast::push(window, format!("Could not save {}: {err}", self.path.display()), cx);
@@ -1315,8 +1326,9 @@ fn filtering() -> bool {
 }
 
 /// One setting: name and description on the left, its control on the right.
-fn setting_row(name: &'static str, description: &'static str, control: impl IntoElement, cx: &App) -> Div {
-    if !passes(&[name, description]) {
+fn setting_row(name: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> Div {
+    let (name, description) = (name.into(), description.into());
+    if !passes(&[name.as_ref(), description.as_ref()]) {
         return div();
     }
     h_flex()
@@ -1421,7 +1433,7 @@ fn add_custom_model(model: String, cx: &mut App) {
 /// Downloads started from Settings, by key, with their progress.
 static DOWNLOADS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
-fn download_progress(key: &str) -> Option<String> {
+pub(crate) fn download_progress(key: &str) -> Option<String> {
     DOWNLOADS.lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, progress)| progress.clone())
 }
 
@@ -1443,6 +1455,18 @@ fn start_download(
     cx: &mut App,
     job: impl FnOnce(&crate::backend::ai::Cancel, crate::backend::ai::Progress) -> Result<(), String> + Send + 'static,
 ) {
+    start_download_then(key, what, window, cx, job, |_, _| {});
+}
+
+/// [`start_download`], then `done` once it succeeded.
+fn start_download_then(
+    key: String,
+    what: impl Into<String>,
+    window: &mut Window,
+    cx: &mut App,
+    job: impl FnOnce(&crate::backend::ai::Cancel, crate::backend::ai::Progress) -> Result<(), String> + Send + 'static,
+    done: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
     if download_progress(&key).is_some() {
         return;
     }
@@ -1459,18 +1483,79 @@ fn start_download(
     });
     let what = what.into();
     let handle = window.window_handle();
+    let mut done = Some(done);
     cx.spawn(async move |cx| {
         use futures::StreamExt as _;
         while let Some(update) = rx.next().await {
             _ = handle.update(cx, |_, window, cx| {
-                if let Some(Err(err)) = update {
-                    crate::toast::push(window, format!("Could not download {what}: {err}"), cx);
+                match update {
+                    Some(Err(err)) => crate::toast::push(window, format!("Could not download {what}: {err}"), cx),
+                    Some(Ok(())) => {
+                        if let Some(done) = done.take() {
+                            done(window, cx);
+                        }
+                    }
+                    None => {}
                 }
                 window.refresh();
             });
         }
     })
     .detach();
+}
+
+/// Fetch `repo`'s latest release, ask, and download it for the next start.
+/// `current` is the installed version when this is an update.
+pub(crate) fn get_extension(repo: String, current: Option<String>, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::WindowExt as _;
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        let fetch = repo.clone();
+        let result = cx.background_spawn(async move { crate::backend::extensions::fetch_manifest(&fetch) }).await;
+        _ = handle.update(cx, |_, window, cx| {
+            let manifest = match result.and_then(|m| m.check_api().map(|()| m)) {
+                Ok(manifest) => manifest,
+                Err(err) => return crate::toast::push(window, err, cx),
+            };
+            if let Some(current) = &current
+                && !crate::update::newer(&manifest.version, current)
+            {
+                return crate::toast::push(window, format!("{} {current} is the newest version.", manifest.name), cx);
+            }
+            let (title, ok) = if current.is_some() { ("Update Extension", "Update") } else { ("Install Extension", "Install") };
+            let about = if manifest.description.is_empty() { String::new() } else { format!("{}\n\n", manifest.description) };
+            let text = format!(
+                "{} {} from github.com/{repo}.\n\n{about}An extension is native code: it runs inside den with your permissions, so install only what you trust. It loads at the next start.",
+                manifest.name, manifest.version
+            );
+            window.open_alert_dialog(cx, move |dialog, _, _| {
+                let manifest = manifest.clone();
+                dialog.title(title).description(text.clone()).ok_text(ok).show_cancel(true).on_ok(move |_, window, cx| {
+                    let (job, done) = (manifest.clone(), manifest.clone());
+                    crate::toast::push(window, format!("Downloading {}…", manifest.name), cx);
+                    start_download_then(
+                        format!("ext-install-{}", manifest.id),
+                        manifest.name.clone(),
+                        window,
+                        cx,
+                        move |cancel, progress| crate::backend::extensions::install(&job, cancel, progress),
+                        move |_, cx| crate::extensions::installed(done, cx),
+                    );
+                    true
+                })
+            });
+        });
+    })
+    .detach();
+}
+
+pub(crate) fn open_extensions_folder() {
+    let dir = crate::backend::extensions::dir();
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    }
 }
 
 fn choice<T: Copy + PartialEq + 'static>(
@@ -1599,7 +1684,7 @@ impl Render for SettingsPanel {
                     .child(setting_row("Theme", "Colours of the whole window.", theme, cx))
                     .child(setting_row(
                         "Sidebar position",
-                        "Which side of the groups the Explorer, Search and Source Control sit on.",
+                        "Which side of the groups the Explorer, Search, Source Control and Extensions sit on.",
                         sidebar,
                         cx,
                     ))

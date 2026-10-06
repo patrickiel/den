@@ -14,7 +14,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
-    menu::{DropdownMenu as _, PopupMenuItem},
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     resizable::{h_resizable, resizable_panel},
     v_flex,
 };
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::pane::AlertKind;
 use gpui_kit::component::notification::{Notification, NotificationType};
 use crate::{
-    CloseGroup, CloseTab, FocusDown, FocusExplorer, FormatDocument, NewBrowser, FocusLeft, FocusRight, FocusScm, FocusSearch, FocusUp, NewTerminal,
+    CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FormatDocument, NewBrowser, FocusLeft, FocusRight, FocusScm, FocusSearch, FocusUp, NewTerminal,
     NextTab, OpenFiles, OpenFolder, OpenSettings, PrevTab, ReplaceInFiles, SplitDown, SplitRight,
     defaults::{Defaults, GroupDefault, Kind},
     backend::watch,
@@ -36,6 +36,8 @@ use crate::{
     pane::{self, Pane as _, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::Repo,
+    extension_panel::ExtensionPanel,
+    extensions_view::{ExtensionsEvent, ExtensionsView},
     scm::{ScmEvent, ScmView},
     search::{IsDirty, SearchEvent, SearchView},
     settings::{AppState, LayoutPreset, Preset, Settings, SidebarSide, SidebarView},
@@ -77,15 +79,143 @@ pub(crate) fn sync_jump_list(cx: &mut App) {
     .detach();
 }
 
+/// Each folder by its name, with as many parents as it takes to tell it from
+/// the others: `root` first, then the recent folders other than it.
+fn recent_names(root: &PathBuf, cx: &App) -> (Vec<String>, Vec<PathBuf>) {
+    let recent: Vec<PathBuf> = AppState::get(cx)
+        .recent
+        .iter()
+        .filter(|p| crate::repo::key(p) != crate::repo::key(root))
+        .cloned()
+        .collect();
+    let all: Vec<PathBuf> = std::iter::once(root.clone()).chain(recent.iter().cloned()).collect();
+    (crate::settings::unique_names(&all), recent)
+}
+
+/// The session switcher's menu, from the recent folders as they are now.
+fn recent_menu(this: WeakEntity<Workspace>, root: PathBuf, menu: PopupMenu, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let (names, recent) = recent_names(&root, cx);
+    let own = cx.weak_entity();
+    let mut menu = menu.label("RECENT FOLDERS").max_h(px(480.)).scrollable(true);
+    if recent.is_empty() {
+        menu = menu.item(PopupMenuItem::new("No other folders yet").disabled(true));
+    }
+    for (ix, (path, label)) in recent.iter().zip(names.iter().skip(1)).enumerate() {
+        let this = this.clone();
+        let path = path.clone();
+        let (label, full) = (SharedString::from(label.clone()), SharedString::from(path.display().to_string()));
+        let forget = path.clone();
+        let elsewhere = (this.clone(), path.clone());
+        let rebuild = (this.clone(), root.clone(), own.clone());
+        let item = PopupMenuItem::element(move |_, _| {
+            let full = full.clone();
+            let forget = forget.clone();
+            let (open, path) = elsewhere.clone();
+            let (this, root, own) = rebuild.clone();
+            let row_button = |id: &'static str, icon: IconName| {
+                div()
+                    .id((id, ix))
+                    .flex_none()
+                    .invisible()
+                    .group_hover(SharedString::from(format!("recent-{ix}")), |this| this.visible())
+                    .rounded(px(3.))
+                    .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                    .child(Icon::new(icon).xsmall())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            };
+            h_flex()
+                .id(("recent", ix))
+                .group(SharedString::from(format!("recent-{ix}")))
+                .w_full()
+                .gap_2()
+                .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                // Opens the folder in a window of its own, leaving this one be.
+                .child(
+                    row_button("open-recent-elsewhere", IconName::AppWindow)
+                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Open in New Window").build(window, cx))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            _ = open.update(cx, |this, cx| this.open_session(path.clone(), true, window, cx));
+                            window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
+                        }),
+                )
+                // The x takes the folder off the list (its saved session stays),
+                // as in den.
+                .child(
+                    row_button("forget-recent", IconName::X)
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let forget = forget.clone();
+                            AppState::update(cx, |state| {
+                                let key = crate::repo::key(&forget);
+                                state.recent.retain(|p| crate::repo::key(p) != key);
+                            });
+                            sync_jump_list(cx);
+                            let (this, root) = (this.clone(), root.clone());
+                            _ = own.update(cx, |menu, cx| menu.rebuild(window, cx, |menu, _, cx| recent_menu(this, root, menu, cx)));
+                            window.refresh();
+                        }),
+                )
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
+        });
+        menu = menu.item(item.icon(Icon::new(IconName::Folder)).on_click(move |_, window, cx| {
+            _ = this.update(cx, |this, cx| this.open_session(path.clone(), false, window, cx));
+        }));
+    }
+    let open = this.clone();
+    let new_window = this;
+    menu.separator()
+        .item(PopupMenuItem::new("Open Folder…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
+            _ = open.update(cx, |this, cx| this.prompt_open_folder(false, window, cx));
+        }))
+        .item(PopupMenuItem::new("Open Folder in New Window…").icon(Icon::new(IconName::AppWindow)).on_click(move |_, window, cx| {
+            _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
+        }))
+}
+
 /// A layout preset being dragged to another place in the Layouts menu.
 #[derive(Clone)]
 struct LayoutPresetDrag {
     ix: usize,
 }
 
+/// The Layouts menu, from the presets as they are now.
+fn layouts_menu(this: WeakEntity<Workspace>, mut menu: PopupMenu, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let count = AppState::get(cx).presets.len();
+    let own = cx.weak_entity();
+    menu = menu.label("LAYOUTS");
+    if count == 0 {
+        menu = menu.item(PopupMenuItem::new("No saved layouts").disabled(true));
+    }
+    // As in den: drag a layout to reorder, its x (on hover) deletes it.
+    // Each row reads its layout by position as it draws, so the open
+    // menu follows a move; a delete builds the menu again.
+    for ix in 0..count {
+        let this = this.clone();
+        let (row_this, row_menu) = (this.clone(), own.clone());
+        menu = menu.item(
+            PopupMenuItem::element(move |_, cx| layout_preset_row(ix, row_this.clone(), row_menu.clone(), cx))
+                .icon(Icon::new(IconName::LayoutTemplate))
+                .on_click(move |_, window, cx| {
+                    let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else { return };
+                    _ = this.update(cx, |this, cx| this.load_preset(&name, window, cx));
+                }),
+        );
+    }
+    let save = this.clone();
+    let reset = this;
+    menu.separator()
+        .item(PopupMenuItem::new("Save Layout…").icon(Icon::new(IconName::Save)).on_click(move |_, window, cx| {
+            _ = save.update(cx, |this, cx| this.prompt_save_preset(window, cx));
+        }))
+        .item(PopupMenuItem::new("Reset Layout").icon(Icon::new(IconName::RotateCcw)).on_click(move |_, _, cx| {
+            _ = reset.update(cx, |this, cx| this.reset_layout(cx));
+        }))
+}
+
 /// A row of the Layouts menu: preset `ix` (by position, read as it draws),
 /// draggable onto another row, with an x on hover that deletes it.
-fn layout_preset_row(ix: usize, cx: &App) -> AnyElement {
+fn layout_preset_row(ix: usize, this: WeakEntity<Workspace>, menu: WeakEntity<PopupMenu>, cx: &App) -> AnyElement {
     let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else {
         return div().into_any_element();
     };
@@ -117,6 +247,8 @@ fn layout_preset_row(ix: usize, cx: &App) -> AnyElement {
                             state.presets.remove(ix);
                         }
                     });
+                    let this = this.clone();
+                    _ = menu.update(cx, |menu, cx| menu.rebuild(window, cx, |menu, _, cx| layouts_menu(this, menu, cx)));
                     window.refresh();
                 }),
         )
@@ -171,6 +303,7 @@ pub struct Workspace {
     explorer: Entity<Explorer>,
     search: Entity<SearchView>,
     scm: Entity<ScmView>,
+    extensions: Entity<ExtensionsView>,
     repo: Entity<Repo>,
     _watcher: Option<watch::Watcher>,
     _watch_task: Option<Task<()>>,
@@ -179,6 +312,8 @@ pub struct Workspace {
     /// arrangement is not written again.
     layout_file_text: Option<String>,
     _subscriptions: Vec<Subscription>,
+    /// The active file as last told to the extensions.
+    active_file: Option<PathBuf>,
 }
 
 impl Workspace {
@@ -214,12 +349,18 @@ impl Workspace {
         let is_dirty: IsDirty = std::rc::Rc::new(move |path, cx| weak.upgrade().is_some_and(|this| this.read(cx).is_dirty_file(path, cx)));
         let search = cx.new(|cx| SearchView::new(root.clone(), is_dirty, window, cx));
         let scm = cx.new(|cx| ScmView::new(repo.clone(), window, cx));
+        let extensions = cx.new(|cx| ExtensionsView::new(window, cx));
         if !session.commit_message.is_empty() {
             let draft = session.commit_message.clone();
             scm.update(cx, |scm, cx| scm.set_draft(draft, window, cx));
         }
 
         let _subscriptions = vec![
+            cx.subscribe_in(&extensions, window, |this, _, event: &ExtensionsEvent, window, cx| match event {
+                ExtensionsEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
+                ExtensionsEvent::Show(id) => this.open_extension(id.clone(), None, window, cx),
+                ExtensionsEvent::Preview(listing) => this.open_extension(listing.id.clone(), Some(listing.clone()), window, cx),
+            }),
             cx.subscribe_in(&explorer, window, |this, _, event: &ExplorerEvent, window, cx| match event {
                 ExplorerEvent::Open { path, preview } => this.open_file(path.clone(), *preview, window, cx),
                 ExplorerEvent::ExpandedChanged => this.schedule_save(cx),
@@ -275,12 +416,14 @@ impl Workspace {
             explorer,
             search,
             scm,
+            extensions,
             repo,
             _watcher: None,
             _watch_task: None,
             _save_task: None,
             layout_file_text: None,
             _subscriptions,
+            active_file: None,
         };
         this.start_watching(window, cx);
         // Once per run, a little after start: is there a newer den?
@@ -1158,6 +1301,40 @@ impl Workspace {
         }
     }
 
+    /// The page of extension `id` (a preview of `listing` when it is not
+    /// installed): its tab if open, else a new one where files go.
+    pub(crate) fn open_extension(&mut self, id: String, listing: Option<crate::backend::extensions::Listing>, window: &mut Window, cx: &mut Context<Self>) {
+        let existing = self.find_pane(|view, cx| view.clone().downcast::<ExtensionPanel>().is_ok_and(|page| page.read(cx).id() == id), cx);
+        match existing {
+            Some(pane) => self.show_pane(pane, true, window, cx),
+            None => {
+                let page = match listing {
+                    Some(listing) => cx.new(|cx| ExtensionPanel::preview(listing, cx)),
+                    None => cx.new(|cx| ExtensionPanel::new(id, window, cx)),
+                };
+                let group = self.target_group(Kind::Files);
+                self.add_pane(std::rc::Rc::new(page), group, true, window, cx);
+            }
+        }
+    }
+
+    /// An extension's `run_in_terminal`: a shell in `cwd` (else the root)
+    /// running `command`, where terminals go.
+    pub(crate) fn run_in_terminal(&mut self, command: String, cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let group = self.target_group(Kind::Terminals);
+        let launch = Launch {
+            cwd: cwd.unwrap_or_else(|| self.root.clone()),
+            // A plain shell, so the session brings it back as one rather
+            // than running the command again.
+            program: None,
+            command: Some(command),
+            history: None,
+            agent: false,
+        };
+        let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
+        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+    }
+
     /// A shell starting in `dir` (Open Terminal Here).
     pub(crate) fn open_shell_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let group = self.target_group(Kind::Terminals);
@@ -1525,6 +1702,7 @@ impl Workspace {
                 SidebarView::Explorer => self.explorer.focus_handle(cx).focus(window, cx),
                 SidebarView::Search => SearchView::focus(&self.search, window, cx),
                 SidebarView::Scm => ScmView::focus(&self.scm, window, cx),
+                SidebarView::Extensions => ExtensionsView::focus(&self.extensions, window, cx),
             }
         }
         cx.notify();
@@ -1534,7 +1712,6 @@ impl Workspace {
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = AppState::get(cx).sidebar.clone();
-        let presets: Vec<String> = AppState::get(cx).presets.iter().map(|p| p.name.clone()).collect();
         let session_name = self
             .root
             .file_name()
@@ -1559,35 +1736,7 @@ impl Workspace {
             .ghost()
             .icon(Icon::new(IconName::LayoutDashboard))
             .tooltip("Layouts")
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu.label("LAYOUTS");
-                if presets.is_empty() {
-                    menu = menu.item(PopupMenuItem::new("No saved layouts").disabled(true));
-                }
-                // As in den: drag a layout to reorder, its x (on hover) deletes it.
-                // Each row reads its layout by position as it draws, so the open
-                // menu follows a move or a delete.
-                for ix in 0..presets.len() {
-                    let this = this.clone();
-                    menu = menu.item(
-                        PopupMenuItem::element(move |_, cx| layout_preset_row(ix, cx)).icon(Icon::new(IconName::LayoutTemplate)).on_click(move |_, window, cx| {
-                            let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else { return };
-                            _ = this.update(cx, |this, cx| this.load_preset(&name, window, cx));
-                        }),
-                    );
-                }
-                let save = this.clone();
-                let reset = this.clone();
-                menu = menu
-                    .separator()
-                    .item(PopupMenuItem::new("Save Layout…").icon(Icon::new(IconName::Save)).on_click(move |_, window, cx| {
-                        _ = save.update(cx, |this, cx| this.prompt_save_preset(window, cx));
-                    }))
-                    .item(PopupMenuItem::new("Reset Layout").icon(Icon::new(IconName::RotateCcw)).on_click(move |_, _, cx| {
-                        _ = reset.update(cx, |this, cx| this.reset_layout(cx));
-                    }));
-                menu
-            });
+            .dropdown_menu(move |menu, _, cx| layouts_menu(this.clone(), menu, cx));
 
         // As in den: the sidebar views on the left, the session in the middle,
         // the layout and the workspace's split and flip, then settings, on the
@@ -1607,7 +1756,8 @@ impl Workspace {
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(view_button("view-explorer", IconName::Files, "Explorer (Ctrl+Shift+E)", SidebarView::Explorer, cx))
                             .child(view_button("view-search", IconName::Search, "Search (Ctrl+Shift+F)", SidebarView::Search, cx))
-                            .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx)),
+                            .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx))
+                            .child(view_button("view-extensions", IconName::Blocks, "Extensions (Ctrl+Shift+X)", SidebarView::Extensions, cx)),
                     ),
             )
             .child(
@@ -1621,6 +1771,7 @@ impl Workspace {
                     h_flex()
                         .gap_1()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(self.extension_buttons(cx))
                         .child(layout_button)
                         // The outermost container's actions, called the workspace's.
                         .children(self.container_actions(root_node, "workspace", root_is_split, cx))
@@ -1637,6 +1788,62 @@ impl Workspace {
             )
     }
 
+    /// The buttons extensions put in this window's title bar; one with a
+    /// `file_pattern` only while the active tab is a file it matches.
+    /// The file in the active group's active tab, if it is a file tab.
+    fn active_file(&self, cx: &App) -> Option<PathBuf> {
+        self.tree
+            .active_tab(self.active_group)
+            .and_then(|pane| self.panes.get(&pane))
+            .and_then(|pane| pane.view().downcast::<crate::panels::FilePanel>().ok())
+            .map(|file| file.read(cx).path().to_path_buf())
+    }
+
+    /// Tell the extensions when the active file changed since they last heard.
+    fn report_active_file(&mut self, cx: &App) {
+        let active = self.active_file(cx);
+        if active != self.active_file {
+            crate::extensions::broadcast(den_extension::events::ACTIVE_FILE_CHANGED, serde_json::json!({ "root": self.root, "path": active }), cx);
+            self.active_file = active;
+        }
+    }
+
+    fn extension_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(extensions) = cx.try_global::<crate::extensions::Extensions>() else { return Vec::new() };
+        let active_file = self.active_file(cx).map(|path| path.to_string_lossy().into_owned());
+        let mut elements = Vec::new();
+        for set in extensions.buttons_for(&self.root) {
+            for button in &set.buttons {
+                if !button.file_pattern.is_empty() && !active_file.as_deref().is_some_and(|path| crate::extensions::pattern_matches(&button.file_pattern, path)) {
+                    continue;
+                }
+                let icon = (!button.icon.is_empty())
+                    .then(|| format!("icons/{}.svg", button.icon))
+                    .filter(|path| cx.asset_source().load(path).ok().flatten().is_some());
+                let color = crate::preset_icon::parse_color(&button.color);
+                let (id, root, name) = (set.id.clone(), self.root.clone(), button.id.clone());
+                let tooltip = if button.tooltip.is_empty() { button.label.clone() } else { button.tooltip.clone() };
+                elements.push(
+                    Button::new(SharedString::from(format!("ext-{}-{}", set.id, button.id)))
+                        .small()
+                        .ghost()
+                        .tooltip(tooltip)
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .when_some(color, |this, color| this.text_color(color))
+                                .when_some(icon, |this, path| this.child(Icon::default().path(path).small()))
+                                .child(button.label.clone()),
+                        )
+                        .on_click(move |_, _, cx| crate::extensions::button_clicked(&id, &root, &name, cx))
+                        .into_any_element(),
+                );
+            }
+        }
+        elements
+    }
+
     /// den's menus, under one button: each item runs the action its chord does.
     fn app_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
@@ -1645,7 +1852,8 @@ impl Workspace {
             .small()
             .icon(Icon::new(IconName::Menu))
             .tooltip("Menu")
-            .dropdown_menu(move |menu, window, _| {
+            .dropdown_menu(move |menu, window, cx| {
+                let commands = crate::extensions::commands(cx);
                 type Run = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
                 let item = |label: &'static str, chord: &'static str, run: Run| {
                     let this = this.clone();
@@ -1678,6 +1886,7 @@ impl Workspace {
                     .item(item("Explorer", "Ctrl+Shift+E", |this, _, cx| this.toggle_view(SidebarView::Explorer, cx)))
                     .item(item("Search", "", |this, _, cx| this.toggle_view(SidebarView::Search, cx)))
                     .item(item("Source Control", "Ctrl+Shift+G", |this, _, cx| this.toggle_view(SidebarView::Scm, cx)))
+                    .item(item("Extensions", "Ctrl+Shift+X", |this, _, cx| this.toggle_view(SidebarView::Extensions, cx)))
                     .item(item("Split Right", "Ctrl+Shift+D", |this, _, cx| this.split(this.active_group, Side::Right, cx)))
                     .item(item("Split Down", "Ctrl+Shift+-", |this, _, cx| this.split(this.active_group, Side::Bottom, cx)))
                     .item(item("Save Layout…", "", |this, window, cx| this.prompt_save_preset(window, cx)))
@@ -1692,6 +1901,18 @@ impl Workspace {
                         let preset = Settings::get(cx).presets.iter().find(|p| p.agent).cloned();
                         this.open_terminal(None, preset, window, cx)
                     }))
+                    // The running extensions' commands, each by its extension.
+                    .when(!commands.is_empty(), |mut menu| {
+                        menu = menu.separator().label("EXTENSIONS");
+                        for (id, name, command) in &commands {
+                            let keys = if command.keybinding.is_empty() { String::new() } else { format!("    {}", crate::extensions::pretty_keys(&command.keybinding)) };
+                            let (this, id, command_id) = (this.clone(), id.clone(), command.id.clone());
+                            menu = menu.item(PopupMenuItem::new(format!("{name}: {}{keys}", command.title)).on_click(move |_, _, cx| {
+                                _ = this.update(cx, |this, cx| crate::extensions::run_command(&id, &command_id, &this.root, cx));
+                            }));
+                        }
+                        menu
+                    })
                     .separator()
                     .item(item("Exit", "Alt+F4", |_, window, _| window.remove_window()))
             })
@@ -1700,97 +1921,17 @@ impl Workspace {
     /// The session name in the title bar, as den's: the folders opened before,
     /// and opening another.
     fn session_switcher(&self, name: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let recent: Vec<PathBuf> = AppState::get(cx)
-            .recent
-            .iter()
-            .filter(|p| crate::repo::key(p) != crate::repo::key(&self.root))
-            .cloned()
-            .collect();
-        // Each folder by its name, with as many parents as it takes to tell
-        // it from the others; the full path in a tooltip.
-        let all: Vec<PathBuf> = std::iter::once(self.root.clone()).chain(recent.iter().cloned()).collect();
-        let mut names = crate::settings::unique_names(&all);
-        let name = if names.is_empty() { name } else { names.remove(0) };
+        let (names, _) = recent_names(&self.root, cx);
+        let name = names.into_iter().next().unwrap_or(name);
         let this = cx.weak_entity();
+        let root = self.root.clone();
         Button::new("session")
             .ghost()
             .small()
             .label(name)
             .dropdown_caret(true)
             .tooltip("Switch session (Ctrl+Shift+O opens a folder)")
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu.label("RECENT FOLDERS").max_h(px(480.)).scrollable(true);
-                if recent.is_empty() {
-                    menu = menu.item(PopupMenuItem::new("No other folders yet").disabled(true));
-                }
-                for (ix, (path, label)) in recent.iter().zip(&names).enumerate() {
-                    let this = this.clone();
-                    let path = path.clone();
-                    let (label, full) = (SharedString::from(label.clone()), SharedString::from(path.display().to_string()));
-                    let forget = path.clone();
-                    let elsewhere = (this.clone(), path.clone());
-                    let item = PopupMenuItem::element(move |_, _| {
-                        let full = full.clone();
-                        let forget = forget.clone();
-                        let (open, path) = elsewhere.clone();
-                        let row_button = |id: &'static str, icon: IconName| {
-                            div()
-                                .id((id, ix))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(SharedString::from(format!("recent-{ix}")), |this| this.visible())
-                                .rounded(px(3.))
-                                .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                                .child(Icon::new(icon).xsmall())
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        };
-                        h_flex()
-                            .id(("recent", ix))
-                            .group(SharedString::from(format!("recent-{ix}")))
-                            .w_full()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
-                            // Opens the folder in a window of its own, leaving this one be.
-                            .child(
-                                row_button("open-recent-elsewhere", IconName::AppWindow)
-                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Open in New Window").build(window, cx))
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        _ = open.update(cx, |this, cx| this.open_session(path.clone(), true, window, cx));
-                                        window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
-                                    }),
-                            )
-                            // The x takes the folder off the list (its saved session stays),
-                            // as in den.
-                            .child(
-                                row_button("forget-recent", IconName::X)
-                                    .on_click(move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        let forget = forget.clone();
-                                        AppState::update(cx, |state| {
-                                            let key = crate::repo::key(&forget);
-                                            state.recent.retain(|p| crate::repo::key(p) != key);
-                                        });
-                                        sync_jump_list(cx);
-                                        window.refresh();
-                                    }),
-                            )
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
-                    });
-                    menu = menu.item(item.icon(Icon::new(IconName::Folder)).on_click(move |_, window, cx| {
-                        _ = this.update(cx, |this, cx| this.open_session(path.clone(), false, window, cx));
-                    }));
-                }
-                let open = this.clone();
-                let new_window = this.clone();
-                menu.separator()
-                    .item(PopupMenuItem::new("Open Folder…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-                        _ = open.update(cx, |this, cx| this.prompt_open_folder(false, window, cx));
-                    }))
-                    .item(PopupMenuItem::new("Open Folder in New Window…").icon(Icon::new(IconName::AppWindow)).on_click(move |_, window, cx| {
-                        _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
-                    }))
-            })
+            .dropdown_menu(move |menu, _, cx| recent_menu(this.clone(), root.clone(), menu, cx))
     }
 
     fn render_sidebar(&self, view: SidebarView, cx: &App) -> AnyElement {
@@ -1798,6 +1939,7 @@ impl Workspace {
             SidebarView::Explorer => self.explorer.clone().into(),
             SidebarView::Search => self.search.clone().into(),
             SidebarView::Scm => self.scm.clone().into(),
+            SidebarView::Extensions => self.extensions.clone().into(),
         };
         div()
             .size_full()
@@ -1969,6 +2111,7 @@ fn open_float_window(workspace: Entity<Workspace>, id: u64, bounds: Option<[f32;
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_browsers(None, window, cx);
+        self.report_active_file(cx);
         let sidebar = AppState::get(cx).sidebar.clone();
         let side = Settings::get(cx).sidebar_position;
         let groups = self.render_layout(&self.tree.root, None, window, cx);
@@ -2012,6 +2155,10 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusScm, window, cx| this.focus_view(SidebarView::Scm, window, cx)))
+            .on_action(cx.listener(|this, _: &FocusExtensions, window, cx| this.focus_view(SidebarView::Extensions, window, cx)))
+            .on_action(cx.listener(|this, action: &crate::extensions::RunCommand, _, cx| {
+                crate::extensions::run_command(&action.extension, &action.command, &this.root, cx)
+            }))
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().child(body))
             .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))

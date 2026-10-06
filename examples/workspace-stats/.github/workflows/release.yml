@@ -1,0 +1,44 @@
+# Publishes the extension where den installs it from: a tag `v<version>`
+# makes a GitHub release with `<id>-windows-x86_64.zip` (extension.json + the
+# DLL, README.md and the icon when there are) and `extension.json` with the zip's
+# sha256, which den reads first.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $manifest = Get-Content extension.json -Raw | ConvertFrom-Json
+          if ("v$($manifest.version)" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match version $($manifest.version) in extension.json" }
+          $id = $manifest.id
+          $dll = "target/release/$($id -replace '-', '_').dll"
+          New-Item -ItemType Directory -Force dist/pkg | Out-Null
+          Copy-Item extension.json, $dll dist/pkg/
+          # den shows these in its Extensions view and on the extension's page.
+          if (Test-Path README.md) { Copy-Item README.md dist/pkg/ }
+          if ($manifest.icon) {
+            $icon = Join-Path dist/pkg $manifest.icon
+            New-Item -ItemType Directory -Force (Split-Path $icon) | Out-Null
+            Copy-Item $manifest.icon $icon
+          }
+          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/$id-windows-x86_64.zip"
+          $sha = (Get-FileHash "dist/$id-windows-x86_64.zip" -Algorithm SHA256).Hash.ToLower()
+          $manifest | Add-Member -NotePropertyName sha256 -NotePropertyValue $sha -Force
+          $manifest | ConvertTo-Json | Set-Content -Encoding utf8NoBOM dist/extension.json
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/*.zip dist/extension.json --title "${{ github.ref_name }}" --generate-notes

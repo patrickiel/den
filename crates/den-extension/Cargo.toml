@@ -1,0 +1,9 @@
+[package]
+name = "den-extension"
+version = "0.1.0"
+edition = "2024"
+description = "Write den extensions in Rust: the SDK and the C ABI between den and an extension's DLL"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

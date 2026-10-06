@@ -4,7 +4,9 @@
 //! Ctrl+Enter) opens the file itself.
 
 use std::{
+    cell::Cell,
     ops::Range,
+    rc::Rc,
     path::{Path, PathBuf},
 };
 
@@ -25,6 +27,9 @@ use crate::{
 };
 
 pub const DIFF: &str = "Diff";
+
+/// The line numbers' column on each side.
+const GUTTER: Pixels = px(48.);
 
 actions!(diff, [OpenDiffedFile]);
 
@@ -119,6 +124,18 @@ pub struct DiffPanel {
     scroll: UniformListScrollHandle,
     /// While the ruler's thumb is dragged: how far below its top it is held.
     ruler_grab: Option<Pixels>,
+    /// How far each side (left, right) is scrolled sideways, as in VS Code
+    /// where the two editors scroll across on their own.
+    h_scroll: [Pixels; 2],
+    /// Each side's longest line, in characters.
+    widest: [usize; 2],
+    /// A character's width in the editor font; set as the view renders.
+    char_width: Pixels,
+    /// Where the rows are, caught as they paint.
+    list_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// While a side's scrollbar thumb is dragged: the side, and how far
+    /// right of the thumb's left edge it is held.
+    h_grab: Option<(usize, Pixels)>,
 }
 
 impl DiffPanel {
@@ -134,6 +151,11 @@ impl DiffPanel {
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             ruler_grab: None,
+            h_scroll: [px(0.); 2],
+            widest: [0; 2],
+            char_width: px(8.),
+            list_bounds: Default::default(),
+            h_grab: None,
         };
         this.reload();
         this
@@ -172,12 +194,108 @@ impl DiffPanel {
         };
         self.error = None;
         self.rows = rows(&old, &new);
+        let width = |line: &Option<(usize, String)>| line.as_ref().map_or(0, |(_, t)| t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum());
+        self.widest = [
+            self.rows.iter().map(|r| width(&r.left)).max().unwrap_or(0),
+            self.rows.iter().map(|r| width(&r.right)).max().unwrap_or(0),
+        ];
+    }
+
+    /// How far `side` can scroll across: its longest line past the room
+    /// beside the line numbers.
+    fn max_h_scroll(&self, side: usize) -> Pixels {
+        let room = self.h_track(side).1;
+        (self.char_width * (self.widest[side] + 2) as f32 - room).max(px(0.))
+    }
+
+    /// A side's scrollbar track, under its text (not its line numbers): its
+    /// left edge and width.
+    fn h_track(&self, side: usize) -> (Pixels, Pixels) {
+        let bounds = self.list_bounds.get();
+        let half = (bounds.size.width - px(1.)) / 2.;
+        (bounds.left() + (half + px(1.)) * side as f32 + GUTTER, (half - GUTTER).max(px(0.)))
+    }
+
+    /// A side's scrollbar thumb: its left edge and width.
+    fn h_thumb(&self, side: usize) -> (Pixels, Pixels) {
+        let (left, room) = self.h_track(side);
+        let max = self.max_h_scroll(side);
+        if max <= px(0.) {
+            return (left, room);
+        }
+        let width = (room * (room / (room + max))).max(px(24.)).min(room);
+        (left + (room - width) * (self.h_scroll[side] / max).clamp(0., 1.), width)
+    }
+
+    /// Scroll so the held thumb follows the mouse at `x`.
+    fn drag_across(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let Some((side, grab)) = self.h_grab else { return };
+        let (left, room) = self.h_track(side);
+        let width = self.h_thumb(side).1;
+        let track = room - width;
+        if track <= px(0.) {
+            return;
+        }
+        self.h_scroll[side] = self.max_h_scroll(side) * ((x - grab - left) / track).clamp(0., 1.);
+        cx.notify();
+    }
+
+    /// The sideways scrollbars, one under each side's text, shown where the
+    /// side's lines run past it. Drag the thumb, or press the track to bring
+    /// the thumb there.
+    fn render_h_scrollbars(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (thumb_color, active_color) = (theme.foreground.opacity(0.2), theme.foreground.opacity(0.35));
+        let origin = self.list_bounds.get().left();
+        div().children((0..2).filter(|&side| self.max_h_scroll(side) > px(0.)).map(|side| {
+            let (left, room) = self.h_track(side);
+            let (thumb_left, thumb_width) = self.h_thumb(side);
+            let held = matches!(self.h_grab, Some((s, _)) if s == side);
+            div()
+                .id(("diff-h-scroll", side))
+                .absolute()
+                .bottom_0()
+                .left(left - origin)
+                .w(room)
+                .h(px(10.))
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left - left)
+                        .w(thumb_width)
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(if held { active_color } else { thumb_color }),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        let (thumb_left, thumb_width) = this.h_thumb(side);
+                        let x = event.position.x;
+                        // Held where it was taken; pressed elsewhere, centred there.
+                        let grab = if x >= thumb_left && x <= thumb_left + thumb_width { x - thumb_left } else { thumb_width / 2. };
+                        this.h_grab = Some((side, grab));
+                        this.drag_across(x, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+        }))
+    }
+
+    fn scroll_across(&mut self, side: usize, delta: Pixels, cx: &mut Context<Self>) {
+        let to = (self.h_scroll[side] - delta).clamp(px(0.), self.max_h_scroll(side));
+        if to != self.h_scroll[side] {
+            self.h_scroll[side] = to;
+            cx.notify();
+        }
     }
 
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let line_height = px(Settings::get(cx).editor_font_size * 1.4);
-        let half = |line: &Option<(usize, String)>, kind: Side| {
+        let h_scroll = self.h_scroll;
+        let half = |line: &Option<(usize, String)>, kind: Side, side: usize| {
             let bg = match kind {
                 Side::Removed => theme.red.opacity(0.18),
                 Side::Added => theme.green.opacity(0.18),
@@ -191,16 +309,30 @@ impl DiffPanel {
                 .bg(bg)
                 .overflow_hidden()
                 .whitespace_nowrap()
+                // Sideways (Shift+wheel, a touchpad) moves only this side.
+                .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    if !delta.x.is_zero() {
+                        this.scroll_across(side, delta.x, cx);
+                        cx.stop_propagation();
+                    }
+                }))
                 .child(
                     div()
-                        .w(px(48.))
+                        .w(GUTTER)
                         .flex_none()
                         .pr_2()
                         .text_right()
                         .text_color(theme.muted_foreground)
                         .child(line.as_ref().map(|(n, _)| n.to_string()).unwrap_or_default()),
                 )
-                .child(div().flex_1().min_w_0().child(line.as_ref().map(|(_, t)| t.clone()).unwrap_or_default()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(div().ml(-h_scroll[side]).child(line.as_ref().map(|(_, t)| t.clone()).unwrap_or_default())),
+                )
         };
         range
             .filter_map(|ix| {
@@ -209,9 +341,9 @@ impl DiffPanel {
                     h_flex()
                         .h(line_height)
                         .w_full()
-                        .child(half(&row.left, row.left_kind))
+                        .child(half(&row.left, row.left_kind, 0))
                         .child(div().w(px(1.)).h_full().bg(theme.border))
-                        .child(half(&row.right, row.right_kind))
+                        .child(half(&row.right, row.right_kind, 1))
                         .into_any_element(),
                 )
             })
@@ -264,7 +396,7 @@ impl Pane for DiffPanel {
 }
 
 impl Render for DiffPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let short = |rev: &str| rev.chars().take(7).collect::<String>();
         let (left, right) = match &self.commit {
@@ -273,6 +405,15 @@ impl Render for DiffPanel {
             None => ("Index".into(), "Working Tree".into()),
         };
         let font_size = px(Settings::get(cx).editor_font_size);
+        let text = window.text_system();
+        let font_id = text.resolve_font(&font(theme.mono_font_family.clone()));
+        self.char_width = text.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
+        // The longest lines or the view may have changed since last scrolled.
+        for side in 0..2 {
+            self.h_scroll[side] = self.h_scroll[side].min(self.max_h_scroll(side));
+        }
+        let list_bounds = self.list_bounds.clone();
+        let this = cx.weak_entity();
         let path = self.path.clone();
         v_flex()
             .id("diff")
@@ -322,11 +463,59 @@ impl Render for DiffPanel {
                     // The ruler follows the list as it scrolls.
                     .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
-                        div().flex_1().min_w_0().h_full().font_family(theme.mono_font_family.clone()).text_size(font_size).child(
-                            uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
-                                .track_scroll(&self.scroll)
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(font_size)
+                            .child(
+                                {
+                                    let mut list = uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
+                                        .track_scroll(&self.scroll)
+                                        .size_full();
+                                    // Sideways is each side's own, not the list's
+                                    // (it would turn into scrolling down).
+                                    list.style().restrict_scroll_to_axis = Some(true);
+                                    list
+                                },
+                            )
+                            .child(
+                                canvas(
+                                    move |area, _, _| list_bounds.set(area),
+                                    // A drag goes on outside the bar: the
+                                    // window keeps the mouse while it's down.
+                                    move |_, _, window, _| {
+                                        window.on_mouse_event({
+                                            let this = this.clone();
+                                            move |event: &MouseMoveEvent, phase, _, cx| {
+                                                if phase == DispatchPhase::Capture {
+                                                    _ = this.update(cx, |this, cx| {
+                                                        if event.pressed_button == Some(MouseButton::Left) {
+                                                            this.drag_across(event.position.x, cx);
+                                                        } else if this.h_grab.take().is_some() {
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        });
+                                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                                                _ = this.update(cx, |this, cx| {
+                                                    if this.h_grab.take().is_some() {
+                                                        cx.notify();
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    },
+                                )
+                                .absolute()
                                 .size_full(),
-                        ),
+                            )
+                            .child(self.render_h_scrollbars(cx)),
                     )
                     .child(self.render_ruler(cx)),
             )

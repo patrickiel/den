@@ -37,7 +37,7 @@ pub fn enabled() -> bool {
 }
 
 /// `a` newer than `b`, as x.y.z versions.
-fn newer(a: &str, b: &str) -> bool {
+pub(crate) fn newer(a: &str, b: &str) -> bool {
     let parse = |v: &str| v.trim_start_matches('v').split(['.', '-']).take(3).map(|n| n.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
     parse(a) > parse(b)
 }

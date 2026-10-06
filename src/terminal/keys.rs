@@ -72,6 +72,11 @@ pub fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         }
         _ => {
             let text = keystroke.key_char.clone().or_else(|| (key == "space").then(|| " ".to_string()))?;
+            // AltGr arrives as Ctrl+Alt on Windows: a character the layout gives
+            // instead of the key itself (`|`, `\`, `@` on many layouts) is typed text.
+            if m.control && m.alt && !m.platform && !text.eq_ignore_ascii_case(key) {
+                return Some(text.into_bytes());
+            }
             if m.control || m.platform {
                 return None;
             }
