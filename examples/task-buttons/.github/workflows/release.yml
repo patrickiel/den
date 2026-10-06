@@ -36,7 +36,7 @@ jobs:
           Compress-Archive -Path dist/pkg/* -DestinationPath "dist/$id-windows-x86_64.zip"
           $sha = (Get-FileHash "dist/$id-windows-x86_64.zip" -Algorithm SHA256).Hash.ToLower()
           $manifest | Add-Member -NotePropertyName sha256 -NotePropertyValue $sha -Force
-          $manifest | ConvertTo-Json | Set-Content -Encoding utf8NoBOM dist/extension.json
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM dist/extension.json
       - name: Release
         shell: pwsh
         env:
