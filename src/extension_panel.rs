@@ -146,6 +146,8 @@ impl ExtensionPanel {
 
     /// The header of a page for an extension not installed.
     fn render_preview_header(&self, listing: &Listing, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let wanted = vec![listing.clone()];
+        cx.defer(move |cx| extensions::want_icons(wanted, cx));
         let theme = cx.theme().clone();
         let progress = crate::panels::download_progress(&format!("ext-install-{}", listing.id));
         let url = format!("https://github.com/{}", listing.repo);

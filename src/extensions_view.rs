@@ -22,6 +22,9 @@ use gpui_kit::{prelude::FluentBuilder as _, *};
 use crate::backend::extensions::Listing;
 use crate::extensions::{self, Entry, Extensions, IndexState, Status};
 
+/// How many available extensions show at first, and per "Show more".
+const AVAILABLE_PAGE: usize = 50;
+
 pub enum ExtensionsEvent {
     /// Open a file in an editor tab (`extensions.log`).
     Open(PathBuf),
@@ -37,6 +40,8 @@ pub struct ExtensionsView {
     selected: Option<String>,
     /// The index was asked for, on the first draw.
     index_requested: bool,
+    /// How many available extensions show; more on "Show more".
+    available_limit: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -47,10 +52,13 @@ impl ExtensionsView {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter, or owner/repo to install"));
         let _subscriptions = vec![cx.subscribe_in(&query, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { .. } => this.install(window, cx),
-            InputEvent::Change => cx.notify(),
+            InputEvent::Change => {
+                this.available_limit = AVAILABLE_PAGE;
+                cx.notify();
+            }
             _ => {}
         })];
-        Self { query, selected: None, index_requested: false, _subscriptions }
+        Self { query, selected: None, index_requested: false, available_limit: AVAILABLE_PAGE, _subscriptions }
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -316,11 +324,11 @@ impl Render for ExtensionsView {
             .filter(|e| passes(&[&e.id, e.name(), e.manifest.as_ref().map_or("", |m| m.description.as_str())], &query))
             .collect();
         let uninstalled = extensions::uninstalled(&state.available, entries);
-        let available: Vec<Listing> = uninstalled
-            .iter()
-            .filter(|l| passes(&[&l.id, &l.name, &l.description, &l.repo], &query))
-            .map(|l| (*l).clone())
-            .collect();
+        let matching: Vec<&Listing> = uninstalled.iter().copied().filter(|l| passes(&[&l.id, &l.name, &l.description, &l.repo], &query)).collect();
+        let hidden = matching.len().saturating_sub(self.available_limit);
+        let available: Vec<Listing> = matching.into_iter().take(self.available_limit).cloned().collect();
+        // Only the icons of the cards drawn are fetched.
+        let wanted = available.clone();
         let updates: Vec<Option<Listing>> = shown.iter().map(|e| extensions::update_available(e, &state.available).cloned()).collect();
         let index = state.index.clone();
         let total_available = uninstalled.len();
@@ -330,7 +338,7 @@ impl Render for ExtensionsView {
         };
         let note = |text: String| div().px_3().py_2().text_xs().text_color(theme.muted_foreground).child(text);
 
-        v_flex()
+        let view = v_flex()
             .size_full()
             .child(
                 h_flex()
@@ -401,6 +409,20 @@ impl Render for ExtensionsView {
                         });
                         available_card(listing, selected, show, cx)
                     }))
+                    .when(hidden > 0, |this| {
+                        this.child(
+                            div().px_3().py_2().child(
+                                Button::new("ext-view-more")
+                                    .xsmall()
+                                    .ghost()
+                                    .label(format!("Show {} more", hidden.min(AVAILABLE_PAGE)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.available_limit += AVAILABLE_PAGE;
+                                        cx.notify();
+                                    })),
+                            ),
+                        )
+                    })
                     .map(|this| match (&index, available.is_empty()) {
                         (IndexState::Failed(err), _) => this.child(note(err.clone())),
                         (IndexState::Loading, true) => this.child(note("Loading…".into())),
@@ -408,6 +430,8 @@ impl Render for ExtensionsView {
                         (_, true) => this.child(note("Nothing more to install for now.".into())),
                         _ => this,
                     }),
-            )
+            );
+        cx.defer(move |cx| extensions::want_icons(wanted, cx));
+        view
     }
 }

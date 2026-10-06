@@ -463,20 +463,25 @@ fn read_source(source: &str, limit: u64) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Fetch the icons not yet kept (images aren't loaded from the web by den's
-/// views, so they are shown from disk). One that fails is left out.
-pub fn fetch_icons(listings: &[Listing]) {
-    for listing in listings {
-        let Some(path) = icon_path(listing).filter(|p| !p.is_file()) else { continue };
-        let Ok(bytes) = read_source(&listing.icon_url, 1024 * 1024).map_err(drop) else { continue };
-        if bytes.is_empty() {
-            continue;
-        }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, bytes);
+/// Fetch `listing`'s icon to [`icon_path`] (den's views don't load images
+/// from the web, so they show it from disk).
+pub fn fetch_icon(listing: &Listing) -> Result<(), String> {
+    let path = icon_path(listing).ok_or("no icon")?;
+    fetch_icon_to(&listing.icon_url, &path)
+}
+
+fn fetch_icon_to(source: &str, path: &Path) -> Result<(), String> {
+    let bytes = read_source(source, 1024 * 1024)?;
+    if bytes.is_empty() {
+        return Err("empty".into());
     }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    // Through a temporary file, so a half-written icon never shows.
+    let part = path.with_extension("part");
+    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(part, path).map_err(|e| e.to_string())
 }
 
 /// A listed extension's README.md, for its page before it is installed.
@@ -618,6 +623,19 @@ mod tests {
         assert_eq!((listings[0].icon_url.as_str(), listings[0].readme_url.as_str()), ("https://x/icon.svg", ""));
         assert!(listings[0].loadable() && !listings[1].loadable());
         assert!(parse_index("{ nope").is_err());
+    }
+
+    #[test]
+    fn fetches_an_icon_once_whole() {
+        let dir = temp("icon");
+        let source = dir.join("icon.svg");
+        std::fs::write(&source, "<svg/>").unwrap();
+        let target = dir.join("cache").join("x-1.0.0.svg");
+        fetch_icon_to(&source.to_string_lossy(), &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "<svg/>");
+        assert!(!target.with_extension("part").exists());
+        assert!(fetch_icon_to(&dir.join("gone.svg").to_string_lossy(), &dir.join("cache").join("y.svg")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

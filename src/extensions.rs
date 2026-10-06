@@ -71,6 +71,43 @@ pub enum IndexState {
     Failed(String),
 }
 
+/// How many icons are fetched at once.
+const ICON_FETCHES: usize = 4;
+
+fn icon_key(listing: &Listing) -> String {
+    format!("{}-{}", listing.id, listing.version)
+}
+
+/// Fetch the icons of these listings that aren't kept yet, a few at a time.
+/// Called for the cards being drawn, so a long index costs only what is seen.
+pub fn want_icons(listings: Vec<Listing>, cx: &mut App) {
+    let extensions = cx.global_mut::<Extensions>();
+    for listing in listings {
+        // Each icon is looked at once a session; this runs as cards draw.
+        if !extensions.icons_asked.insert(icon_key(&listing)) {
+            continue;
+        }
+        if backend::icon_path(&listing).is_some_and(|path| !path.is_file()) {
+            extensions.icon_queue.push_back(listing);
+        }
+    }
+    let start = ICON_FETCHES.saturating_sub(extensions.icon_fetches).min(extensions.icon_queue.len());
+    extensions.icon_fetches += start;
+    for _ in 0..start {
+        cx.spawn(async move |cx| {
+            // Each runner takes icons off the queue until it is empty.
+            while let Some(listing) = cx.update(|cx| cx.global_mut::<Extensions>().icon_queue.pop_front()) {
+                let fetched = cx.background_spawn(async move { backend::fetch_icon(&listing) }).await;
+                if fetched.is_ok() {
+                    cx.update(|cx| cx.refresh_windows());
+                }
+            }
+            cx.update(|cx| cx.global_mut::<Extensions>().icon_fetches -= 1);
+        })
+        .detach();
+    }
+}
+
 /// A cached index younger than this is not fetched again at start.
 const INDEX_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
@@ -82,6 +119,13 @@ pub struct Extensions {
     pub index: IndexState,
     /// The index was fetched, or found fresh in the cache, in this session.
     index_current: bool,
+    /// Icons of listed extensions to fetch, as their cards are drawn.
+    icon_queue: std::collections::VecDeque<Listing>,
+    /// Icons already looked at this session, by [`icon_key`]: kept, queued,
+    /// fetched or failed (a failed one is tried again at the next start).
+    icons_asked: std::collections::HashSet<String>,
+    /// Icon fetches running, at most [`ICON_FETCHES`].
+    icon_fetches: usize,
     running: Vec<(String, mpsc::Sender<Message>)>,
     /// What each extension put in the title bar, by its id and the folder.
     buttons: Vec<Buttons>,
@@ -219,7 +263,6 @@ pub fn refresh_index(force: bool, cx: &mut App) {
         let result = cx
             .background_spawn(async {
                 let listings = backend::fetch_index()?;
-                backend::fetch_icons(&listings);
                 Ok::<_, String>(listings)
             })
             .await;
