@@ -1,63 +1,227 @@
+<div align="center">
+
+<img src="assets/icons/app.png" alt="den" width="96" height="96">
+
 # den
 
-A project terminal for Windows: split panes of terminals, agents, files and browsers, with an explorer, search and source control. A native Rust app on [GPUI](https://gpui.rs), Zed's UI framework, through [GPUI Kit](https://gpui-kit.com) 0.7 (`gpui-kit` + `gpui-component`): no webview for the UI, no Svelte, no Monaco. (den was a Tauri + Svelte app up to v0.11.0.)
+**A project terminal for Windows.**<br>
+Terminals, agents, files and browsers in split panes, with an explorer, search and source control.<br>
+Native Rust on [GPUI](https://gpui.rs), with no webview for the UI.
+
+[![Latest release](https://img.shields.io/github/v/release/patrickiel/den?label=release&color=e6aa3c)](https://github.com/patrickiel/den/releases/latest)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078d4)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI-b7410e)
+
+[**Download**](https://github.com/patrickiel/den/releases/latest) ·
+[Features](#features) ·
+[Shortcuts](#keyboard-shortcuts) ·
+[Extensions](#extensions) ·
+[Building](#building-from-source)
+
+<br>
+
+<img src="docs/images/screenshot.png" alt="den with the explorer, a JSON editor, a PowerShell terminal, and OpenAI Codex and Claude Code agents in split panes" width="900">
+
+</div>
+
+---
+
+## Why den
+
+You open a project and need the same things every time: a shell or two, an agent such as Claude Code, the code itself, the app in a browser, and git. den puts all of them in one window, arranged as you like, per folder. Close it and the next time you open that folder everything is back: the layout, the scrollback, the browser pages, even the Claude Code conversation.
+
+It is a native app on Zed's UI framework, so it stays responsive with many terminals running.
+
+- **One layout per folder.** Groups of tabs in nested splits that you drag around freely. Each folder's layout is saved, and it is also written to `.den/layout.json` so it travels with the repository.
+- **Built for agents.** Claude Code resumes its conversation when den restarts. When an agent finishes a turn or asks a question while you are looking elsewhere, den lets you know with a toast, a sound and a dot on the tab.
+- **A real editor and browser.** A tree-sitter code editor with git gutter marks and formatting, and Chromium browser tabs next to your terminals.
+- **Extensible.** Native extensions written in Rust, installable from a curated index.
+
+## Install
+
+Download **`den_<version>_x64-setup.exe`** from the [latest release](https://github.com/patrickiel/den/releases/latest) and run it. It installs for your user only, with no admin rights needed, into `%LOCALAPPDATA%\Programs\den`.
+
+den keeps itself up to date. It checks for a new version shortly after starting (and from ☰ ▸ **Check for Updates**), verifies the installer's signature, installs it silently and restarts.
+
+> [!NOTE]
+> Browser tabs use the Microsoft Edge WebView2 runtime. It comes with Windows 11 and with current Windows 10.
+
+## Getting started
+
+1. Open a folder with **Open Folder…** in the session switcher (Ctrl+Shift+O), by dropping it on the window, or by passing it to `den.exe` on the command line.
+2. Use the buttons at the end of any tab strip to open a shell, an agent, or a browser, or to split the group.
+3. Drag tabs, groups and whole containers to arrange them. Drop one outside the window to give it a window of its own.
+4. Save arrangements you like as **layout presets** in the title bar.
+
+Recent folders are in the session switcher and in the taskbar's jump list.
+
+## Features
+
+### Layout and windows
+
+- **Groups and containers.** Tabs live in groups, groups live in splits, and every split is a container you can grab by its header, flip, split or close. Drag a tab onto another group's strip to move it, into the middle to join the group, or onto a side to start a new group there.
+- **Default groups.** Mark a group or container as the default for Files, Terminals, Agents or Browsers, and new tabs of that kind open there.
+- **Floating windows.** As with VS Code's editor groups, drag a tab, group or container out of the window and it opens in a window of its own. Terminals keep running and browser pages go along. Floating windows are saved with the layout.
+- **Sessions.** The layout is saved on every change and restored per folder. Closing with unsaved files asks first.
+- **Right-click a tab** for Close Others / to the Right, Split Right / Down, Move into New / Main Window, and what that tab's kind offers (Copy Path, Reveal in File Explorer, Duplicate terminal, Open in Default Browser, …).
+
+### Terminals and agents
+
+- A real terminal: `pwsh` (or Windows PowerShell, or any shell you set) on ConPTY, parsed by `alacritty_terminal`. Full colour, alternate screen, mouse reporting, bracketed paste and scrollback, with block and box-drawing characters drawn as shapes.
+- **Clickable links.** Ctrl+click URLs and `path:line:col`. Paths resolve against the shell's current folder, which it reports through an OSC 7 prompt hook.
+- **Sessions survive restarts.** Scrollback comes back, and **Claude Code resumes its conversation** (`claude --resume <id>`, through its hooks). This also works for a `claude` you typed yourself.
+- **Notifications.** When Claude Code finishes a turn or asks something, or a program sends OSC 9 or OSC 777 or rings the bell while you are looking elsewhere: a toast that takes you to the tab, a dot on the tab, a sound (Chime, Ping, Pop, Bell, Alert, Rise) and a taskbar flash. Each one can be switched off.
+- **Presets** for terminals, agents and browsers, with icons (vendor logos, glyphs, letters, colours). Pinned presets get a button on every tab strip.
+
+### Editor
+
+- GPUI Kit's code editor: tree-sitter highlighting for Rust, JS/TS/TSX, JSON, Markdown, CSS, HTML, TOML, YAML, Python, Bash and Svelte, plus folding, indent guides and find.
+- **Quick diff** marks in the gutter against the git index.
+- **Preview tabs** (shown in italics) as in VS Code. A file that changes on disk reloads in place when it has no unsaved changes.
+- A **status bar** for each file: go to line, indentation, encoding (reopen or save in another one), LF / CRLF and language mode.
+- **Markdown and SVG previews** that include unsaved edits. Images open as pictures.
+- **Format Document** (Shift+Alt+F) and format on save, using the project's own Prettier, rustfmt, Ruff/Black, gofmt, shfmt, clang-format, StyLua and more. If a formatter is missing, den offers to download a pinned, checksummed one (dprint and its plugins) into `%APPDATA%\den\tools`.
+
+### Browser
+
+- Chromium (WebView2) tabs inside a group: back, forward, reload and a URL bar that understands hosts, `localhost` and search terms.
+- Links that would open a new window open as a browser tab instead.
+- Tabs come back at their last URL, and logins persist in den's own profile.
+
+### Explorer, search and source control
+
+- **Explorer** with VS Code's Seti icons, git colours, change dots on folders and dimmed ignored files. It follows changes on disk.
+- **Search** with regex, case and whole-word options and include / exclude globs. It respects `.gitignore`, streams results, and can replace per file or everywhere.
+- **Source control** through the git CLI: switch and create branches, fetch, pull and push with ahead / behind counts, stage, unstage and discard, commit, amend, and commit & push. Changes open side by side, and the commit history expands to its files.
+- **✨ AI commit messages from a local model.** On first use den downloads a pinned llama.cpp build and a small model (Qwen2.5-Coder 1.5B by default), runs it on localhost (GPU, else CPU) and streams the message in. The style comes from the repository's `.den/commit-style.md`, or is learned from its history and saved there. Your code never leaves your machine.
+
+### Themes
+
+Dark and Light Modern (VS Code's), and **Import…** for any VS Code colour theme. Imported themes set the window, the syntax colours and the terminal palette.
+
+## Keyboard shortcuts
+
+| | |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> | Open folder |
+| <kbd>Ctrl</kbd>+<kbd>O</kbd> | Open files |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> | New terminal |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> | New browser |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>-</kbd> | Split right / down |
+| <kbd>Alt</kbd>+<kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> | Move between groups |
+| <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> | Next / previous tab |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd> | Close tab (Ctrl+Shift+W in a terminal) |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Q</kbd> | Close group |
+| <kbd>Ctrl</kbd>+<kbd>S</kbd> | Save |
+| <kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>F</kbd> | Format document |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> / <kbd>F</kbd> / <kbd>G</kbd> / <kbd>X</kbd> | Explorer / Search / Source Control / Extensions |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> | Replace in files |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>V</kbd> | Copy / paste in a terminal |
+
+## Extensions
+
+den runs **native extensions written in Rust**. An extension is a `cdylib` built against [`crates/den-extension`](crates/den-extension) that talks to den through a small, versioned C ABI carrying JSON. It can show toasts, add title-bar buttons and menu commands with keybindings, run commands in a terminal, open files, and react to events such as `workspace_opened`, `active_file_changed` and `file_saved`. Each extension runs on its own thread and keeps working across den updates.
+
+Open the **Extensions** view (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>) to:
+
+- browse **Available** extensions from the curated index, [patrickiel/den-extensions](https://github.com/patrickiel/den-extensions);
+- install any extension from GitHub by typing `owner/repo`;
+- switch extensions on and off, update, uninstall and configure them.
+
+> [!WARNING]
+> An extension is native code and runs with your permissions. den asks before installing one.
+
+| Extension | What it does |
+| --- | --- |
+| [task-buttons](https://github.com/patrickiel/task-buttons) | Your `.vscode/tasks.json` as title-bar buttons |
+| [workspace-stats](https://github.com/patrickiel/workspace-stats) | Files and languages per folder, and break reminders |
+| [hello-extension](examples/hello-extension) | The minimal example |
+
+**Writing one?** Start with [docs/extensions.md](docs/extensions.md).
+
+## Building from source
+
+You need Windows 10 or 11 (x64), a stable [Rust](https://rustup.rs) toolchain (edition 2024) and the MSVC build tools.
 
 ```sh
+git clone https://github.com/patrickiel/den
+cd den
 cargo run --release -- <folder>     # no folder: the current directory
 ```
 
-The first build compiles GPUI and the tree-sitter grammars and takes a few minutes. Dev builds optimise dependencies (`opt-level = 2`), because unoptimised GPUI is too slow to use.
+The first build compiles GPUI and the tree-sitter grammars and takes a few minutes. Dev builds optimise dependencies (`opt-level = 2`) because unoptimised GPUI is too slow to use. Debug builds carry an amber icon and never update themselves.
 
-## What is in it
+Run the tests with `cargo test --workspace`.
 
-| Feature | |
+<details>
+<summary><b>How the code is organised</b></summary>
+
+<br>
+
+| Path | |
 | --- | --- |
-| Editor | GPUI Kit's code editor (`EditorState`): rope buffer, tree-sitter highlighting (Rust, JS/TS/TSX, JSON, Markdown, CSS, HTML, TOML, YAML, Python, Bash, Svelte), line numbers, indent guides, folding, find. Ctrl+S saves, `●` marks unsaved changes. **Preview tabs** (italic) as in VS Code. A file that changes on disk while its tab has no unsaved changes is reloaded in place, keeping the cursor. A **status bar** under each file, each item a menu: Ln/Col (Go to Line), indentation (detected; spaces 2/4/8 or tabs), encoding (reopen or save in another encoding; files are read by BOM, else UTF-8, else Windows-1252), LF / CRLF, language mode. **Quick diff** marks in the gutter against the git index (green added, blue changed, red deleted; off with soft wrap). |
-| Previews | Markdown and SVG files have **Source / Preview** buttons; the preview includes unsaved edits, Markdown loads images relative to the file, and the last choice is remembered per type. Images (PNG, JPEG, GIF, WebP, BMP, ICO, AVIF) open as pictures. |
-| Formatting | **Format Document** (Shift+Alt+F, ☰ ▸ Edit) runs the formatter on this machine: the project's own Prettier (`node_modules/.bin`, else on PATH), rustfmt (edition from `Cargo.toml`), Ruff or Black, gofmt, shfmt, clang-format, StyLua, google-java-format, PSScriptAnalyzer for PowerShell; tools installed after den started are found too. What is missing den offers to download (pinned, checksummed, into `%APPDATA%\den\tools`): dprint with a plugin per language (Prettier itself for JS, TS, JSON, CSS, HTML, Vue, Svelte, Markdown, YAML and GraphQL; Ruff, gofumpt, shfmt, clang-format, TOML, Dockerfile, PHP, SQL, XML, CMake), and StyLua, google-java-format and PSScriptAnalyzer. Downloaded plugins use their defaults, not the project's config. Settings ▸ Editor ▸ Downloaded formatters downloads and removes them. One undo step; the file keeps its line endings. **Format on save** in Settings. |
-| Groups | den's layout tree (`src/layout.rs`): groups of tabs in splits. Drag a tab to another group's strip, into its middle to join it, or onto a side to start a group there. Groups stay when their last tab closes; an empty group gets its own ✕. Each strip ends in the group's buttons: default, shell, pinned presets, **split** (right, or down while Alt is held) and a ⋮ menu. Double-clicking the empty strip opens another tab of the kind the group shows. **Grab a group** by its strip anywhere but on a tab and drop it beside another group, on a container's header, or in the band along the outer edge. **Right-click a tab** for Close / Close Others / Close to the Right / Close All, what its kind offers (a file's Keep Open, Copy Path, Copy Relative Path, Reveal in File Explorer or the Explorer view, Open Terminal Here; a diff's Open File; a browser's Copy URL, Open in Default Browser, Reload; a terminal's Duplicate and Copy Working Directory), Split Right / Down (the tab moves into a new group) and Move into New / Main Window. Ctrl+W or a middle-click closes a tab, Ctrl+Shift+Q the group, Ctrl+Tab cycles tabs, Alt+arrows move between groups. |
-| Containers | Every split is a container. Nested ones are drawn as a tray with a header: group count and layout, the **default** menu, split, flip, and a ⋮ menu with **Close Container**. Grab a container by its header to move it. The outermost container's buttons are in the title bar. |
-| Windows | As VS Code's editor groups: drag a tab, group or container out of the window and it opens in a **window of its own** where you let go (or ⋮ ▸ **Move into New Window**). Floating windows have the groups only, no sidebar; terminals and agents in them keep running, browser pages go along. Dragging between the session's windows shows the same drop zones as inside one. ⋮ ▸ **Move into Main Window**, its title-bar button, or closing it brings it back. They are saved with the layout (where they sit stays on this machine) and open again with the session. |
-| Default groups | A default button and menu on every strip and container (Files, Terminals, Agents, Browsers, None). New tabs of a kind go to a default of that kind. |
-| Layout | Layout presets in the title bar (load, **Save Layout…**, **Reset Layout**, delete). Per folder the layout is saved on every change; the arrangement also goes to **`.den/layout.json`** in the folder (paths relative, no machine state) and is restored from there first, so it travels with the folder. |
-| Sessions | The session switcher in the title bar: recent folders (each by its name, with parent folders added until it is unique; the full path in the tooltip), **Open Folder…** (Ctrl+Shift+O, saves first) and **Open Folder in New Window…**. A hovered entry's ✕ takes it off the list. The taskbar's jump list has the same recent folders (each opens in a new window). Dropping a folder on the window opens it; dropped files open as tabs. Closing with unsaved files asks first. |
-| Terminals | A shell (`pwsh`, else Windows PowerShell; `TERM_SHELL` or Settings override) on a ConPTY (portable-pty) with alacritty_terminal parsing the screen: colours, cursor, alternate screen, scrollback (wheel, Shift+PgUp/PgDn), bracketed paste, mouse reporting, block and box-drawing glyphs drawn as shapes. Selection and copy (Ctrl+C with a selection, Ctrl+Shift+C), paste (Ctrl+Shift+V, right-click), Ctrl+click links (URLs, and `path:line:col` resolved against the shell's folder, which it reports through an OSC 7 prompt hook). Scrollback comes back with the session; Claude Code comes back in the conversation it had (its hooks report the session id; `claude --resume <id>`, else `--continue`), a typed `claude` too. In Claude Code the wheel pages (PgUp/PgDn) instead of walking the prompt history. |
-| Presets | Terminal, agent and browser presets (taken over once from the Tauri den's settings, with its font and home page): pinned ones get a button on every strip; drag one onto another to reorder. Settings edits, reorders and pins them; which built-in strip buttons show (shell, browser, split) is in Settings and in each group's ⋮ menu, with the presets' pins; a preset's mark opens a picker: automatic icon, letter, vendor logos (LobeHub), levels, glyphs (Phosphor), colour swatches and a hue slider. |
-| Browser | Browser tabs are a real Chromium (WebView2 through wry) inside a group: the globe button on a strip, ☰ ▸ New Browser or Ctrl+Shift+B opens one at the home page. Back / forward / reload and a URL bar (a host opens as https, `localhost` as http, anything else is a search); links that open a new window open as a browser tab. Tabs come back at their last URL; logins persist in den's own profile (`%APPDATA%\den\webview`). The page is a native window over the app: it follows its pane, and hides while its tab is not showing, during a drag and under dialogs. While the page has the keyboard, keys go to it; click the toolbar to get them back. |
-| Notifications | When a terminal's program wants you while you look elsewhere: Claude Code finishing a turn or asking (hooks reporting to a localhost listener, also for a typed `claude`), Codex's OSC 9, OSC 777 and the bell. A toast (click: go to the tab), a dot on the tab, synthesized sounds (Chime, Ping, Pop, Bell, Alert, Rise; one for a finished turn, one for a question, with a volume), a taskbar flash; each can be switched off. |
-| Explorer | VS Code's Seti file icons in the tree, tabs, Source Control and Search. File tree with git colours and letters, change dots on folders, ignored files dimmed, following the disk (notify watcher). Right-click: New File / Folder, Open Terminal Here, Reveal, Copy Path / Relative Path, Rename (F2), Delete to the Recycle Bin. |
-| Search | Regex / case / whole word, include / exclude globs, `.gitignore` aware, streamed results, replace per file or all (unsaved files are skipped). |
-| Source Control | git through its CLI: branch menu (switch, create), fetch / pull / push with ahead / behind, Merge / Staged / Changes groups with stage, unstage and discard, commit (Ctrl+Enter; with nothing staged it asks Yes / Always / Never, as VS Code does, kept in Settings), Amend and Commit & Push. The message being written is kept with the session. A change opens side by side. Commits expand to their files; a file shows that commit's change. |
-| AI commit messages | The ✨ button by the commit box writes the message with a local model: on first use it downloads a pinned llama.cpp build and the chosen model (Settings ▸ AI; default Qwen2.5-Coder 1.5B) into `%APPDATA%\den\ai`, runs `llama-server` on localhost (GPU, else CPU; stopped when idle and on quit) and streams the message in. The style is the repository's `.den/commit-style.md`, else derived from its history and saved there; big change sets are summarized in parts first. |
-| Themes | Dark and Light (VS Code's Dark Modern / Light Modern, Dark+ / Light+ syntax colours), and **Import…** for any VS Code color theme (comments, trailing commas and `include` chains handled): window, syntax colours and terminal palette. Imported themes live in `%APPDATA%\den\themes`. |
-| Settings | A tab (gear or Ctrl+,): theme, sidebar side, font, editor size, line numbers, soft wrap, format on save, tab close buttons, notifications, shell, scrollback, terminal and agent presets, AI. |
-| Extensions | Native extensions written in Rust: a `cdylib` built against `crates/den-extension` with its `extension.json`, in `%APPDATA%\den\extensions\<id>`. Each runs on a thread of its own and talks to den through a small C ABI carrying JSON (log, toast, title-bar buttons, running a command in a terminal, opening a file; commands in den's menu with keybindings; events such as `workspace_opened`, `active_file_changed`, `file_saved` and `command`), so it keeps working across den updates while the API version stays. The **Extensions** view (the blocks button in the title bar, Ctrl+Shift+X) lists them with their state, switch, update and uninstall, and filters them; each with its icon; clicking one opens its page with its README and the settings its manifest declares (kept in `settings.json`, sent to the extension as they change); **Available** lists the extensions in the curated index ([patrickiel/den-extensions](https://github.com/patrickiel/den-extensions), where authors list theirs by pull request), each with Install, a preview page with its README, and an Update badge on installed ones when a newer version is out; typing `owner/repo` for one that isn't listed offers **Install from GitHub**, which takes the latest release's `extension.json` and `<id>-windows-x86_64.zip`, after a confirmation, since an extension runs with your permissions; side-load by copying a folder in. Switch, Update and Uninstall take effect at the next start (a loaded DLL is never unloaded). `extensions.log` says how each started. Writing one: [docs/extensions.md](docs/extensions.md); see `examples/hello-extension`, then [patrickiel/workspace-stats](https://github.com/patrickiel/workspace-stats) (settings, state, a worker thread) and [patrickiel/task-buttons](https://github.com/patrickiel/task-buttons) (VS Code's `tasks.json` as title-bar buttons, like the Tasks extension). |
+| `src/workspace.rs` | The window: title bar, sidebar, routing of new tabs, sessions, presets, notifications |
+| `src/layout.rs`, `src/defaults.rs` | The layout tree and default groups as plain data, with every edit on them. Unit tested |
+| `src/layout_view.rs` | Draws the tree and handles every drag and drop |
+| `src/float.rs` | A floating window, drawing its part of the tree |
+| `src/layout_file.rs` | The folder's `.den/layout.json` |
+| `src/pane.rs` | The `Pane` trait every tab kind implements, and the registry that rebuilds panes from a saved layout |
+| `src/panels.rs`, `src/diff.rs`, `src/dirty_diff.rs` | File and Settings panes, diff tabs, gutter marks |
+| `src/terminal/` | The terminal pane, its GPUI element, glyphs, links, OSC scanners, colours and keys |
+| `src/browser.rs` | Browser tabs |
+| `src/explorer.rs`, `src/search.rs`, `src/scm.rs`, `src/repo.rs` | The sidebar views |
+| `src/theme.rs` | VS Code themes mapped onto the component theme, syntax colours and terminal palette |
+| `src/extensions*.rs`, `src/extension_panel.rs` | Running extensions, the Extensions view, an extension's page |
+| `src/backend/` | Work off the UI thread: `search`, `git`, `watch`, `format`, `agent` (Claude Code hooks), `ai` (llama.cpp), `commit_ai`, `extensions` |
+| `crates/den-extension` | The SDK and C ABI extensions build against |
 
-State lives in `%APPDATA%\den\` (`settings.json`, `state.json`, `themes\`, `hooks\`, `ai\`, `tools\`, `webview\`, `extensions\`, `extensions-data\`, `extensions.log`, `extensions-index.json`, `extensions-icons\`).
+</details>
 
-## How it is built
+<details>
+<summary><b>Where den keeps its data</b></summary>
 
-- `src/workspace.rs`: the window. Title bar, sidebar, routing of new tabs, sessions, presets, notifications.
-- `src/layout.rs`, `src/defaults.rs`: the layout tree and the default groups as plain data, with every edit on them. Node and pane ids are stable and saved. Unit tested.
-- `src/layout_view.rs`: draws the tree and handles every drag and drop.
-- `src/float.rs`: a floating window, drawing its part of the tree.
-- `src/layout_file.rs`: the folder's `.den/layout.json`.
-- `src/pane.rs`: the `Pane` trait every tab kind implements, and the builder registry that makes panes again from a saved layout.
-- `src/panels.rs`: file and Settings panes; `src/diff.rs` diff tabs; `src/dirty_diff.rs` the gutter marks.
-- `src/terminal/`: the terminal pane, its GPUI element, glyphs, links, OSC scanners, colours and keys.
-- `src/browser.rs`: browser tabs; `src/preset_icon.rs` preset icons and their picker; `src/assets.rs` the embedded icons in `assets/presets`.
-- `src/explorer.rs`, `src/search.rs`, `src/scm.rs`, `src/repo.rs`: the sidebar views.
-- `src/theme.rs`: VS Code themes onto the component theme, syntax colours and terminal palette.
-- `src/extensions.rs`: the extensions as den runs them (the `Extensions` global, their toasts and title-bar buttons, enable / install / uninstall for the next start); `src/extensions_view.rs` the Extensions view; `src/extension_panel.rs` an extension's page; `crates/den-extension`: the SDK and C ABI an extension is built against.
-- `src/backend/`: work off the UI thread: `search`, `git`, `watch`, `format`, `agent` (Claude Code hooks), `ai` (llama.cpp runtime), `commit_ai` (the prompting) and `extensions` (loading, the extension threads, GitHub installs).
+<br>
 
-## Releasing
+Everything lives in `%APPDATA%\den\`:
 
-`node scripts/release.ts [--dry-run] [--yes] [--bump major|minor|patch]`: Claude picks the bump (by `scripts/release-scale.md`) and writes the notes; the script bumps `Cargo.toml`, builds, packs the per-user NSIS installer (`packaging/installer.nsi`, NSIS from Tauri's cache), signs it with `~/.keys/den.key` (Tauri's signer; password in `DEN_SIGNING_KEY_PASSWORD`), writes `latest.json`, tags and publishes a GitHub release on `patrickiel/den`.
+| | |
+| --- | --- |
+| `settings.json`, `state.json` | Settings, sessions and layouts |
+| `themes\` | Imported themes |
+| `webview\` | The browser profile (cookies, logins) |
+| `ai\`, `tools\` | Downloaded llama.cpp and models, downloaded formatters |
+| `hooks\` | Claude Code hook scripts |
+| `extensions\`, `extensions-data\` | Installed extensions and their data |
+| `extensions.log` | How each extension started |
 
-Installed copies check `latest.json` a little after start and from ☰ ▸ Check for Updates, verify the installer against `packaging/updater.pub` (the key's public half, put there by the first release) and install it silently, then restart. Development builds and builds without a key do not update. The exe carries den's icon (its amber dev icon in debug builds).
+In a project folder, `.den/layout.json` holds the shareable layout (relative paths, no machine state) and `.den/commit-style.md` holds the commit message style.
 
-## Known gaps
+</details>
 
-- Menus and toasts are drawn under a browser page (it is a native window); dialogs and drags hide it.
-- Formatting needs the formatters installed; the Tauri den bundled Prettier, Ruff, shfmt and gofmt.
+<details>
+<summary><b>Releasing</b> (maintainers)</summary>
+
+<br>
+
+```sh
+node scripts/release.ts [--dry-run] [--yes] [--bump major|minor|patch]
+```
+
+Claude picks the bump (following `scripts/release-scale.md`) and writes the notes. The script then bumps `Cargo.toml`, builds, packs the per-user NSIS installer (`packaging/installer.nsi`), signs it with `~/.keys/den.key` (password in `DEN_SIGNING_KEY_PASSWORD`), writes `latest.json`, tags, and publishes a GitHub release. Installed copies verify updates against `packaging/updater.pub`.
+
+</details>
+
+## Known limitations
+
+- Menus and toasts are drawn under a browser page, because the page is a native window. Dialogs and drags hide the page.
+- Formatting uses the formatters installed on your machine or downloaded by den. Downloaded plugins use their own defaults, not the project's config.
+- Windows only.
+
+## History
+
+den started as a Tauri + Svelte app up to v0.11.0 and was rewritten as a native GPUI app, starting again at v0.1.0. The old releases are tagged `tauri/v*`.
+
+## Acknowledgements
+
+den is built on [GPUI](https://gpui.rs) from the Zed team and [GPUI Kit](https://gpui-kit.com), with [alacritty_terminal](https://github.com/alacritty/alacritty), [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty), [wry](https://github.com/tauri-apps/wry), [llama.cpp](https://github.com/ggml-org/llama.cpp) and [dprint](https://dprint.dev). Icons come from VS Code's [Seti](https://github.com/jesseweed/seti-ui) theme, [Phosphor](https://phosphoricons.com), [LobeHub Icons](https://github.com/lobehub/lobe-icons) and [Lucide](https://lucide.dev).
