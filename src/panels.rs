@@ -67,6 +67,11 @@ pub fn init(cx: &mut App) {
             None => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::new(id, window, cx))),
         }
     });
+    pane::register(cx, crate::extension_view::EXTENSION_VIEW, |data, _, cx| {
+        let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
+        let (id, view, root) = (text("id"), text("view"), PathBuf::from(text("root")));
+        Rc::new(cx.new(|cx| crate::extension_view::ExtensionView::new(id, view, root, cx)))
+    });
     pane::register(cx, terminal::TERMINAL, |data, window, cx| {
         let cwd = data["cwd"]
             .as_str()

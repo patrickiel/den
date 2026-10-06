@@ -7,6 +7,7 @@ This guide covers writing, testing, publishing and listing an extension for den.
 | [`hello-extension`](../examples/hello-extension) | The minimum: a toast, a setting, and a command with a keybinding that uses the active file |
 | [`workspace-stats`](https://github.com/patrickiel/workspace-stats) | A worker thread, settings applied live, state across restarts, saves counted, a clean shutdown |
 | [`task-buttons`](https://github.com/patrickiel/task-buttons) | Title-bar buttons, running commands in a terminal, opening files, a `choice` setting |
+| [`git-graph`](https://github.com/patrickiel/git-graph) | A view (a tab of its own) with a graph column, badges, menus and details; prompts; diffs |
 
 ## Contents
 
@@ -19,12 +20,13 @@ This guide covers writing, testing, publishing and listing an extension for den.
 7. [Settings](#settings)
 8. [Commands and keybindings](#commands-and-keybindings)
 9. [Title-bar buttons](#title-bar-buttons)
-10. [Threads, state and shutdown](#threads-state-and-shutdown)
-11. [Testing and debugging](#testing-and-debugging)
-12. [Publishing](#publishing)
-13. [Getting listed](#getting-listed)
-14. [Compatibility](#compatibility)
-15. [What extensions can't do yet](#what-extensions-cant-do-yet)
+10. [Views, prompts and diffs](#views-prompts-and-diffs)
+11. [Threads, state and shutdown](#threads-state-and-shutdown)
+12. [Testing and debugging](#testing-and-debugging)
+13. [Publishing](#publishing)
+14. [Getting listed](#getting-listed)
+15. [Compatibility](#compatibility)
+16. [What extensions can't do yet](#what-extensions-cant-do-yet)
 
 ## How extensions work
 
@@ -139,6 +141,7 @@ Copy `extension.json` and `target\release\my_extension.dll` into `%APPDATA%\den\
 | `icon` | no | A path inside the extension's folder (`icon.svg`, `images/icon.png`). It should be square, PNG or SVG, 128 px or more. Without one, den shows the name's initial on a colour. |
 | `settings` | no | See [Settings](#settings). |
 | `commands` | no | See [Commands and keybindings](#commands-and-keybindings). |
+| `views` | no | Tabs of its own: `[{ "id", "title", "icon" }]`. See [Views, prompts and diffs](#views-prompts-and-diffs). |
 | `sha256` | no | The SHA-256 of the release zip. `release.yml` adds it to the released copy, and den checks it on install. Leave it out of your source copy. |
 
 A `README.md` next to the manifest is shown on the extension's page, both installed and before installing (from the repository). Write it for users: what the extension does, its settings, and its commands.
@@ -176,6 +179,11 @@ All three methods run on the extension's own thread, one at a time. While `event
 | `set_buttons(root, &[Button])` | Sets the extension's title-bar buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
 | `run_in_terminal(root, command, cwd)` | Opens a terminal tab in the window on `root` and runs `command` in its shell (PowerShell by default), in `cwd` or else the root |
 | `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given. A relative path counts from `root`. |
+| `open_view(root, view)` | Opens a tab of the manifest's view `view` in the window on `root`, or shows the open one |
+| `set_view(root, view, &Content)` | Sets what the view shows; the parts the `Content` sets replace what was there |
+| `prompt(root, &Prompt)` | Asks the user in a dialog (text boxes, checkboxes, choices); the answer comes as `prompt_answered` |
+| `open_diff(root, &Diff)` | Shows a commit's change to a file, or its uncommitted change, side by side |
+| `copy(text)` | Puts `text` on the clipboard |
 | `call(method, args)` | Calls any host method by name with JSON arguments, such as `info` (no arguments), which returns `{ id, den_version, data_dir, api }` |
 
 Every method takes a **`root`**: the folder of a den window, exactly as den named it in `workspace_opened` (or in any event's `root`). Pass the string back unchanged; den finds the window by it. If no window is open on that root, the call does nothing (it's logged).
@@ -193,6 +201,10 @@ The typed methods return `Result<(), String>`. `log` and `toast` ignore errors.
 | `FILE_SAVED` | `file_saved` | `{ root, path }` | A file was saved in a window |
 | `COMMAND` | `command` | `{ root, id }` | One of the extension's commands ran, from den's menu or its keybinding, in the window on `root` |
 | `BUTTON_CLICKED` | `button_clicked` | `{ root, id }` | One of its title-bar buttons was clicked |
+| `VIEW_OPENED` | `view_opened` | `{ root, view }` | A tab of one of its views opened, by `open_view` or restored with the window |
+| `VIEW_CLOSED` | `view_closed` | `{ root, view }` | That tab closed |
+| `VIEW_ACTION` | `view_action` | `{ root, view, action, row, data, value }` | Something was clicked, picked or typed in a view |
+| `PROMPT_ANSWERED` | `prompt_answered` | `{ root, id, values }` | A prompt was answered; `values` is null when cancelled |
 | `SETTINGS_CHANGED` | `settings_changed` | `{ settings }` | The user changed one of its settings; `settings` holds every value, like `Context::settings` |
 
 ## Settings
@@ -279,6 +291,42 @@ let result = host.set_buttons(&root, &[
 How they behave:
 - Buttons belong to a **folder**: set them per `root`, usually in response to `workspace_opened`. Every window on that folder shows them, to the left of den's layout button.
 - Each call **replaces** the extension's buttons for that root, and an empty list removes them. Set them again whenever your data changes; `task-buttons` does this when `tasks.json` changes.
+
+## Views, prompts and diffs
+
+A **view** is a tab of the extension's own. Declare it in the manifest, open it with `open_view`, and fill it with `set_view` when `view_opened` arrives (den also sends that for tabs it restores at start). Like buttons, a view is described as data and den draws it:
+
+```rust
+use den_extension::view::{Cell, Column, Content, Graph, Line, MenuItem, Row, Span, ToolbarItem};
+
+let content = Content {
+    toolbar: Some(vec![ToolbarItem::search("find", "Find"), ToolbarItem::spacer(), ToolbarItem::button("refresh", "", "refresh-cw")]),
+    columns: Some(vec![Column { title: "Name".into(), width: None }, Column { title: "Size".into(), width: Some(80.) }]),
+    rows: Some(vec![Row {
+        id: "a".into(),
+        cells: vec![vec![Span::text("main").background("#0085d9").menu("branch", "main"), Span::text("a file")].into(), "12 KB".into()],
+        menu: "row".into(),
+        ..Default::default()
+    }]),
+    menus: Some([("row".to_string(), vec![MenuItem::new("delete", "Delete…")])].into()),
+    ..Default::default()
+};
+host.set_view(&root, "my-view", &content)?;
+```
+
+| Part | |
+| --- | --- |
+| `toolbar` | Buttons (`active` draws one switched on), selects, search boxes, labels and spacers above the list |
+| `columns`, `rows` | A virtual list: thousands of rows are fine. Each cell is spans (text, or a badge when it has a `background`) or a `Graph` |
+| `Graph` | Lines and dots in lanes, drawn across a row: a lane change is a curve, `dashed` and `hollow` are there for "not committed yet" |
+| `menus` | Right-click menus by name, for rows (`Row::menu`), spans (`Span::menu`, sent with its `data`) and detail lines |
+| `selected`, `highlighted` | The selected row (den scrolls to it) and rows marked as found |
+| `detail` | Lines under the list, in a pane the user can resize and close; spans and lines can send actions |
+| `message`, `more` | Text in place of an empty list; a "Load more" row at the end |
+
+What happens comes back as `view_action`: a toolbar item's, menu item's, span's or line's id as `action`, or den's own `:select` (a row clicked or reached with the arrow keys; `row` null when the details were closed), `:open` (double-click or Enter) and `:more`. Each `set_view` only needs the parts that changed: send `selected` and `detail` alone when a row is picked, not the rows again.
+
+`prompt` asks with a dialog of `Field`s (`text`, `checkbox`, `choice`); OK sends `values` by field id, and a `required` text box keeps OK from closing while it is empty. `open_diff` shows a commit's change (`hash`, `parent`, `old_path`) or the uncommitted one (`staged`) in den's diff tab. `git-graph` uses all of these.
 
 ## Threads, state and shutdown
 
@@ -380,8 +428,8 @@ Being listed isn't a security audit. Keep your source public, and have it build 
 ## What extensions can't do yet
 
 These are planned, but not available today:
-- add a sidebar view or a tab of its own;
-- ask the user something (a quick pick or an input box);
+- add a sidebar view (a tab of its own is a [view](#views-prompts-and-diffs));
+- a quick pick (a [prompt](#views-prompts-and-diffs) asks with a dialog);
 - add items to the Explorer's right-click menu;
 - decorate the editor (gutter marks, inline text);
 - read or edit a file's unsaved contents.

@@ -121,7 +121,7 @@ Dark and Light Modern (VS Code's), and **Import…** for any VS Code colour them
 
 ## Extensions
 
-den runs **native extensions written in Rust**. An extension is a `cdylib` built against [`crates/den-extension`](crates/den-extension) that talks to den through a small, versioned C ABI carrying JSON. It can show toasts, add title-bar buttons and menu commands with keybindings, run commands in a terminal, open files, and react to events such as `workspace_opened`, `active_file_changed` and `file_saved`. Each extension runs on its own thread and keeps working across den updates.
+den runs **native extensions written in Rust**. An extension is a `cdylib` built against [`crates/den-extension`](crates/den-extension) that talks to den through a small, versioned C ABI carrying JSON. It can show toasts, add title-bar buttons, menu commands with keybindings and tabs of its own (views), ask in dialogs, run commands in a terminal, open files, and react to events such as `workspace_opened`, `active_file_changed` and `file_saved`. Each extension runs on its own thread and keeps working across den updates.
 
 Open the **Extensions** view (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>) to:
 
@@ -135,6 +135,7 @@ Open the **Extensions** view (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>) to:
 | Extension | What it does |
 | --- | --- |
 | [task-buttons](https://github.com/patrickiel/task-buttons) | Your `.vscode/tasks.json` as title-bar buttons |
+| [git-graph](https://github.com/patrickiel/git-graph) | The commits as a graph with branch and commit actions, like vscode-git-graph |
 | [workspace-stats](https://github.com/patrickiel/workspace-stats) | Files and languages per folder, and break reminders |
 | [hello-extension](examples/hello-extension) | The minimal example |
 

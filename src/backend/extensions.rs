@@ -17,7 +17,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, mpsc};
 
-use den_extension::{API_VERSION, Button, Context, MANIFEST, Manifest, abi, valid_id};
+use den_extension::{API_VERSION, Button, Context, MANIFEST, Manifest, abi, valid_id, view};
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
@@ -121,6 +121,15 @@ pub enum Report {
     Run { root: String, command: String, cwd: Option<String> },
     /// A file to open in the window on `root`, at a position if given.
     OpenFile { root: String, path: String, line: Option<u32>, column: Option<u32> },
+    /// A tab of its view `view` in the window on `root`.
+    OpenView { id: String, root: String, view: String },
+    /// What its view `view` on `root` shows, laid over what it showed.
+    SetView { id: String, root: String, view: String, content: Box<view::Content> },
+    /// A question for the user in the window on `root`.
+    Prompt { id: String, root: String, prompt: view::Prompt },
+    /// A change to show side by side in the window on `root`.
+    OpenDiff { root: String, diff: view::Diff },
+    Copy(String),
 }
 
 /// Start `manifest`'s extension from `dir` on a thread of its own: load the
@@ -204,7 +213,8 @@ fn activate(
     let context = Context { den_version: crate::update::current_version().into(), data_dir, settings };
     let info = json!({ "id": manifest.id, "den_version": context.den_version, "data_dir": context.data_dir, "api": API_VERSION });
     // Both live as long as the process, as `HostApi` promises.
-    let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx { id: manifest.id.clone(), info, reports }));
+    let views = manifest.views.iter().map(|v| v.id.clone()).collect();
+    let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx { id: manifest.id.clone(), info, views, reports }));
     let host: &'static abi::HostApi = Box::leak(Box::new(abi::HostApi {
         version: API_VERSION,
         ctx: (ctx as *const HostCtx).cast_mut().cast(),
@@ -224,10 +234,21 @@ fn activate(
 struct HostCtx {
     id: String,
     info: Value,
+    /// The ids of the views its manifest declares.
+    views: Vec<String>,
     reports: UnboundedSender<Report>,
 }
 
 impl HostCtx {
+    /// `args`' `view`, one the manifest declares.
+    fn view(&self, args: &Value, method: &str) -> Result<String, String> {
+        let view = string(args, "view", method)?;
+        if !self.views.contains(&view) {
+            return Err(format!("{method}: the manifest declares no view \"{view}\""));
+        }
+        Ok(view)
+    }
+
     /// The host methods of this API version.
     fn call(&self, method: &str, args: &Value) -> Result<Value, String> {
         let message = || args["message"].as_str().map(str::to_string).ok_or_else(|| format!("{method} needs a \"message\""));
@@ -253,6 +274,26 @@ impl HostCtx {
                 let number = |key: &str| args[key].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
                 self.report(Report::OpenFile { root, path, line: number("line"), column: number("column") })
             }
+            "open_view" => {
+                let (root, view) = (string(args, "root", method)?, self.view(args, method)?);
+                self.report(Report::OpenView { id: self.id.clone(), root, view })
+            }
+            "set_view" => {
+                let (root, view) = (string(args, "root", method)?, self.view(args, method)?);
+                let content = serde_json::from_value(args["content"].clone()).map_err(|e| format!("set_view: bad \"content\": {e}"))?;
+                self.report(Report::SetView { id: self.id.clone(), root, view, content: Box::new(content) })
+            }
+            "prompt" => {
+                let root = string(args, "root", method)?;
+                let prompt = serde_json::from_value(args["prompt"].clone()).map_err(|e| format!("prompt: bad \"prompt\": {e}"))?;
+                self.report(Report::Prompt { id: self.id.clone(), root, prompt })
+            }
+            "open_diff" => {
+                let root = string(args, "root", method)?;
+                let diff = serde_json::from_value(args["diff"].clone()).map_err(|e| format!("open_diff: bad \"diff\": {e}"))?;
+                self.report(Report::OpenDiff { root, diff })
+            }
+            "copy" => self.report(Report::Copy(string(args, "text", method)?)),
             _ => Err(format!("den has no method \"{method}\" (extension API {API_VERSION})")),
         }
     }
@@ -642,7 +683,7 @@ mod tests {
     #[test]
     fn host_methods_answer_or_refuse() {
         let (tx, _rx) = futures::channel::mpsc::unbounded();
-        let ctx = HostCtx { id: "t".into(), info: json!({ "id": "t" }), reports: tx };
+        let ctx = HostCtx { id: "t".into(), info: json!({ "id": "t" }), views: vec!["graph".into()], reports: tx };
         assert_eq!(ctx.call("info", &Value::Null).unwrap()["id"], "t");
         assert!(ctx.call("toast", &json!({ "message": "hi" })).is_ok());
         assert!(ctx.call("toast", &json!({})).is_err());
@@ -650,9 +691,25 @@ mod tests {
     }
 
     #[test]
+    fn views_are_only_the_manifests() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let ctx = HostCtx { id: "t".into(), info: Value::Null, views: vec!["graph".into()], reports: tx };
+        ctx.call("open_view", &json!({ "root": "C:/p", "view": "graph" })).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Report::OpenView { view, .. } if view == "graph"));
+        assert!(ctx.call("open_view", &json!({ "root": "C:/p", "view": "other" })).unwrap_err().contains("no view"));
+        ctx.call("set_view", &json!({ "root": "C:/p", "view": "graph", "content": { "selected": "a" } })).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Report::SetView { content, .. } if content.selected.as_deref() == Some("a") && content.rows.is_none()));
+        assert!(ctx.call("set_view", &json!({ "root": "C:/p", "view": "graph", "content": { "rows": 3 } })).is_err());
+        ctx.call("prompt", &json!({ "root": "C:/p", "prompt": { "id": "q", "title": "Name?", "fields": [{ "id": "n" }] } })).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Report::Prompt { prompt, .. } if prompt.fields[0].kind == den_extension::view::FieldKind::Text));
+        ctx.call("open_diff", &json!({ "root": "C:/p", "diff": { "path": "a.rs", "hash": "abc" } })).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Report::OpenDiff { diff, .. } if diff.hash.as_deref() == Some("abc")));
+    }
+
+    #[test]
     fn buttons_and_terminals_go_to_the_ui_thread() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let ctx = HostCtx { id: "t".into(), info: Value::Null, reports: tx };
+        let ctx = HostCtx { id: "t".into(), info: Value::Null, views: Vec::new(), reports: tx };
         let buttons = json!([{ "id": "build", "label": "Build", "icon": "hammer" }]);
         ctx.call("set_buttons", &json!({ "root": "C:/p", "buttons": buttons })).unwrap();
         match rx.try_recv().unwrap() {

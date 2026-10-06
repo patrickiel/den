@@ -32,6 +32,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub mod view;
+
 /// The version of the boundary in [`abi`]. den loads extensions built for
 /// this version and refuses others.
 pub const API_VERSION: u32 = 1;
@@ -65,6 +67,25 @@ pub mod events {
     pub const ACTIVE_FILE_CHANGED: &str = "active_file_changed";
     /// A file was saved in the window on a folder: `{ "root": "<path>", "path": "<file>" }`.
     pub const FILE_SAVED: &str = "file_saved";
+    /// A tab of one of the extension's [`View`](crate::View)s opened in the
+    /// window on a folder, by [`Host::open_view`](crate::Host::open_view) or
+    /// as den restored the window: `{ "root", "view" }`. Send its content
+    /// with [`Host::set_view`](crate::Host::set_view); what was set before
+    /// den restarted is gone.
+    pub const VIEW_OPENED: &str = "view_opened";
+    /// A view's tab closed: `{ "root", "view" }`.
+    pub const VIEW_CLOSED: &str = "view_closed";
+    /// Something was clicked, picked or typed in a view:
+    /// `{ "root", "view", "action", "row", "data", "value" }`. `action` is a
+    /// toolbar item's, menu item's, span's or line's id, or one of
+    /// [`view::actions`](crate::view::actions); `row` the row it was on,
+    /// `data` the span's or line's, `value` a select's or search's (each
+    /// null when it doesn't apply).
+    pub const VIEW_ACTION: &str = "view_action";
+    /// The answer to a [`Host::prompt`](crate::Host::prompt):
+    /// `{ "root", "id", "values" }`, `values` holding each field's value by
+    /// its id, or null when the user cancelled.
+    pub const PROMPT_ANSWERED: &str = "prompt_answered";
 }
 
 /// `extension.json`.
@@ -96,6 +117,23 @@ pub struct Manifest {
     /// What it adds to den's menu, each with an optional keybinding.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<Command>,
+    /// Tabs of its own, opened with [`Host::open_view`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<View>,
+}
+
+/// A view an extension declares in its manifest: a kind of tab it fills
+/// with [`Host::set_view`]. den restores its tabs with the window and sends
+/// [`events::VIEW_OPENED`] for each.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct View {
+    /// The extension's own name for it.
+    pub id: String,
+    /// The tab's label until the content sets one.
+    pub title: String,
+    /// A [Lucide](https://lucide.dev/icons) icon's name, for the tab.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 /// A command an extension declares in its manifest. den lists it in its menu
@@ -170,6 +208,10 @@ impl Manifest {
         let mut ids = std::collections::HashSet::new();
         if let Some(command) = manifest.commands.iter().find(|c| c.id.is_empty() || c.title.trim().is_empty() || !ids.insert(c.id.as_str())) {
             return Err(format!("Bad {MANIFEST}: each command needs an id of its own and a title (\"{}\")", command.id));
+        }
+        let mut ids = std::collections::HashSet::new();
+        if let Some(view) = manifest.views.iter().find(|v| v.id.is_empty() || v.title.trim().is_empty() || !ids.insert(v.id.as_str())) {
+            return Err(format!("Bad {MANIFEST}: each view needs an id of its own and a title (\"{}\")", view.id));
         }
         if !manifest.icon.is_empty() && !inside(&manifest.icon) {
             return Err(format!("Bad {MANIFEST}: the icon \"{}\" must be a path inside the extension's folder", manifest.icon));
@@ -313,8 +355,11 @@ impl Host {
     /// (`{"message"}`), `toast` (`{"message"}`), `info` (no args),
     /// `set_buttons` (`{"root", "buttons"}`), `run_in_terminal`
     /// (`{"root", "command", "cwd"?}`) and `open_file`
-    /// (`{"root", "path", "line"?, "column"?}`). A den older than a method answers
-    /// with an error naming it.
+    /// (`{"root", "path", "line"?, "column"?}`), and for views `open_view`
+    /// (`{"root", "view"}`), `set_view` (`{"root", "view", "content"}`),
+    /// `prompt` (`{"root", "prompt"}`), `open_diff` (`{"root", "diff"}`) and
+    /// `copy` (`{"text"}`). A den older than a method answers with an error
+    /// naming it.
     pub fn call(&self, method: &str, args: Value) -> Result<Value, String> {
         let method = CString::new(method).map_err(|e| e.to_string())?;
         let args = CString::new(args.to_string()).map_err(|e| e.to_string())?;
@@ -362,6 +407,36 @@ impl Host {
     /// when no window is open on `root`.
     pub fn open_file(&self, root: &str, path: &str, line: Option<u32>) -> Result<(), String> {
         self.call("open_file", serde_json::json!({ "root": root, "path": path, "line": line })).map(drop)
+    }
+
+    /// Open a tab of the manifest's view `view` in the window on `root`, or
+    /// show the one that is open. [`events::VIEW_OPENED`] follows for a new one.
+    pub fn open_view(&self, root: &str, view: &str) -> Result<(), String> {
+        self.call("open_view", serde_json::json!({ "root": root, "view": view })).map(drop)
+    }
+
+    /// Show `content` in view `view`'s tab of the window on `root`: the parts
+    /// it sets replace what was there (see [`view::Content`]). den keeps it
+    /// for a tab opened later, until den quits.
+    pub fn set_view(&self, root: &str, view: &str, content: &view::Content) -> Result<(), String> {
+        self.call("set_view", serde_json::json!({ "root": root, "view": view, "content": content })).map(drop)
+    }
+
+    /// Ask the user in a dialog of the window on `root`; the answer comes as
+    /// [`events::PROMPT_ANSWERED`] with the prompt's id.
+    pub fn prompt(&self, root: &str, prompt: &view::Prompt) -> Result<(), String> {
+        self.call("prompt", serde_json::json!({ "root": root, "prompt": prompt })).map(drop)
+    }
+
+    /// Show a change side by side in a diff tab of the window on `root`
+    /// (its tab if it is open). The window's repository is the one compared.
+    pub fn open_diff(&self, root: &str, diff: &view::Diff) -> Result<(), String> {
+        self.call("open_diff", serde_json::json!({ "root": root, "diff": diff })).map(drop)
+    }
+
+    /// Put `text` on the clipboard.
+    pub fn copy(&self, text: &str) -> Result<(), String> {
+        self.call("copy", serde_json::json!({ "text": text })).map(drop)
     }
 }
 
@@ -602,6 +677,15 @@ mod tests {
         let values = m.settings_values(user.as_object().unwrap());
         assert_eq!(Value::Object(values), serde_json::json!({ "on": false, "n": 5, "pm": "pnpm", "later": "red" }));
         assert!(!m.settings[2].accepts(&serde_json::json!("yarn")));
+    }
+
+    #[test]
+    fn reads_views() {
+        let m = Manifest::parse(r#"{"id":"x","name":"x","version":"1.0.0","api":1,"views":[{"id":"graph","title":"Git Graph","icon":"git-fork"}]}"#).unwrap();
+        assert_eq!(m.views[0].icon, "git-fork");
+        let bad = |views: &str| Manifest::parse(&format!(r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"views":{views}}}"#)).is_err();
+        assert!(bad(r#"[{"id":"a","title":"A"},{"id":"a","title":"B"}]"#));
+        assert!(bad(r#"[{"id":"a","title":""}]"#));
     }
 
     #[test]

@@ -1318,6 +1318,49 @@ impl Workspace {
         }
     }
 
+    /// Extension `id`'s view `view`: its tab if open, else a new one where files go.
+    pub(crate) fn open_extension_view(&mut self, id: String, view: String, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::extension_view::ExtensionView;
+        let existing = self.find_pane(|v, cx| v.clone().downcast::<ExtensionView>().is_ok_and(|v| v.read(cx).is(&id, &view)), cx);
+        match existing {
+            Some(pane) => self.show_pane(pane, true, window, cx),
+            None => {
+                let root = self.root.clone();
+                let tab = cx.new(|cx| ExtensionView::new(id, view, root, cx));
+                let group = self.target_group(Kind::Files);
+                self.add_pane(std::rc::Rc::new(tab), group, true, window, cx);
+            }
+        }
+    }
+
+    /// An extension's `open_diff`: a commit's change to a file, or its
+    /// uncommitted change, in the window's repository.
+    pub(crate) fn open_extension_diff(&mut self, diff: den_extension::view::Diff, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let path = std::path::Path::new(&diff.path);
+        let rel = match path.strip_prefix(&top) {
+            Ok(rel) if path.is_absolute() => rel.to_string_lossy().replace('\\', "/"),
+            _ => diff.path.replace('\\', "/"),
+        };
+        match diff.hash {
+            Some(hash) => {
+                let old_rel = diff.old_path.unwrap_or_else(|| rel.clone());
+                self.open_commit_diff(rel, crate::diff::CommitRevs { hash, parent: diff.parent, old_rel }, window, cx);
+            }
+            None => {
+                let file = crate::backend::git::FileStatus {
+                    path: top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
+                    rel,
+                    index: 'M',
+                    worktree: 'M',
+                    renamed_from: None,
+                    conflict: false,
+                };
+                self.open_diff(file, diff.staged, window, cx);
+            }
+        }
+    }
+
     /// An extension's `run_in_terminal`: a shell in `cwd` (else the root)
     /// running `command`, where terminals go.
     pub(crate) fn run_in_terminal(&mut self, command: String, cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {

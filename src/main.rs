@@ -14,6 +14,7 @@ mod dirty_diff;
 mod encoding;
 mod explorer;
 mod extension_panel;
+mod extension_view;
 mod extensions;
 mod extensions_view;
 mod file_icon;

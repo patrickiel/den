@@ -129,6 +129,8 @@ pub struct Extensions {
     running: Vec<(String, mpsc::Sender<Message>)>,
     /// What each extension put in the title bar, by its id and the folder.
     buttons: Vec<Buttons>,
+    /// What each extension's views show, by extension, folder and view.
+    views: Vec<ViewData>,
     /// The open windows by their folder, for `run_in_terminal`.
     windows: Vec<(PathBuf, WeakEntity<crate::workspace::Workspace>, AnyWindowHandle)>,
 }
@@ -137,6 +139,15 @@ pub struct Buttons {
     pub id: String,
     pub root: PathBuf,
     pub buttons: Vec<Button>,
+}
+
+/// What an extension's view on a folder shows; kept while den runs, so a
+/// tab opened later (or moved to another window) shows it at once.
+pub struct ViewData {
+    pub id: String,
+    pub root: PathBuf,
+    pub view: String,
+    pub content: den_extension::view::Content,
 }
 
 impl Global for Extensions {}
@@ -153,6 +164,28 @@ impl Extensions {
     /// The extensions' buttons for the window on `root`, by extension.
     pub fn buttons_for<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a Buttons> {
         self.buttons.iter().filter(move |b| b.root == root)
+    }
+
+    /// What extension `id`'s view `view` on `root` shows, if it said yet.
+    pub fn view(&self, id: &str, root: &Path, view: &str) -> Option<&den_extension::view::Content> {
+        self.views.iter().find(|v| v.id == id && v.root == root && v.view == view).map(|v| &v.content)
+    }
+
+    /// The same, to change it here (a click's selection, before the extension answers).
+    pub fn view_mut(&mut self, id: &str, root: &Path, view: &str) -> &mut den_extension::view::Content {
+        let ix = match self.views.iter().position(|v| v.id == id && v.root == root && v.view == view) {
+            Some(ix) => ix,
+            None => {
+                self.views.push(ViewData { id: id.to_string(), root: root.to_path_buf(), view: view.to_string(), content: Default::default() });
+                self.views.len() - 1
+            }
+        };
+        &mut self.views[ix].content
+    }
+
+    /// The manifest's declaration of extension `id`'s view `view`.
+    pub fn view_kind(&self, id: &str, view: &str) -> Option<&den_extension::View> {
+        self.entries.iter().find(|e| e.id == id)?.manifest.as_ref()?.views.iter().find(|v| v.id == view)
     }
 }
 
@@ -221,6 +254,21 @@ fn on_report(report: Report, cx: &mut App) {
         }
         Report::Run { root, command, cwd } => return run_in_terminal(Path::new(&root), command, cwd.map(PathBuf::from), cx),
         Report::OpenFile { root, path, line, column } => return open_file(Path::new(&root), PathBuf::from(path), line, column, cx),
+        Report::OpenView { id, root, view } => {
+            return in_window(Path::new(&root), "open_view", cx, |workspace, window, cx| workspace.open_extension_view(id, view, window, cx));
+        }
+        Report::SetView { id, root, view, content } => {
+            cx.global_mut::<Extensions>().view_mut(&id, Path::new(&root), &view).merge(*content);
+            cx.refresh_windows();
+            return;
+        }
+        Report::Prompt { id, root, prompt } => {
+            return in_window(Path::new(&root), "prompt", cx, |_, window, cx| crate::extension_view::prompt(id, PathBuf::from(&root), prompt, window, cx));
+        }
+        Report::OpenDiff { root, diff } => {
+            return in_window(Path::new(&root), "open_diff", cx, |workspace, window, cx| workspace.open_extension_diff(diff, window, cx));
+        }
+        Report::Copy(text) => return cx.write_to_clipboard(ClipboardItem::new_string(text)),
     };
     let extensions = cx.global_mut::<Extensions>();
     let Some(entry) = extensions.entry_mut(&id) else { return };
@@ -372,6 +420,11 @@ pub fn pretty_keys(keys: &str) -> String {
 /// A click on extension `id`'s button `button` in the window on `root`.
 pub fn button_clicked(id: &str, root: &Path, button: &str, cx: &App) {
     send(id, den_extension::events::BUTTON_CLICKED, serde_json::json!({ "root": root, "id": button }), cx);
+}
+
+/// Something done in extension `id`'s view (`den_extension::events::VIEW_ACTION`).
+pub fn view_event(id: &str, name: &str, data: Value, cx: &App) {
+    send(id, name, data, cx);
 }
 
 fn send(id: &str, name: &str, data: Value, cx: &App) {
