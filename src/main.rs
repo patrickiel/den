@@ -21,6 +21,7 @@ mod extensions;
 mod extensions_view;
 mod file_icon;
 mod float;
+mod history;
 mod layout;
 mod layout_file;
 mod layout_view;

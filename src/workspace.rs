@@ -32,6 +32,7 @@ use crate::{
     diff::DiffPanel,
     explorer::{Explorer, ExplorerEvent},
     float::FloatWindow,
+    history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
     layout_view::{Drop, Dragged, DropHint, Zones},
     pane::{self, Pane as _, PaneRef, PaneState},
@@ -302,6 +303,10 @@ pub struct Workspace {
     /// The float just made, whose window comes to the front when it opens
     /// (those coming back with the session do not).
     activate_float: Option<u64>,
+    /// The tabs looked at, for the mouse's back and forward buttons.
+    history: History,
+    /// Going back or forward: what is shown now is no new visit.
+    navigating: bool,
     explorer: Entity<Explorer>,
     search: Entity<SearchView>,
     scm: Entity<ScmView>,
@@ -417,6 +422,8 @@ impl Workspace {
             remote_drag: None,
             tab_menu: None,
             activate_float: None,
+            history: History::default(),
+            navigating: false,
             explorer,
             search,
             scm,
@@ -491,6 +498,8 @@ impl Workspace {
             .unwrap_or(tree.root.id());
         self.tree = tree;
         self.last_active.clear();
+        self.history.clear();
+        self.note_visit();
         self.sync_floats(cx);
         cx.notify();
         Ok(())
@@ -516,6 +525,7 @@ impl Workspace {
         self.tree = Tree::new();
         self.defaults.clear();
         self.active_group = self.tree.root.id();
+        self.history.clear();
         self.changed(cx);
     }
 
@@ -527,6 +537,7 @@ impl Workspace {
     /// After every edit of the arrangement: redraw, open or close floating
     /// windows to match, and save.
     pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
+        self.note_visit();
         cx.notify();
         self.sync_floats(cx);
         self.schedule_save(cx);
@@ -544,6 +555,39 @@ impl Workspace {
             self.defaults.activate(group);
             cx.notify();
         }
+        self.note_visit();
+    }
+
+    /// The tab shown in the active group, for going back and forward.
+    fn note_visit(&mut self) {
+        let Some(pane) = self.tree.active_tab(self.active_group) else { return };
+        if self.navigating {
+            self.history.arrive(pane);
+        } else {
+            self.history.visit(pane);
+        }
+    }
+
+    /// Show the tab looked at before (`back`) or after, as the mouse's side
+    /// buttons do. A closed file opens again, as the preview.
+    fn navigate(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.history.step(back, |entry| match entry {
+            Entry::Pane(pane) => self.panes.contains_key(pane),
+            Entry::File(path) => path.is_file(),
+        }) else {
+            return;
+        };
+        self.navigating = true;
+        match entry {
+            Entry::Pane(pane) => self.show_pane(pane, true, window, cx),
+            Entry::File(path) => {
+                self.open_file(path, true, window, cx);
+                if let Some(pane) = self.tree.active_tab(self.active_group) {
+                    self.focus_pane(pane, window, cx);
+                }
+            }
+        }
+        self.navigating = false;
     }
 
     /// Where a new tab of `kind` goes: a default group of that kind, else the
@@ -606,17 +650,25 @@ impl Workspace {
         if self.preview == Some(pane) {
             self.preview = None;
         }
-        self.tree.remove_tab(pane);
-        self.panes.remove(&pane);
-        self.pane_subscriptions.remove(&pane);
+        self.forget_pane(pane, cx);
         self.changed(cx);
+    }
+
+    /// A tab goes: the history keeps it as its file, if it has one.
+    fn forget_pane(&mut self, pane: PaneId, cx: &App) {
+        let file = self
+            .panes
+            .remove(&pane)
+            .and_then(|pane| pane.view().downcast::<FilePanel>().ok())
+            .map(|file| file.read(cx).path().to_path_buf());
+        self.pane_subscriptions.remove(&pane);
+        self.tree.remove_tab(pane);
+        self.history.closed(pane, file);
     }
 
     pub(crate) fn close_group(&mut self, group: NodeId, cx: &mut Context<Self>) {
         for pane in self.tree.tabs(group).to_vec() {
-            self.panes.remove(&pane);
-            self.pane_subscriptions.remove(&pane);
-            self.tree.remove_tab(pane);
+            self.forget_pane(pane, cx);
         }
         if let Some((_, remap)) = self.tree.detach(group) {
             self.defaults.prune(&self.tree, &remap);
@@ -630,9 +682,7 @@ impl Workspace {
         let groups = self.tree.groups_under(node);
         for &group in &groups {
             for pane in self.tree.tabs(group).to_vec() {
-                self.panes.remove(&pane);
-                self.pane_subscriptions.remove(&pane);
-                self.tree.remove_tab(pane);
+                self.forget_pane(pane, cx);
             }
         }
         match self.tree.detach(node) {
@@ -2019,6 +2069,15 @@ impl Workspace {
                         return;
                     }
                     this.open_file(path.clone(), false, window, cx);
+                }
+            }))
+            // The mouse's side buttons go back and forward through the tabs
+            // looked at, wherever the pointer is (before a group takes the
+            // press as a click into it).
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if let MouseButton::Navigate(direction) = event.button {
+                    cx.stop_propagation();
+                    this.navigate(direction == NavigationDirection::Back, window, cx);
                 }
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
