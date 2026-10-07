@@ -15,12 +15,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
-    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, PopupMenu},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
-use crate::{repo::Repo, scm::letter_color};
+use crate::{repo::Repo, scm::letter_color, ui::menu_action};
 
 pub enum ExplorerEvent {
     /// `preview` is a single click: open it, keep focus in the tree.
@@ -285,44 +285,26 @@ impl Explorer {
 
     /// The right-click menu of a row.
     fn row_menu(menu: PopupMenu, this: WeakEntity<Self>, path: PathBuf, is_dir: bool) -> PopupMenu {
-        type Run = Box<dyn Fn(&mut Explorer, &mut Window, &mut Context<Explorer>)>;
         let dir = if is_dir { path.clone() } else { path.parent().map(Path::to_path_buf).unwrap_or_default() };
-        let act = |label: &'static str, icon: IconName, run: Run| {
-            let this = this.clone();
-            let run = std::rc::Rc::new(run);
-            PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, window, cx| {
-                let run = run.clone();
-                _ = this.update(cx, |explorer, cx| run(explorer, window, cx));
-            })
-        };
         let (d1, d2, d3) = (dir.clone(), dir.clone(), dir);
         let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path);
-        menu.item(act("New File…", IconName::FilePlus, Box::new(move |e, w, cx| e.prompt_new(d1.clone(), false, w, cx))))
-            .item(act("New Folder…", IconName::FolderPlus, Box::new(move |e, w, cx| e.prompt_new(d2.clone(), true, w, cx))))
+        menu.item(menu_action(&this, "New File…", move |e, w, cx| e.prompt_new(d1.clone(), false, w, cx)).icon(Icon::new(IconName::FilePlus)))
+            .item(menu_action(&this, "New Folder…", move |e, w, cx| e.prompt_new(d2.clone(), true, w, cx)).icon(Icon::new(IconName::FolderPlus)))
             .separator()
-            .item(act(
-                "Open Terminal Here",
-                IconName::SquareTerminal,
-                Box::new(move |_, _, cx| cx.emit(ExplorerEvent::OpenTerminal(d3.clone()))),
-            ))
-            .item(act("Reveal in File Explorer", IconName::FolderOpen, Box::new(move |_, _, _| reveal(&p1))))
+            .item(menu_action(&this, "Open Terminal Here", move |_, _, cx| cx.emit(ExplorerEvent::OpenTerminal(d3.clone()))).icon(Icon::new(IconName::SquareTerminal)))
+            .item(menu_action(&this, "Reveal in File Explorer", move |_, _, _| reveal(&p1)).icon(Icon::new(IconName::FolderOpen)))
             .separator()
-            .item(act(
-                "Copy Path",
-                IconName::Copy,
-                Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))),
-            ))
-            .item(act(
-                "Copy Relative Path",
-                IconName::Copy,
-                Box::new(move |e, _, cx| {
+            .item(menu_action(&this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))).icon(Icon::new(IconName::Copy)))
+            .item(
+                menu_action(&this, "Copy Relative Path", move |e, _, cx| {
                     let rel = p3.strip_prefix(&e.root).unwrap_or(&p3).to_string_lossy().replace('\\', "/");
                     cx.write_to_clipboard(ClipboardItem::new_string(rel))
-                }),
-            ))
+                })
+                .icon(Icon::new(IconName::Copy)),
+            )
             .separator()
-            .item(act("Rename…", IconName::Pencil, Box::new(move |e, w, cx| e.prompt_rename(p4.clone(), w, cx))))
-            .item(act("Delete", IconName::Trash, Box::new(move |e, w, cx| e.confirm_delete(p5.clone(), w, cx))))
+            .item(menu_action(&this, "Rename…", move |e, w, cx| e.prompt_rename(p4.clone(), w, cx)).icon(Icon::new(IconName::Pencil)))
+            .item(menu_action(&this, "Delete", move |e, w, cx| e.confirm_delete(p5.clone(), w, cx)).icon(Icon::new(IconName::Trash)))
     }
 
     /// Ask for a name, then run `then` with it.

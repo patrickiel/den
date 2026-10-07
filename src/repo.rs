@@ -110,6 +110,11 @@ impl Repo {
         self.lanes.get(ix + self.uncommitted.is_some() as usize).copied().unwrap_or(0)
     }
 
+    /// The commit's page on GitHub, when the remote is there.
+    pub fn github_commit_url(&self, hash: &str) -> Option<String> {
+        self.github.as_ref().map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{hash}"))
+    }
+
     /// Read status and history again, off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
@@ -220,12 +225,12 @@ impl Repo {
     }
 
     pub fn stage(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
-        let rels: Vec<String> = files.into_iter().map(|f| f.rel).collect();
+        let rels = paths_of(files);
         self.run("Staging…", move |top| git::stage(top, &rels), cx);
     }
 
     pub fn unstage(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
-        let rels: Vec<String> = files.into_iter().map(|f| f.rel).collect();
+        let rels = paths_of(files);
         self.run("Unstaging…", move |top| git::unstage(top, &rels), cx);
     }
 
@@ -305,6 +310,12 @@ impl Repo {
         self.error = None;
         cx.notify();
     }
+}
+
+/// The paths git takes for `files`: a renamed file's old path too, so the
+/// rename moves as one.
+fn paths_of(files: Vec<FileStatus>) -> Vec<String> {
+    files.into_iter().flat_map(|f| [Some(f.rel), f.renamed_from]).flatten().collect()
 }
 
 /// The graph's lanes through the working tree (when it has changes, as a

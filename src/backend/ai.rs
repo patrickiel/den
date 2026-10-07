@@ -7,17 +7,17 @@
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
-use sha2::{Digest, Sha256};
+use super::{
+    http::{CANCELLED, Cancel, Progress, download, part_path},
+    process,
+};
 
 const SERVER_EXE: &str = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
 /// The llama.cpp release the runtime is pinned to; bump with the hashes below.
@@ -27,7 +27,6 @@ const DEFAULT_MODEL_SHA256: &str = "cc324af070c2ecbfd324a30884d2f951a7ff756aba85
 const IDLE_KILL: Duration = Duration::from_secs(5 * 60);
 /// Generous: a large model read from a slow disk takes minutes the first time.
 const START_TIMEOUT: Duration = Duration::from_secs(300);
-pub const CANCELLED: &str = "cancelled";
 
 /// The release asset for this platform and its SHA-256. The GPU builds also
 /// carry the CPU backends, so one download serves both.
@@ -214,8 +213,7 @@ pub fn remove_model(model: &str) -> Result<(), String> {
         return Err("den did not download this model".into());
     }
     stop();
-    let part = path.with_file_name(format!("{}.part", path.file_name().unwrap_or_default().to_string_lossy()));
-    let _ = std::fs::remove_file(part);
+    let _ = std::fs::remove_file(part_path(&path));
     remove_file(&path)
 }
 
@@ -239,9 +237,6 @@ fn remove_file(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Download progress: what, bytes done, bytes in all (0 when unknown).
-pub type Progress<'a> = &'a mut dyn FnMut(&'static str, u64, u64);
-
 /// Download whatever is missing: the runtime, then the model. Resumable.
 pub fn install(config: &AiConfig, cancel: &Cancel, progress: Progress) -> Result<(), String> {
     let runtime = runtime_dir();
@@ -262,117 +257,13 @@ pub fn install(config: &AiConfig, cancel: &Cancel, progress: Progress) -> Result
     Ok(())
 }
 
-/// Stream `url` into `dest` through `dest.part`, resuming a partial download.
-pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'static str, cancel: &Cancel, progress: Progress) -> Result<(), String> {
-    if dest.is_file() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(dest.parent().ok_or("bad download path")?).map_err(|e| e.to_string())?;
-    let part = dest.with_file_name(format!("{}.part", dest.file_name().unwrap_or_default().to_string_lossy()));
-    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(20)).timeout_read(Duration::from_secs(60)).build();
-    let mut offset = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    let mut request = agent.get(url);
-    if offset > 0 {
-        request = request.set("Range", &format!("bytes={offset}-"));
-    }
-    let response = match request.call() {
-        Ok(response) => response,
-        Err(ureq::Error::Status(416, _)) => {
-            // The partial file is complete or stale: start over.
-            let _ = std::fs::remove_file(&part);
-            offset = 0;
-            agent.get(url).call().map_err(|e| format!("Download failed: {e}"))?
-        }
-        Err(e) => return Err(format!("Download failed: {e}")),
-    };
-    if response.status() != 206 {
-        offset = 0; // the server ignored the range
-    }
-    let len: u64 = response.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let total = if len > 0 { len + offset } else { 0 };
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(offset > 0)
-        .truncate(offset == 0)
-        .open(&part)
-        .map_err(|e| e.to_string())?;
-    let mut reader = response.into_reader();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut done = offset;
-    let mut last = Instant::now() - Duration::from_secs(1);
-    loop {
-        cancel.check()?;
-        let n = reader.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        if last.elapsed() >= Duration::from_millis(200) {
-            last = Instant::now();
-            progress(stage, done, total);
-        }
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    drop(file);
-    if total > 0 && done < total {
-        return Err("Download interrupted; try again to resume.".into());
-    }
-    if let Some(want) = sha256 {
-        progress("Checking", 0, 0);
-        let got = sha256_file(&part, cancel)?;
-        if !got.eq_ignore_ascii_case(want) {
-            let _ = std::fs::remove_file(&part);
-            return Err(format!("The downloaded file is corrupt (checksum mismatch): {url}"));
-        }
-    }
-    std::fs::rename(&part, dest).map_err(|e| e.to_string())
-}
-
-fn sha256_file(path: &Path, cancel: &Cancel) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        cancel.check()?;
-        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// Unpack `archive` into the new folder `into` with the system tar (bsdtar on
-/// Windows 10+ reads zip too); `what` names it in the error.
-pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
-    let _ = std::fs::remove_dir_all(into);
-    std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
-    let tar = if cfg!(windows) {
-        let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-        PathBuf::from(sysroot).join("System32").join("tar.exe")
-    } else {
-        PathBuf::from("tar")
-    };
-    let mut cmd = Command::new(tar);
-    cmd.arg(if cfg!(windows) { "-xf" } else { "-xzf" }).arg(archive).arg("-C").arg(into);
-    no_window(&mut cmd);
-    let out = cmd.output().map_err(|e| format!("Cannot run tar: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("Unpacking {what} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(())
-}
-
 /// Unpack, then move the folder holding `llama-server` to `dest`. Older
 /// runtimes go.
 fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
     let root = dest.parent().ok_or("bad runtime path")?;
     let tmp = root.join(format!("{LLAMA_TAG}.tmp"));
-    unpack(archive, &tmp, "the AI runtime")?;
-    let bin = find_file(&tmp, SERVER_EXE, 3).ok_or("The AI runtime archive has no llama-server")?;
+    process::unpack(archive, &tmp, "the AI runtime")?;
+    let bin = super::find_file(&tmp, SERVER_EXE, 3).ok_or("The AI runtime archive has no llama-server")?;
     let src = bin.parent().ok_or("bad archive layout")?.to_path_buf();
     let _ = std::fs::remove_dir_all(dest);
     std::fs::rename(&src, dest).map_err(|e| e.to_string())?;
@@ -384,18 +275,6 @@ fn extract_runtime(archive: &Path, dest: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
-pub(crate) fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
-    let candidate = dir.join(name);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    if depth == 0 {
-        return None;
-    }
-    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).find_map(|e| find_file(&e.path(), name, depth - 1))
-}
-
 
 // -- Server ------------------------------------------------------------------
 
@@ -464,16 +343,6 @@ fn start_reaper() {
     });
 }
 
-fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
-}
-
 fn spawn(key: &ServerKey, gpu: bool) -> Result<Server, String> {
     let runtime = runtime_dir();
     let exe = runtime.join(SERVER_EXE);
@@ -499,7 +368,7 @@ fn spawn(key: &ServerKey, gpu: bool) -> Result<Server, String> {
     if key.threads > 0 {
         cmd.args(["-t", &key.threads.to_string()]);
     }
-    no_window(&mut cmd);
+    process::no_window(&mut cmd);
     let child = cmd.spawn().map_err(|e| format!("Cannot start llama-server: {e}"))?;
     Ok(Server { child, port, key: key.clone(), gpu, ready: false, deadline: Instant::now() + START_TIMEOUT, log })
 }
@@ -565,31 +434,6 @@ fn ensure_server(key: ServerKey, cancel: &Cancel) -> Result<u16, String> {
 }
 
 // -- Requests ----------------------------------------------------------------
-
-/// Stops a request: polled between tokens, and the socket is shut so a read
-/// blocked on prompt processing returns at once.
-#[derive(Clone, Default)]
-pub struct Cancel {
-    flag: Arc<AtomicBool>,
-    stream: Arc<Mutex<Option<TcpStream>>>,
-}
-
-impl Cancel {
-    pub fn cancel(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-        if let Some(stream) = self.stream.lock().ok().and_then(|s| s.as_ref().and_then(|s| s.try_clone().ok())) {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
-    }
-
-    pub fn check(&self) -> Result<(), String> {
-        if self.is_cancelled() { Err(CANCELLED.into()) } else { Ok(()) }
-    }
-}
 
 /// One chat request; `on_token` gets each piece as it streams in.
 pub fn chat(config: &AiConfig, mut body: serde_json::Value, cancel: &Cancel, mut on_token: impl FnMut(&str)) -> Result<String, String> {

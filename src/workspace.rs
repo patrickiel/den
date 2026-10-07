@@ -35,14 +35,14 @@ use crate::{
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
     layout_view::{Drop, Dragged, DropHint, Zones},
-    pane::{self, Pane as _, PaneRef, PaneState},
+    pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::Repo,
     extension_panel::ExtensionPanel,
     extensions_view::{ExtensionsEvent, ExtensionsView},
     scm::{ScmEvent, ScmView},
     search::{IsDirty, SearchEvent, SearchView},
-    settings::{AppState, LayoutPreset, Preset, Settings, SidebarSide, SidebarView},
+    settings::{AppState, LayoutPreset, Settings, SidebarSide, SidebarView},
     terminal::{Launch, TerminalPanel},
 };
 
@@ -381,7 +381,7 @@ impl Workspace {
             }),
             cx.subscribe_in(&scm, window, |this, _, event: &ScmEvent, window, cx| match event {
                 ScmEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
-                ScmEvent::Diff { file, staged } => this.open_diff(file.clone(), *staged, window, cx),
+                ScmEvent::Diff { file, staged } => this.open_diff(file.path.clone(), file.rel.clone(), *staged, window, cx),
                 ScmEvent::CommitDiff { rel, commit } => this.open_commit_diff(rel.clone(), commit.clone(), window, cx),
             }),
             // Coming back to the window, git may have changed underneath.
@@ -599,9 +599,10 @@ impl Workspace {
     }
 
     /// Put a new pane in `group` and show it.
-    pub(crate) fn add_pane(&mut self, pane: PaneRef, group: NodeId, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_pane<T: Pane>(&mut self, pane: Entity<T>, group: NodeId, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.tree.mint();
-        self.track(id, pane.clone(), window, cx);
+        let pane: PaneRef = std::rc::Rc::new(pane);
+        self.track(id, pane, window, cx);
         self.tree.add_tab(group, id, None, true);
         self.set_active_group(group, cx);
         if focus {
@@ -656,11 +657,8 @@ impl Workspace {
 
     /// A tab goes: the history keeps it as its file, if it has one.
     fn forget_pane(&mut self, pane: PaneId, cx: &App) {
-        let file = self
-            .panes
-            .remove(&pane)
-            .and_then(|pane| pane.view().downcast::<FilePanel>().ok())
-            .map(|file| file.read(cx).path().to_path_buf());
+        let file = self.pane_as::<FilePanel>(pane).map(|file| file.read(cx).path().to_path_buf());
+        self.panes.remove(&pane);
         self.pane_subscriptions.remove(&pane);
         self.tree.remove_tab(pane);
         self.history.closed(pane, file);
@@ -670,11 +668,20 @@ impl Workspace {
         for pane in self.tree.tabs(group).to_vec() {
             self.forget_pane(pane, cx);
         }
-        if let Some((_, remap)) = self.tree.detach(group) {
-            self.defaults.prune(&self.tree, &remap);
+        self.detach(group);
+        self.changed(cx);
+    }
+
+    /// Take `node` out of the tree, with what follows from that: the
+    /// defaults of a container that collapsed move on, and the active group
+    /// stays a group. False for the root, which has nowhere to go.
+    fn detach(&mut self, node: NodeId) -> bool {
+        let detached = self.tree.detach(node);
+        if let Some((_, remap)) = &detached {
+            self.defaults.prune(&self.tree, remap);
         }
         self.fix_active_group();
-        self.changed(cx);
+        detached.is_some()
     }
 
     /// Close a container with every group and tab in it.
@@ -685,12 +692,10 @@ impl Workspace {
                 self.forget_pane(pane, cx);
             }
         }
-        match self.tree.detach(node) {
-            Some((_, remap)) => self.defaults.prune(&self.tree, &remap),
+        if !self.detach(node) {
             // The root has nowhere to go: close its groups one by one.
-            None => groups.into_iter().for_each(|group| self.close_group(group, cx)),
+            groups.into_iter().for_each(|group| self.close_group(group, cx));
         }
-        self.fix_active_group();
         self.changed(cx);
     }
 
@@ -744,7 +749,7 @@ impl Workspace {
                 AlertKind::Input => "needs input",
                 AlertKind::Attention => "needs attention",
             };
-            let title = handle.view().downcast::<crate::terminal::TerminalPanel>().ok().and_then(|t| t.read(cx).title_text());
+            let title = self.pane_as::<TerminalPanel>(pane).and_then(|t| t.read(cx).title_text());
             let body: Vec<String> = [message.map(|m| m.trim().to_string()), title.filter(|t| t.as_str() != name.as_ref())]
                 .into_iter()
                 .flatten()
@@ -764,12 +769,7 @@ impl Workspace {
 
     /// Format Document on the active group's file tab.
     pub(crate) fn format_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let file = self
-            .tree
-            .active_tab(self.active_group)
-            .and_then(|pane| self.panes.get(&pane))
-            .and_then(|pane| pane.view().downcast::<crate::panels::FilePanel>().ok());
-        if let Some(file) = file {
+        if let Some(file) = self.tree.active_tab(self.active_group).and_then(|pane| self.pane_as::<FilePanel>(pane)) {
             file.update(cx, |file, cx| file.format(false, window, cx));
         }
     }
@@ -824,14 +824,9 @@ impl Workspace {
             },
         };
         self.tree.move_tab(pane, group, ix);
-        if from != group
-            && from != target
-            && self.tree.tabs(from).is_empty()
-            && let Some((_, remap)) = self.tree.detach(from)
-        {
-            self.defaults.prune(&self.tree, &remap);
+        if from != group && from != target && self.tree.tabs(from).is_empty() {
+            self.detach(from);
         }
-        self.fix_active_group();
         self.set_active_group(group, cx);
         self.changed(cx);
     }
@@ -915,10 +910,7 @@ impl Workspace {
         let Some(root) = self.tree.window_root(Some(id)) else { return };
         let root_id = root.id();
         if !keep_empty && root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
-            if let Some((_, remap)) = self.tree.detach(root_id) {
-                self.defaults.prune(&self.tree, &remap);
-            }
-            self.fix_active_group();
+            self.detach(root_id);
             return self.changed(cx);
         }
         let main = self.tree.root.id();
@@ -933,12 +925,10 @@ impl Workspace {
     /// window their tab is in now (a page dies with its parent window).
     pub(crate) fn rehome_browsers(&self, from: isize, cx: &mut App) {
         let moves: Vec<(Entity<crate::browser::BrowserPanel>, AnyWindowHandle)> = self
-            .panes
-            .iter()
-            .filter_map(|(id, pane)| {
-                let browser = pane.view().downcast::<crate::browser::BrowserPanel>().ok()?;
-                let float = self.tree.group_of(*id).and_then(|group| self.tree.float_of(group));
-                Some((browser, self.window_of(float)))
+            .panes_of::<crate::browser::BrowserPanel>()
+            .map(|(id, browser)| {
+                let float = self.tree.group_of(id).and_then(|group| self.tree.float_of(group));
+                (browser, self.window_of(float))
             })
             .collect();
         for (browser, target) in moves {
@@ -1087,24 +1077,46 @@ impl Workspace {
 
     // -- Opening things ------------------------------------------------------
 
-    fn find_pane(&self, matches: impl Fn(&AnyView, &App) -> bool, cx: &App) -> Option<PaneId> {
-        self.tree
-            .panes()
-            .into_iter()
-            .find(|id| self.panes.get(id).is_some_and(|pane| matches(&pane.view(), cx)))
+    /// The pane as its kind, when it is of that kind.
+    pub(crate) fn pane_as<T: 'static>(&self, id: PaneId) -> Option<Entity<T>> {
+        self.panes.get(&id).and_then(|pane| pane.view().downcast::<T>().ok())
+    }
+
+    /// The panes of one kind.
+    pub(crate) fn panes_of<T: 'static>(&self) -> impl Iterator<Item = (PaneId, Entity<T>)> + '_ {
+        self.panes.iter().filter_map(|(id, pane)| Some((*id, pane.view().downcast::<T>().ok()?)))
+    }
+
+    /// The first tab, in layout order, of kind `T` that `matches`.
+    fn find_pane<T: 'static>(&self, matches: impl Fn(&T) -> bool, cx: &App) -> Option<PaneId> {
+        self.tree.panes().into_iter().find(|id| self.pane_as::<T>(*id).is_some_and(|view| matches(view.read(cx))))
+    }
+
+    /// Show the tab `existing`, else a new pane from `make` where tabs of
+    /// `kind` go.
+    fn show_or_add<T: Pane>(
+        &mut self,
+        existing: Option<PaneId>,
+        kind: Kind,
+        focus: bool,
+        make: impl FnOnce(&mut Window, &mut Context<Self>) -> Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match existing {
+            Some(pane) => self.show_pane(pane, focus, window, cx),
+            None => {
+                let pane = make(window, cx);
+                let group = self.target_group(kind);
+                self.add_pane(pane, group, focus, window, cx);
+            }
+        }
     }
 
     /// Open a file: as the preview tab (a single click; focus stays where it
     /// is, and the next preview replaces it), or kept, as in den.
     pub fn open_file(&mut self, path: PathBuf, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self.find_pane(
-            |view, cx| {
-                view.clone()
-                    .downcast::<FilePanel>()
-                    .is_ok_and(|file| file.read(cx).path() == path)
-            },
-            cx,
-        );
+        let existing = self.find_pane::<FilePanel>(|file| file.path() == path, cx);
         match existing {
             Some(pane) => {
                 if !preview && self.preview == Some(pane) {
@@ -1120,7 +1132,7 @@ impl Workspace {
                     .preview
                     .filter(|id| preview && self.tree.group_of(*id) == Some(group))
                     .filter(|id| !self.panes.get(id).is_some_and(|p| p.is_dirty(cx)));
-                self.add_pane(std::rc::Rc::new(file), group, !preview, window, cx);
+                self.add_pane(file, group, !preview, window, cx);
                 let added = self.tree.active_tab(group);
                 if let Some(old) = replaced {
                     // Into the old tab's place, so the strip does not shuffle.
@@ -1141,7 +1153,7 @@ impl Workspace {
     pub(crate) fn toggle_preview(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         if self.preview == Some(pane) {
             self.preview = None;
-        } else if self.panes.get(&pane).is_some_and(|p| p.view().downcast::<FilePanel>().is_ok()) {
+        } else if self.pane_as::<FilePanel>(pane).is_some() {
             self.preview = Some(pane);
         }
         cx.notify();
@@ -1164,10 +1176,7 @@ impl Workspace {
     }
 
     fn file_pane(&self, path: &std::path::Path, cx: &App) -> Option<Entity<FilePanel>> {
-        self.panes.values().find_map(|pane| {
-            let file = pane.view().downcast::<FilePanel>().ok()?;
-            (file.read(cx).path() == path).then_some(file)
-        })
+        self.panes_of::<FilePanel>().map(|(_, file)| file).find(|file| file.read(cx).path() == path)
     }
 
     /// Move an open file's cursor to `line` and `column` (both from 1).
@@ -1217,70 +1226,35 @@ impl Workspace {
         }
     }
 
-    /// A change side by side, in an existing diff tab when there is one.
-    fn open_diff(&mut self, file: crate::backend::git::FileStatus, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// The change to `path` (`rel` in the repository) side by side, in an
+    /// existing diff tab when there is one.
+    fn open_diff(&mut self, path: PathBuf, rel: String, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
-        let existing = self.find_pane(
-            |view, cx| {
-                view.clone()
-                    .downcast::<DiffPanel>()
-                    .is_ok_and(|diff| diff.read(cx).path() == file.path && diff.read(cx).staged() == staged && diff.read(cx).commit().is_none())
-            },
-            cx,
-        );
-        match existing {
-            Some(pane) => {
-                if let Some(diff) = self.panes.get(&pane).and_then(|p| p.view().downcast::<DiffPanel>().ok()) {
-                    diff.update(cx, |diff, cx| {
-                        diff.reload();
-                        cx.notify();
-                    });
-                }
-                self.show_pane(pane, false, window, cx);
-            }
-            None => {
-                let diff = cx.new(|cx| DiffPanel::new(file.path.clone(), top, file.rel.clone(), staged, cx));
-                let group = self.target_group(Kind::Files);
-                self.add_pane(std::rc::Rc::new(diff), group, false, window, cx);
-            }
+        let existing = self.find_pane::<DiffPanel>(|diff| diff.path() == path && diff.staged() == staged && diff.commit().is_none(), cx);
+        if let Some(diff) = existing.and_then(|pane| self.pane_as::<DiffPanel>(pane)) {
+            diff.update(cx, |diff, cx| {
+                diff.reload();
+                cx.notify();
+            });
         }
+        self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::new(path, top, rel, staged, cx)), window, cx);
     }
 
     /// A commit's change to one file; shown again when already open.
     fn open_commit_diff(&mut self, rel: String, commit: crate::diff::CommitRevs, window: &mut Window, cx: &mut Context<Self>) {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
         let path = top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let hash = commit.hash.clone();
-        let existing = self.find_pane(
-            |view, cx| {
-                view.clone().downcast::<DiffPanel>().is_ok_and(|diff| {
-                    let diff = diff.read(cx);
-                    diff.path() == path && diff.commit().is_some_and(|c| c.hash == hash)
-                })
-            },
-            cx,
-        );
-        match existing {
-            Some(pane) => self.show_pane(pane, false, window, cx),
-            None => {
-                let diff = cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx));
-                let group = self.target_group(Kind::Files);
-                self.add_pane(std::rc::Rc::new(diff), group, false, window, cx);
-            }
-        }
+        let existing = self.find_pane::<DiffPanel>(|diff| diff.path() == path && diff.commit().is_some_and(|c| c.hash == commit.hash), cx);
+        self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)), window, cx);
     }
 
     fn reload_diffs(&mut self, cx: &mut Context<Self>) {
         // The index changed (a stage, a commit, a checkout): new gutter marks.
-        for pane in self.panes.values() {
-            if let Ok(file) = pane.view().downcast::<FilePanel>() {
-                file.update(cx, |file, cx| file.refresh_git_base(cx));
-            }
+        for (_, file) in self.panes_of::<FilePanel>() {
+            file.update(cx, |file, cx| file.refresh_git_base(cx));
         }
-        for pane in self.panes.values() {
-            if let Ok(diff) = pane.view().downcast::<DiffPanel>()
-                && diff.read(cx).commit().is_none()
-            {
+        for (_, diff) in self.panes_of::<DiffPanel>() {
+            if diff.read(cx).commit().is_none() {
                 diff.update(cx, |diff, cx| {
                     diff.reload();
                     cx.notify();
@@ -1311,22 +1285,19 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A terminal running a preset (`None` for a plain shell): in `group`
-    /// when a group's button asked, else where its kind goes.
-    pub(crate) fn open_terminal(&mut self, group: Option<NodeId>, preset: Option<Preset>, window: &mut Window, cx: &mut Context<Self>) {
-        let agent = preset.as_ref().is_some_and(|p| p.agent);
-        let kind = if agent { Kind::Agents } else { Kind::Terminals };
-        let group = group.unwrap_or_else(|| self.target_group(kind));
-        let program = preset.map(|p| p.command.trim().to_string()).filter(|c| !c.is_empty());
-        let launch = Launch {
-            cwd: self.root.clone(),
-            program: program.clone(),
-            command: program,
-            history: None,
-            agent,
-        };
+    /// A terminal running `program` (`None` for a plain shell), a coding
+    /// agent's or not: in `group` when a group's button asked, else where
+    /// its kind goes.
+    pub(crate) fn open_terminal(&mut self, group: Option<NodeId>, program: Option<String>, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let group = group.unwrap_or_else(|| self.target_group(if agent { Kind::Agents } else { Kind::Terminals }));
+        let program = program.map(|p| p.trim().to_string()).filter(|c| !c.is_empty());
+        let launch = Launch { cwd: self.root.clone(), program: program.clone(), command: program, history: None, agent };
+        self.add_terminal(launch, group, window, cx);
+    }
+
+    fn add_terminal(&mut self, launch: Launch, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
-        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+        self.add_pane(terminal, group, true, window, cx);
     }
 
     /// A browser tab at `url` (the home page when none), in `group` or where
@@ -1334,7 +1305,7 @@ impl Workspace {
     pub(crate) fn open_browser(&mut self, group: Option<NodeId>, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let group = group.unwrap_or_else(|| self.target_group(Kind::Browsers));
         let browser = cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx));
-        self.add_pane(std::rc::Rc::new(browser), group, true, window, cx);
+        self.add_pane(browser, group, true, window, cx);
     }
 
     /// Show the browser pages in `window` (the main one, or float `float`'s)
@@ -1345,13 +1316,12 @@ impl Workspace {
         // A page stays live: only a drag or a dialog hides it (menus and
         // toasts may be drawn under it).
         let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
-        for (id, pane) in &self.panes {
-            let Ok(browser) = pane.view().downcast::<crate::browser::BrowserPanel>() else { continue };
-            let Some(group) = self.tree.group_of(*id) else { continue };
+        for (id, browser) in self.panes_of::<crate::browser::BrowserPanel>() {
+            let Some(group) = self.tree.group_of(id) else { continue };
             if self.tree.float_of(group) != float {
                 continue;
             }
-            let showing = self.tree.active_tab(group) == Some(*id);
+            let showing = self.tree.active_tab(group) == Some(id);
             browser.read(cx).set_shown(showing && !covered);
         }
     }
@@ -1359,33 +1329,20 @@ impl Workspace {
     /// The page of extension `id` (a preview of `listing` when it is not
     /// installed): its tab if open, else a new one where files go.
     pub(crate) fn open_extension(&mut self, id: String, listing: Option<crate::backend::extensions::Listing>, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self.find_pane(|view, cx| view.clone().downcast::<ExtensionPanel>().is_ok_and(|page| page.read(cx).id() == id), cx);
-        match existing {
-            Some(pane) => self.show_pane(pane, true, window, cx),
-            None => {
-                let page = match listing {
-                    Some(listing) => cx.new(|cx| ExtensionPanel::preview(listing, cx)),
-                    None => cx.new(|cx| ExtensionPanel::new(id, window, cx)),
-                };
-                let group = self.target_group(Kind::Files);
-                self.add_pane(std::rc::Rc::new(page), group, true, window, cx);
-            }
-        }
+        let existing = self.find_pane::<ExtensionPanel>(|page| page.id() == id, cx);
+        let make = |window: &mut Window, cx: &mut Context<Self>| match listing {
+            Some(listing) => cx.new(|cx| ExtensionPanel::preview(listing, cx)),
+            None => cx.new(|cx| ExtensionPanel::new(id, window, cx)),
+        };
+        self.show_or_add(existing, Kind::Files, true, make, window, cx);
     }
 
     /// Extension `id`'s view `view`: its tab if open, else a new one where files go.
     pub(crate) fn open_extension_view(&mut self, id: String, view: String, window: &mut Window, cx: &mut Context<Self>) {
         use crate::extension_view::ExtensionView;
-        let existing = self.find_pane(|v, cx| v.clone().downcast::<ExtensionView>().is_ok_and(|v| v.read(cx).is(&id, &view)), cx);
-        match existing {
-            Some(pane) => self.show_pane(pane, true, window, cx),
-            None => {
-                let root = self.root.clone();
-                let tab = cx.new(|cx| ExtensionView::new(id, view, root, cx));
-                let group = self.target_group(Kind::Files);
-                self.add_pane(std::rc::Rc::new(tab), group, true, window, cx);
-            }
-        }
+        let existing = self.find_pane::<ExtensionView>(|v| v.is(&id, &view), cx);
+        let root = self.root.clone();
+        self.show_or_add(existing, Kind::Files, true, |_, cx| cx.new(|cx| ExtensionView::new(id, view, root, cx)), window, cx);
     }
 
     /// An extension's `open_diff`: a commit's change to a file, or its
@@ -1403,15 +1360,8 @@ impl Workspace {
                 self.open_commit_diff(rel, crate::diff::CommitRevs { hash, parent: diff.parent, old_rel }, window, cx);
             }
             None => {
-                let file = crate::backend::git::FileStatus {
-                    path: top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)),
-                    rel,
-                    index: 'M',
-                    worktree: 'M',
-                    renamed_from: None,
-                    conflict: false,
-                };
-                self.open_diff(file, diff.staged, window, cx);
+                let path = top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+                self.open_diff(path, rel, diff.staged, window, cx);
             }
         }
     }
@@ -1420,49 +1370,28 @@ impl Workspace {
     /// running `command`, where terminals go.
     pub(crate) fn run_in_terminal(&mut self, command: String, cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let group = self.target_group(Kind::Terminals);
-        let launch = Launch {
-            cwd: cwd.unwrap_or_else(|| self.root.clone()),
-            // A plain shell, so the session brings it back as one rather
-            // than running the command again.
-            program: None,
-            command: Some(command),
-            history: None,
-            agent: false,
-        };
-        let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
-        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+        // A plain shell, so the session brings it back as one rather than
+        // running the command again.
+        let launch = Launch { cwd: cwd.unwrap_or_else(|| self.root.clone()), program: None, command: Some(command), history: None, agent: false };
+        self.add_terminal(launch, group, window, cx);
     }
 
     /// A shell starting in `dir` (Open Terminal Here).
     pub(crate) fn open_shell_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let group = self.target_group(Kind::Terminals);
-        let launch = Launch {
-            cwd: dir,
-            program: None,
-            command: None,
-            history: None,
-            agent: false,
-        };
-        let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
-        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+        let launch = Launch { cwd: dir, program: None, command: None, history: None, agent: false };
+        self.add_terminal(launch, group, window, cx);
     }
 
     /// Another terminal beside `pane` running what it runs, in the folder its
     /// shell is in now.
     pub(crate) fn duplicate_terminal(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(terminal) = self.panes.get(&pane).and_then(|p| p.view().downcast::<TerminalPanel>().ok()) else { return };
+        let Some(terminal) = self.pane_as::<TerminalPanel>(pane) else { return };
         let Some(group) = self.tree.group_of(pane) else { return };
         let terminal = terminal.read(cx);
         let program = terminal.program().map(str::to_string);
-        let launch = Launch {
-            cwd: terminal.cwd().to_path_buf(),
-            program: program.clone(),
-            command: program,
-            history: None,
-            agent: terminal.is_agent(),
-        };
-        let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
-        self.add_pane(std::rc::Rc::new(terminal), group, true, window, cx);
+        let launch = Launch { cwd: terminal.cwd().to_path_buf(), program: program.clone(), command: program, history: None, agent: terminal.is_agent() };
+        self.add_terminal(launch, group, window, cx);
     }
 
     /// Show `path` in the Explorer view: in the main window's sidebar, which
@@ -1505,9 +1434,9 @@ impl Workspace {
             .tree
             .tabs(group)
             .iter()
-            .filter_map(|id| self.panes.get(id))
-            .map(|pane| {
-                let terminal = pane.view().downcast::<TerminalPanel>().ok()?;
+            .filter(|id| self.panes.contains_key(id))
+            .map(|id| {
+                let terminal = self.pane_as::<TerminalPanel>(*id)?;
                 let terminal = terminal.read(cx);
                 terminal.program().map(|p| (p.to_string(), terminal.is_agent()))
             })
@@ -1518,16 +1447,8 @@ impl Workspace {
         if !tabs.is_empty() && tabs.iter().all(|id| self.panes.get(id).is_some_and(|p| p.kind(cx) == crate::browser::BROWSER)) {
             return self.open_browser(Some(group), None, window, cx);
         }
-        let preset = same.map(|(command, agent)| Preset {
-            name: command.clone(),
-            command,
-            agent,
-            browser: false,
-            pinned: false,
-            color: None,
-            icon: None,
-        });
-        self.open_terminal(Some(group), preset, window, cx);
+        let (program, agent) = same.map_or((None, false), |(command, agent)| (Some(command), agent));
+        self.open_terminal(Some(group), program, agent, window, cx);
     }
 
     // -- Sessions and windows ---------------------------------------------
@@ -1899,8 +1820,7 @@ impl Workspace {
     fn active_file(&self, cx: &App) -> Option<PathBuf> {
         self.tree
             .active_tab(self.active_group)
-            .and_then(|pane| self.panes.get(&pane))
-            .and_then(|pane| pane.view().downcast::<crate::panels::FilePanel>().ok())
+            .and_then(|pane| self.pane_as::<FilePanel>(pane))
             .map(|file| file.read(cx).path().to_path_buf())
     }
 
@@ -1922,9 +1842,7 @@ impl Workspace {
                 if !button.file_pattern.is_empty() && !active_file.as_deref().is_some_and(|path| crate::extensions::pattern_matches(&button.file_pattern, path)) {
                     continue;
                 }
-                let icon = (!button.icon.is_empty())
-                    .then(|| format!("icons/{}.svg", button.icon))
-                    .filter(|path| cx.asset_source().load(path).ok().flatten().is_some());
+                let icon = crate::ui::lucide_icon(&button.icon, cx);
                 let color = crate::preset_icon::parse_color(&button.color);
                 let (id, root, name) = (set.id.clone(), self.root.clone(), button.id.clone());
                 let tooltip = if button.tooltip.is_empty() { button.label.clone() } else { button.tooltip.clone() };
@@ -1938,7 +1856,7 @@ impl Workspace {
                                 .gap_1()
                                 .items_center()
                                 .when_some(color, |this, color| this.text_color(color))
-                                .when_some(icon, |this, path| this.child(Icon::default().path(path).small()))
+                                .when_some(icon, |this, icon| this.child(icon.small()))
                                 .child(button.label.clone()),
                         )
                         .on_click(move |_, _, cx| crate::extensions::button_clicked(&id, &root, &name, cx))
@@ -2000,11 +1918,12 @@ impl Workspace {
                     .item(item("Check for Updates…", "", |_, window, cx| crate::update::check_in_window(true, window, cx)))
                     .separator()
                     .label("TERMINAL")
-                    .item(item("New Terminal", "Ctrl+Shift+T", |this, window, cx| this.open_terminal(None, None, window, cx)))
+                    .item(item("New Terminal", "Ctrl+Shift+T", |this, window, cx| this.open_terminal(None, None, false, window, cx)))
                     .item(item("New Browser", "Ctrl+Shift+B", |this, window, cx| this.open_browser(None, None, window, cx)))
                     .item(item("Claude Code", "", |this, window, cx| {
-                        let preset = Settings::get(cx).presets.iter().find(|p| p.agent).cloned();
-                        this.open_terminal(None, preset, window, cx)
+                        let program = Settings::get(cx).presets.iter().find(|p| p.agent).map(|p| p.command.clone());
+                        let agent = program.is_some();
+                        this.open_terminal(None, program, agent, window, cx)
                     }))
                     // The running extensions' commands, each by its extension.
                     .when(!commands.is_empty(), |mut menu| {
@@ -2088,7 +2007,7 @@ impl Workspace {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
-            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
             .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))

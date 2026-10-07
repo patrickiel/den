@@ -157,6 +157,10 @@ impl Extensions {
         cx.global::<Self>()
     }
 
+    pub fn entry(&self, id: &str) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
     fn entry_mut(&mut self, id: &str) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|e| e.id == id)
     }
@@ -185,7 +189,7 @@ impl Extensions {
 
     /// The manifest's declaration of extension `id`'s view `view`.
     pub fn view_kind(&self, id: &str, view: &str) -> Option<&den_extension::View> {
-        self.entries.iter().find(|e| e.id == id)?.manifest.as_ref()?.views.iter().find(|v| v.id == view)
+        self.entry(id)?.manifest.as_ref()?.views.iter().find(|v| v.id == view)
     }
 }
 
@@ -469,7 +473,7 @@ fn user_settings(id: &str, cx: &App) -> serde_json::Map<String, Value> {
 
 /// Every setting's value for `id`, defaults included.
 pub fn settings_values(id: &str, cx: &App) -> serde_json::Map<String, Value> {
-    let Some(manifest) = Extensions::get(cx).entries.iter().find(|e| e.id == id).and_then(|e| e.manifest.as_ref()) else { return Default::default() };
+    let Some(manifest) = Extensions::get(cx).entry(id).and_then(|e| e.manifest.as_ref()) else { return Default::default() };
     manifest.settings_values(&user_settings(id, cx))
 }
 

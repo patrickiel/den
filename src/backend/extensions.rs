@@ -21,7 +21,10 @@ use den_extension::{API_VERSION, Button, Context, MANIFEST, Manifest, abi, valid
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
-use crate::backend::ai::{Cancel, Progress};
+use crate::backend::{
+    http::{self, Cancel, Progress},
+    process,
+};
 
 const PENDING: &str = ".pending";
 const REMOVE: &str = ".remove";
@@ -395,17 +398,9 @@ fn release_url(repo: &str, file: &str) -> String {
     format!("https://github.com/{repo}/releases/latest/download/{file}")
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout_read(std::time::Duration::from_secs(30))
-        .redirects(8)
-        .build()
-}
-
 /// The manifest of `repo`'s latest release.
 pub fn fetch_manifest(repo: &str) -> Result<Manifest, String> {
-    let text = match agent().get(&release_url(repo, MANIFEST)).call() {
+    let text = match http::AGENT.get(&release_url(repo, MANIFEST)).call() {
         Ok(response) => response.into_string().map_err(|e| format!("Cannot read {repo}'s {MANIFEST}: {e}"))?,
         Err(ureq::Error::Status(404, _)) => return Err(format!("{repo} has no release with an {MANIFEST}.")),
         Err(e) => return Err(format!("Cannot reach GitHub: {e}")),
@@ -469,7 +464,7 @@ fn parse_index(text: &str) -> Result<Vec<Listing>, String> {
 pub fn fetch_index() -> Result<Vec<Listing>, String> {
     let source = std::env::var(INDEX_ENV).unwrap_or_else(|_| INDEX_URL.to_string());
     let text = if source.contains("://") {
-        agent().get(&source).call().map_err(|e| format!("Cannot reach the extension index: {e}"))?.into_string().map_err(|e| e.to_string())?
+        http::AGENT.get(&source).call().map_err(|e| format!("Cannot reach the extension index: {e}"))?.into_string().map_err(|e| e.to_string())?
     } else {
         std::fs::read_to_string(&source).map_err(|e| format!("Cannot read {source}: {e}"))?
     };
@@ -490,18 +485,13 @@ pub fn icon_path(listing: &Listing) -> Option<PathBuf> {
 }
 
 /// The bytes at `source`, a URL or (for a local test index) a file, up to `limit`.
-fn read_source(source: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let reader: Box<dyn std::io::Read> = if source.contains("://") {
-        match agent().get(source).call() {
-            Ok(response) => response.into_reader(),
-            Err(ureq::Error::Status(404, _)) => return Err("not found".into()),
-            Err(e) => return Err(e.to_string()),
-        }
-    } else {
-        Box::new(std::fs::File::open(source).map_err(|_| "not found".to_string())?)
-    };
+fn read_source(source: &str, limit: u64) -> Result<Vec<u8>, http::Error> {
+    if source.contains("://") {
+        return http::get_bytes(source, limit);
+    }
+    let file = std::fs::File::open(source).map_err(|_| http::Error::NotFound)?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(reader, limit), &mut bytes).map_err(|e| e.to_string())?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit), &mut bytes).map_err(|e| http::Error::Other(e.to_string()))?;
     Ok(bytes)
 }
 
@@ -513,24 +503,18 @@ pub fn fetch_icon(listing: &Listing) -> Result<(), String> {
 }
 
 fn fetch_icon_to(source: &str, path: &Path) -> Result<(), String> {
-    let bytes = read_source(source, 1024 * 1024)?;
+    let bytes = read_source(source, 1024 * 1024).map_err(|e| e.to_string())?;
     if bytes.is_empty() {
         return Err("empty".into());
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    // Through a temporary file, so a half-written icon never shows.
-    let part = path.with_extension("part");
-    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(part, path).map_err(|e| e.to_string())
+    http::write_atomic(path, &bytes)
 }
 
 /// A listed extension's README.md, for its page before it is installed.
 pub fn fetch_readme(url: &str) -> Result<String, String> {
     match read_source(url, 4 * 1024 * 1024) {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(err) if err == "not found" => Err("It has no README.md.".into()),
+        Err(http::Error::NotFound) => Err("It has no README.md.".into()),
         Err(err) => Err(format!("Cannot fetch its README: {err}")),
     }
 }
@@ -550,11 +534,11 @@ pub fn install(manifest: &Manifest, cancel: &Cancel, progress: Progress) -> Resu
     let archive = dir.join(".downloads").join(manifest.asset());
     // Always a fresh copy: `download` keeps a file that is already there.
     let _ = std::fs::remove_file(&archive);
-    let _ = std::fs::remove_file(archive.with_extension("zip.part"));
+    let _ = std::fs::remove_file(http::part_path(&archive));
     let sha256 = Some(manifest.sha256.as_str()).filter(|s| !s.is_empty());
-    crate::backend::ai::download(&release_url(&manifest.repository, &manifest.asset()), &archive, sha256, "Downloading", cancel, progress)?;
+    http::download(&release_url(&manifest.repository, &manifest.asset()), &archive, sha256, "Downloading", cancel, progress)?;
     let pending = dir.join(format!("{}{PENDING}", manifest.id));
-    let unpacked = crate::backend::ai::unpack(&archive, &pending, "the extension").and_then(|()| check_unpacked(manifest, &pending));
+    let unpacked = process::unpack(&archive, &pending, "the extension").and_then(|()| check_unpacked(manifest, &pending));
     let _ = std::fs::remove_file(&archive);
     if let Err(err) = unpacked {
         let _ = std::fs::remove_dir_all(&pending);
@@ -780,7 +764,7 @@ mod tests {
         let manifest = fetch_manifest(&listing.repo).unwrap();
         assert_eq!((manifest.version.as_str(), manifest.repository.as_str()), (listing.version.as_str(), "patrickiel/task-buttons"));
         assert_eq!(manifest.sha256.len(), 64, "the release's extension.json carries the zip's sha256");
-        install(&manifest, &crate::backend::ai::Cancel::default(), &mut |_, _, _| {}).unwrap();
+        install(&manifest, &Cancel::default(), &mut |_, _, _| {}).unwrap();
         assert!(dir().join("task-buttons.pending").join(manifest.library()).is_file());
 
         apply_pending();

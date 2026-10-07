@@ -29,6 +29,7 @@ use crate::{
     },
     git_graph,
     repo::{Repo, RepoState},
+    ui::menu_action,
 };
 
 /// A commit row's height.
@@ -74,7 +75,7 @@ pub struct ScmView {
     message: Entity<InputState>,
     commits_open: bool,
     /// Generate Commit Message while it runs: how to stop it, and what it does.
-    generating: Option<(crate::backend::ai::Cancel, SharedString)>,
+    generating: Option<(crate::backend::http::Cancel, SharedString)>,
     /// Commits expanded to their files, with the files once loaded.
     expanded: HashMap<String, Option<(Option<String>, Vec<git::CommitFile>)>>,
     /// What a commit changed, for its hover card: `None` while it loads.
@@ -215,25 +216,40 @@ impl ScmView {
         self.message.update(cx, |input, cx| input.set_value("", window, cx));
     }
 
-    /// What a row's action applies to: the selection when the row is part of
-    /// it, else just the row.
-    fn targets(&self, file: &FileStatus, group: Group, cx: &App) -> Vec<FileStatus> {
-        if self.selection_group == Some(group) && self.selection.contains(&file.rel) {
+    /// What the action on the row of `rel` applies to: the selection when
+    /// the row is part of it, else just the row.
+    fn targets(&self, rel: &str, group: Group, cx: &App) -> Vec<FileStatus> {
+        if self.selection_group == Some(group) && self.selection.iter().any(|r| r == rel) {
             let status = self.repo.read(cx).status();
-            let files: Vec<FileStatus> = status.map(|s| s.files.iter().filter(|f| group.holds(f) && self.selection.contains(&f.rel)).cloned().collect()).unwrap_or_default();
+            let files: Vec<FileStatus> = status.map(|s| group_files(s, group).filter(|f| self.selection.contains(&f.rel)).cloned().collect()).unwrap_or_default();
             if !files.is_empty() {
                 return files;
             }
         }
-        vec![file.clone()]
+        self.file(rel, cx).into_iter().collect()
+    }
+
+    /// The changed file at `rel`, as the status has it now.
+    fn file(&self, rel: &str, cx: &App) -> Option<FileStatus> {
+        self.repo.read(cx).status()?.files.iter().find(|f| f.rel == rel).cloned()
+    }
+
+    /// The commit `hash`, as the history has it now.
+    fn commit_by_hash(&self, hash: &str, cx: &App) -> Option<git::Commit> {
+        self.repo.read(cx).commits.iter().find(|c| c.hash == hash).cloned()
     }
 
     /// The selected files, with their group.
     fn selected_files(&self, cx: &App) -> Option<(Group, Vec<FileStatus>)> {
         let group = self.selection_group?;
         let status = self.repo.read(cx).status()?;
-        let files: Vec<FileStatus> = status.files.iter().filter(|f| group.holds(f) && self.selection.contains(&f.rel)).cloned().collect();
+        let files: Vec<FileStatus> = group_files(status, group).filter(|f| self.selection.contains(&f.rel)).cloned().collect();
         (!files.is_empty()).then_some((group, files))
+    }
+
+    /// Every file of `group`, for the actions on the whole group.
+    fn files_in(&self, group: Group, cx: &App) -> Vec<FileStatus> {
+        self.repo.read(cx).status().map(|s| group_files(s, group).cloned().collect()).unwrap_or_default()
     }
 
     /// A click on row `ix` of `group` (whose paths are `rels`).
@@ -285,68 +301,54 @@ impl ScmView {
     }
 
     /// The right-click menu of a row: on the selection when the row is in it.
-    fn row_menu(menu: PopupMenu, this: WeakEntity<Self>, file: FileStatus, group: Group, cx: &App) -> PopupMenu {
+    fn row_menu(menu: PopupMenu, this: WeakEntity<Self>, rel: &str, group: Group, cx: &App) -> PopupMenu {
         let Some(view) = this.upgrade() else { return menu };
-        let targets = view.read(cx).targets(&file, group, cx);
-        let act = |label: &'static str, run: Box<dyn Fn(&mut ScmView, &mut Window, &mut Context<ScmView>)>| {
-            let this = this.clone();
-            let run = std::rc::Rc::new(run);
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let run = run.clone();
-                _ = this.update(cx, |view, cx| run(view, window, cx));
-            })
-        };
+        let Some(file) = view.read(cx).file(rel, cx) else { return menu };
+        let targets = view.read(cx).targets(rel, group, cx);
         let (open, diff) = (file.clone(), file.clone());
         let mut menu = menu
-            .item(act("Open File", Box::new(move |_, _, cx| cx.emit(ScmEvent::Open(open.path.clone())))))
-            .item(act(
-                "Open Changes",
-                Box::new(move |_, _, cx| cx.emit(ScmEvent::Diff { file: diff.clone(), staged: group == Group::Staged })),
-            ))
+            .item(menu_action(&this, "Open File", move |_, _, cx| cx.emit(ScmEvent::Open(open.path.clone()))))
+            .item(menu_action(&this, "Open Changes", move |_, _, cx| cx.emit(ScmEvent::Diff { file: diff.clone(), staged: group == Group::Staged })))
             .separator();
         let (t1, t2, t3) = (targets.clone(), targets.clone(), targets);
         menu = match group {
-            Group::Staged => menu.item(act("Unstage Changes", Box::new(move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx)))),
+            Group::Staged => menu.item(menu_action(&this, "Unstage Changes", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx))),
             Group::Changes => menu
-                .item(act("Stage Changes", Box::new(move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx))))
-                .item(act("Discard Changes", Box::new(move |v, window, cx| v.confirm_discard(t2.clone(), window, cx))))
-                .item(act("Add to .gitignore", Box::new(move |v, _, cx| v.ignore(t3.clone(), cx)))),
-            Group::Merge => menu.item(act("Stage (accept as resolved)", Box::new(move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx)))),
+                .item(menu_action(&this, "Stage Changes", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx)))
+                .item(menu_action(&this, "Discard Changes", move |v, window, cx| v.confirm_discard(t2.clone(), window, cx)))
+                .item(menu_action(&this, "Add to .gitignore", move |v, _, cx| v.ignore(t3.clone(), cx))),
+            Group::Merge => menu.item(menu_action(&this, "Stage (accept as resolved)", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx))),
         };
         let (copy, copy_rel, show) = (file.clone(), file.clone(), file);
         menu.separator()
-            .item(act("Copy Path", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.path.display().to_string())))))
-            .item(act("Copy Relative Path", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy_rel.rel.clone())))))
-            .item(act("Reveal in File Explorer", Box::new(move |_, _, _| crate::explorer::reveal(&show.path))))
+            .item(menu_action(&this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.path.display().to_string()))))
+            .item(menu_action(&this, "Copy Relative Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy_rel.rel.clone()))))
+            .item(menu_action(&this, "Reveal in File Explorer", move |_, _, _| crate::explorer::reveal(&show.path)))
     }
 
     /// The header's ⋯ menu: the rest of what Source Control does, as den's.
     fn more_menu(menu: PopupMenu, this: WeakEntity<Self>) -> PopupMenu {
-        let act = |label: &'static str, run: fn(&mut ScmView, &mut Window, &mut Context<ScmView>)| {
-            let this = this.clone();
-            PopupMenuItem::new(label).on_click(move |_, window, cx| _ = this.update(cx, |view, cx| run(view, window, cx)))
-        };
-        menu.item(act("Generate Commit Message", |v, window, cx| v.generate_message(window, cx)))
-            .item(act("Edit Commit Message Style", |v, _, cx| v.open_style(false, cx)))
-            .item(act("Derive Commit Message Style from History", |v, _, cx| v.open_style(true, cx)))
+        menu.item(menu_action(&this, "Generate Commit Message", |v, window, cx| v.generate_message(window, cx)))
+            .item(menu_action(&this, "Edit Commit Message Style", |v, _, cx| v.open_style(false, cx)))
+            .item(menu_action(&this, "Derive Commit Message Style from History", |v, _, cx| v.open_style(true, cx)))
             .separator()
-            .item(act("Commit (Amend)", |v, window, cx| v.commit(true, false, window, cx)))
-            .item(act("Commit & Push", |v, window, cx| v.commit(false, true, window, cx)))
+            .item(menu_action(&this, "Commit (Amend)", |v, window, cx| v.commit(true, false, window, cx)))
+            .item(menu_action(&this, "Commit & Push", |v, window, cx| v.commit(false, true, window, cx)))
             .separator()
-            .item(act("Stage All Changes", |v, _, cx| {
-                let files: Vec<FileStatus> = v.repo.read(cx).status().map(|s| s.files.iter().filter(|f| Group::Changes.holds(f)).cloned().collect()).unwrap_or_default();
+            .item(menu_action(&this, "Stage All Changes", |v, _, cx| {
+                let files = v.files_in(Group::Changes, cx);
                 v.repo.update(cx, |repo, cx| repo.stage(files, cx));
             }))
-            .item(act("Unstage All Changes", |v, _, cx| {
-                let files: Vec<FileStatus> = v.repo.read(cx).status().map(|s| s.files.iter().filter(|f| f.staged()).cloned().collect()).unwrap_or_default();
+            .item(menu_action(&this, "Unstage All Changes", |v, _, cx| {
+                let files = v.files_in(Group::Staged, cx);
                 v.repo.update(cx, |repo, cx| repo.unstage(files, cx));
             }))
-            .item(act("Discard All Changes", |v, window, cx| {
-                let files: Vec<FileStatus> = v.repo.read(cx).status().map(|s| s.files.iter().filter(|f| Group::Changes.holds(f)).cloned().collect()).unwrap_or_default();
+            .item(menu_action(&this, "Discard All Changes", |v, window, cx| {
+                let files = v.files_in(Group::Changes, cx);
                 v.confirm_discard(files, window, cx);
             }))
             .separator()
-            .item(act("Create Branch…", |v, window, cx| v.prompt_branch(window, cx)))
+            .item(menu_action(&this, "Create Branch…", |v, window, cx| v.prompt_branch(window, cx)))
     }
 
     /// Open the repository's commit message style (made when missing).
@@ -514,30 +516,30 @@ impl ScmView {
     }
 
     fn render_group(&self, group: Group, files: &[FileStatus], cx: &mut Context<Self>) -> Option<AnyElement> {
-        let rows: Vec<FileStatus> = files.iter().filter(|f| group.holds(f)).cloned().collect();
+        let rows: Vec<&FileStatus> = files.iter().filter(|f| group.holds(f)).collect();
         if rows.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
         let title = group.title();
         let collapsed = self.collapsed.contains(&title);
-        let all = rows.clone();
         let header_buttons = h_flex()
             .invisible()
             .group_hover("scm-group", |this| this.visible())
             .when(group == Group::Changes, |this| {
-                let discard = all.clone();
                 this.child(
                     Button::new("discard-all")
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(IconName::Undo2))
                         .tooltip("Discard All Changes")
-                        .on_click(cx.listener(move |this, _, window, cx| this.confirm_discard(discard.clone(), window, cx))),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let files = this.files_in(group, cx);
+                            this.confirm_discard(files, window, cx)
+                        })),
                 )
             })
             .child({
-                let files = all.clone();
                 let staged = group == Group::Staged;
                 Button::new("stage-all")
                     .ghost()
@@ -545,14 +547,8 @@ impl ScmView {
                     .icon(Icon::new(if staged { IconName::Minus } else { IconName::Plus }))
                     .tooltip(if staged { "Unstage All" } else { "Stage All" })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        let files = files.clone();
-                        this.repo.update(cx, |repo, cx| {
-                            if staged {
-                                repo.unstage(files, cx)
-                            } else {
-                                repo.stage(files, cx)
-                            }
-                        });
+                        let files = this.files_in(group, cx);
+                        this.stage_or_unstage(files, group, cx);
                     }))
             });
 
@@ -593,12 +589,13 @@ impl ScmView {
             let color = letter_color(letter, cx);
             let staged_group = group == Group::Staged;
             let id = SharedString::from(format!("{title}-{ix}"));
-            let diff_file = file.clone();
+            // The closures keep the path and look the file up when clicked.
+            let (rel, path, conflict) = (file.rel.clone(), file.path.clone(), file.conflict);
             let row_buttons = h_flex()
                 .invisible()
                 .group_hover(id.clone(), |this| this.visible())
                 .child({
-                    let path = file.path.clone();
+                    let path = path.clone();
                     Button::new("open")
                         .ghost()
                         .xsmall()
@@ -607,7 +604,7 @@ impl ScmView {
                         .on_click(cx.listener(move |_, _, _, cx| cx.emit(ScmEvent::Open(path.clone()))))
                 })
                 .when(group == Group::Changes, |this| {
-                    let file = file.clone();
+                    let rel = rel.clone();
                     this.child(
                         Button::new("discard")
                             .ghost()
@@ -615,20 +612,20 @@ impl ScmView {
                             .icon(Icon::new(IconName::Undo2))
                             .tooltip("Discard Changes")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let files = this.targets(&file, group, cx);
+                                let files = this.targets(&rel, group, cx);
                                 this.confirm_discard(files, window, cx)
                             })),
                     )
                 })
                 .child({
-                    let file = file.clone();
+                    let rel = rel.clone();
                     Button::new("stage")
                         .ghost()
                         .xsmall()
                         .icon(Icon::new(if staged_group { IconName::Minus } else { IconName::Plus }))
                         .tooltip(if staged_group { "Unstage Changes" } else { "Stage Changes" })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let files = this.targets(&file, group, cx);
+                            let files = this.targets(&rel, group, cx);
                             this.stage_or_unstage(files, group, cx);
                         }))
                 });
@@ -645,23 +642,24 @@ impl ScmView {
                     .when(!selected, |this| this.hover(|this| this.bg(theme.list_hover)))
                     .on_click({
                         let rels = rels.clone();
+                        let (rel, path) = (rel.clone(), path.clone());
                         cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.list_focus.focus(window, cx);
                             // A plain click also shows the change; Ctrl and Shift only select.
                             if !this.click_row(group, ix, &rels, event.modifiers(), cx) {
                                 return;
                             }
-                            if diff_file.conflict {
-                                cx.emit(ScmEvent::Open(diff_file.path.clone()));
-                            } else {
-                                cx.emit(ScmEvent::Diff { file: diff_file.clone(), staged: staged_group });
+                            if conflict {
+                                cx.emit(ScmEvent::Open(path.clone()));
+                            } else if let Some(file) = this.file(&rel, cx) {
+                                cx.emit(ScmEvent::Diff { file, staged: staged_group });
                             }
                         })
                     })
                     .context_menu({
                         let weak = weak.clone();
-                        let file = file.clone();
-                        move |menu, _, cx| ScmView::row_menu(menu, weak.clone(), file.clone(), group, cx)
+                        let rel = rel.clone();
+                        move |menu, _, cx| ScmView::row_menu(menu, weak.clone(), &rel, group, cx)
                     })
                     .child(crate::file_icon::render(&file.rel, 16., cx))
                     .child(
@@ -724,7 +722,7 @@ impl ScmView {
             Text(String),
             Done(Result<String, String>),
         }
-        let cancel = ai::Cancel::default();
+        let cancel = crate::backend::http::Cancel::default();
         self.generating = Some((cancel.clone(), "Starting…".into()));
         cx.notify();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Update>();
@@ -769,7 +767,7 @@ impl ScmView {
                             let stopped = this.generating.take().is_none();
                             match result {
                                 Ok(text) => this.message.update(cx, |input, cx| input.set_value(text, window, cx)),
-                                Err(err) if err == ai::CANCELLED || stopped => {}
+                                Err(err) if err == crate::backend::http::CANCELLED || stopped => {}
                                 Err(err) => crate::toast::push(window, format!("Generate Commit Message: {err}"), cx),
                             }
                         }
@@ -807,7 +805,8 @@ impl ScmView {
 
     /// What a commit's hover card shows beyond the commit itself: what it
     /// changed, and its author's avatar. Both load in the background once.
-    fn ensure_details(&mut self, commit: &git::Commit, cx: &mut Context<Self>) {
+    fn ensure_details(&mut self, hash: &str, cx: &mut Context<Self>) {
+        let Some(commit) = self.commit_by_hash(hash, cx) else { return };
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
         if !self.stats.contains_key(&commit.hash) {
             self.stats.insert(commit.hash.clone(), None);
@@ -828,10 +827,6 @@ impl ScmView {
         if self.avatars.contains_key(&email) || self.avatar_pending.contains(&email) || email.is_empty() {
             return;
         }
-        if let Some(known) = avatars::cached(&email) {
-            self.avatars.insert(email, known);
-            return;
-        }
         self.avatar_pending.insert(email.clone());
         let github = self.repo.read(cx).github.clone().map(|(owner, repo)| (owner, repo, commit.hash.clone()));
         cx.spawn(async move |this, cx| {
@@ -848,7 +843,7 @@ impl ScmView {
 
     /// A commit's files once expanded, each behind the lanes running on
     /// below the commit.
-    fn render_commit_files(&self, hash: &str, below: &Graph, graph_w: Pixels, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_commit_files(&self, hash: &str, below: &Graph, graph_w: Pixels, cx: &Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let Some(loaded) = self.expanded.get(hash) else { return Vec::new() };
         let lanes = |below: &Graph| div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(below.clone(), theme.background));
@@ -896,14 +891,13 @@ impl ScmView {
 
     /// A commit's row: its graph, subject, branch and tag badges, author and
     /// age, with a hover card and a menu.
-    fn render_commit(&self, ix: usize, commit: &git::Commit, graph_w: Pixels, now: i64, cx: &mut Context<Self>) -> AnyElement {
+    fn render_commit(&self, ix: usize, commit: &git::Commit, graph_w: Pixels, now: i64, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let repo = self.repo.read(cx);
         let graph = repo.row_graph(ix).cloned().unwrap_or_default();
         let lane_color = git_graph::lane_color(repo.row_lane(ix));
-        let github = repo.github.clone();
         let open = self.expanded.contains_key(&commit.hash);
-        let files = self.render_commit_files(&commit.hash, &git_graph::continuation(&graph), graph_w, cx);
+        let files = if open { self.render_commit_files(&commit.hash, &git_graph::continuation(&graph), graph_w, cx) } else { Vec::new() };
         let weak = cx.weak_entity();
         let hash = commit.hash.clone();
         let row = h_flex()
@@ -920,10 +914,13 @@ impl ScmView {
             .when(commit.detached_head, |this| this.child(head_badge(theme.muted_foreground)))
             .child(div().flex_none().max_w(px(90.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
             .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(git::age(commit.date, now)))
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_commit(hash.clone(), cx)))
+            .on_click(cx.listener({
+                let hash = hash.clone();
+                move |this, _, _, cx| this.toggle_commit(hash.clone(), cx)
+            }))
             .context_menu({
-                let (weak, commit, github) = (weak.clone(), commit.clone(), github.clone());
-                move |menu, _, cx| ScmView::commit_menu(menu, weak.clone(), &commit, github.clone(), cx)
+                let (weak, hash) = (weak.clone(), hash.clone());
+                move |menu, _, cx| ScmView::commit_menu(menu, weak.clone(), &hash, cx)
             });
         let card = HoverCard::new(SharedString::from(format!("card-{}", commit.hash)))
             // Beside the row, over the panes next to the panel, as VS Code's.
@@ -933,54 +930,46 @@ impl ScmView {
             })
             .open_delay(std::time::Duration::from_millis(500))
             .on_open_change({
-                let (weak, commit) = (weak.clone(), commit.clone());
+                let (weak, hash) = (weak.clone(), hash.clone());
                 move |open, _, cx| {
                     if *open {
-                        _ = weak.update(cx, |this, cx| this.ensure_details(&commit, cx));
+                        _ = weak.update(cx, |this, cx| this.ensure_details(&hash, cx));
                     }
                 }
             })
             .trigger(row)
-            .content({
-                let commit = commit.clone();
-                move |_, _, cx| render_commit_card(&weak, &commit, github.as_ref(), now, cx)
-            });
+            .content(move |_, _, cx| render_commit_card(&weak, &hash, now, cx));
         v_flex().child(card).children(files).into_any_element()
     }
 
     /// A commit's right-click menu.
-    fn commit_menu(menu: PopupMenu, this: WeakEntity<Self>, commit: &git::Commit, github: Option<(String, String)>, cx: &App) -> PopupMenu {
-        let act = |label: &'static str, run: Box<dyn Fn(&mut ScmView, &mut Window, &mut Context<ScmView>)>| {
-            let this = this.clone();
-            let run = std::rc::Rc::new(run);
-            PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                let run = run.clone();
-                _ = this.update(cx, |view, cx| run(view, window, cx));
-            })
-        };
-        let expanded = this.upgrade().is_some_and(|view| view.read(cx).expanded.contains_key(&commit.hash));
-        let (hash, short, message) = (commit.hash.clone(), commit.short.clone(), commit_message(commit));
+    fn commit_menu(menu: PopupMenu, this: WeakEntity<Self>, hash: &str, cx: &App) -> PopupMenu {
+        let Some(view) = this.upgrade() else { return menu };
+        let view = view.read(cx);
+        let Some(commit) = view.commit_by_hash(hash, cx) else { return menu };
+        let expanded = view.expanded.contains_key(&commit.hash);
+        let url = view.repo.read(cx).github_commit_url(&commit.hash);
+        let (hash, short, message) = (commit.hash.clone(), commit.short.clone(), commit_message(&commit));
         let toggle = commit.hash.clone();
-        let url = github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{}", commit.hash));
-        menu.item(act(if expanded { "Collapse" } else { "Show Changed Files" }, Box::new(move |v, _, cx| v.toggle_commit(toggle.clone(), cx))))
+        menu.item(menu_action(&this, if expanded { "Collapse" } else { "Show Changed Files" }, move |v, _, cx| v.toggle_commit(toggle.clone(), cx)))
             .separator()
-            .item(act("Copy Commit Hash", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(hash.clone())))))
-            .item(act("Copy Short Hash", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(short.clone())))))
-            .item(act("Copy Commit Message", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.clone())))))
-            .when_some(url, |menu, url| menu.separator().item(act("Open on GitHub", Box::new(move |_, _, cx| cx.open_url(&url)))))
+            .item(menu_action(&this, "Copy Commit Hash", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()))))
+            .item(menu_action(&this, "Copy Short Hash", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(short.clone()))))
+            .item(menu_action(&this, "Copy Commit Message", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.clone()))))
+            .when_some(url, |menu, url| menu.separator().item(menu_action(&this, "Open on GitHub", move |_, _, cx| cx.open_url(&url))))
     }
 
-    fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_commits(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let repo = self.repo.read(cx);
-        let commits = repo.commits.clone();
+        let commits = &repo.commits;
         let uncommitted = repo.uncommitted.zip(repo.graph.first().cloned());
         let graph_w = git_graph::column_width(&repo.graph);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let more = commits.len() >= 50 && commits.len() % 50 == 0;
+        let more = !commits.is_empty() && commits.len().is_multiple_of(50);
         v_flex()
             .child(
                 h_flex()
@@ -1040,6 +1029,11 @@ impl ScmView {
     }
 }
 
+/// The files of `group`, as the status lists them.
+fn group_files(status: &git::Status, group: Group) -> impl Iterator<Item = &FileStatus> {
+    status.files.iter().filter(move |f| group.holds(f))
+}
+
 /// The whole message: the subject, then the body after a blank line.
 fn commit_message(commit: &git::Commit) -> String {
     if commit.body.is_empty() { commit.subject.clone() } else { format!("{}\n\n{}", commit.subject, commit.body) }
@@ -1078,15 +1072,13 @@ fn badge(icon: IconName, name: impl Into<SharedString>, color: Hsla, filled: boo
 
 /// A commit's hover card: who and when, the message, what it changed, and
 /// its hash with a copy button and a link to GitHub.
-fn render_commit_card(view: &WeakEntity<ScmView>, commit: &git::Commit, github: Option<&(String, String)>, now: i64, cx: &App) -> AnyElement {
+fn render_commit_card(view: &WeakEntity<ScmView>, hash: &str, now: i64, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
-    let (stat, avatar) = match view.upgrade() {
-        Some(view) => {
-            let view = view.read(cx);
-            (view.stats.get(&commit.hash).copied(), view.avatars.get(&commit.email).cloned().flatten())
-        }
-        None => (None, None),
-    };
+    let Some(view) = view.upgrade() else { return div().into_any_element() };
+    let view = view.read(cx);
+    let Some(commit) = view.commit_by_hash(hash, cx) else { return div().into_any_element() };
+    let (stat, avatar) = (view.stats.get(&commit.hash).copied(), view.avatars.get(&commit.email).cloned().flatten());
+    let url = view.repo.read(cx).github_commit_url(&commit.hash);
     let avatar: AnyElement = match avatar.filter(|path| path.is_file()) {
         Some(path) => img(path).size(px(20.)).flex_none().rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
         None => Avatar::new().name(commit.author.clone()).xsmall().into_any_element(),
@@ -1097,7 +1089,6 @@ fn render_commit_card(view: &WeakEntity<ScmView>, commit: &git::Commit, github: 
     };
     let divider = || div().h(px(1.)).w_full().bg(theme.border);
     let hash = commit.hash.clone();
-    let url = github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{}", commit.hash));
     v_flex()
         .w(px(380.))
         .p_3()
@@ -1213,11 +1204,11 @@ impl Render for ScmView {
                 )
                 .into_any_element(),
             RepoState::Ready { status, .. } => {
-                let files = status.files.clone();
+                let files = &status.files;
                 v_flex()
-                    .children(self.render_group(Group::Merge, &files, cx))
-                    .children(self.render_group(Group::Staged, &files, cx))
-                    .children(self.render_group(Group::Changes, &files, cx))
+                    .children(self.render_group(Group::Merge, files, cx))
+                    .children(self.render_group(Group::Staged, files, cx))
+                    .children(self.render_group(Group::Changes, files, cx))
                     .when(files.is_empty(), |this| {
                         this.child(div().px_3().py_1().text_sm().text_color(theme.muted_foreground).child("No changes."))
                     })

@@ -153,6 +153,25 @@ pub struct Settings {
     pub extension_settings: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
 }
 
+impl Preset {
+    /// A terminal preset running `command`, pinned to the tab strips.
+    pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
+        Self { name: name.into(), command: command.into(), agent: false, browser: false, pinned: true, color: None, icon: None }
+    }
+
+    /// Which kind of tab it opens, for the default groups.
+    pub fn kind(&self) -> crate::defaults::Kind {
+        use crate::defaults::Kind;
+        if self.browser {
+            Kind::Browsers
+        } else if self.agent {
+            Kind::Agents
+        } else {
+            Kind::Terminals
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -178,15 +197,7 @@ impl Default for Settings {
             ai_gpu: true,
             ai_system_prompt: crate::backend::ai::DEFAULT_COMMIT_STYLE.to_string(),
             ai_derive_style: true,
-            presets: vec![Preset {
-                name: "Claude Code".into(),
-                command: "claude".into(),
-                agent: true,
-                browser: false,
-                pinned: true,
-                color: None,
-                icon: None,
-            }],
+            presets: vec![Preset { agent: true, ..Preset::new("Claude Code", "claude") }],
             notifications: true,
             notify_toast: true,
             notify_tab: true,
@@ -327,31 +338,7 @@ impl AppState {
 
 pub fn init(cx: &mut App) {
     let mut settings: Settings = read_json("settings.json").unwrap_or_default();
-    if !settings.imported_den {
-        import_den(&mut settings);
-        settings.imported_den = true;
-        write_json("settings.json", &settings);
-    }
-    if !settings.imported_den_sounds {
-        import_den_sounds(&mut settings);
-        settings.imported_den_sounds = true;
-        write_json("settings.json", &settings);
-    }
-    if !settings.imported_den_buttons {
-        import_den_buttons(&mut settings);
-        settings.imported_den_buttons = true;
-        write_json("settings.json", &settings);
-    }
-    if !settings.imported_den_icons {
-        import_den_icons(&mut settings);
-        settings.imported_den_icons = true;
-        write_json("settings.json", &settings);
-    }
-    if !settings.imported_den_browsers {
-        import_den_browsers(&mut settings);
-        settings.imported_den_browsers = true;
-        write_json("settings.json", &settings);
-    }
+    import_old_den(&mut settings);
     cx.set_global::<Settings>(settings);
     cx.set_global::<AppState>(read_json("state.json").unwrap_or_default());
     apply_theme(cx);
@@ -444,12 +431,47 @@ pub fn mono_font(cx: &App) -> SharedString {
     }
 }
 
+/// Take over what the Tauri den (`%APPDATA%\den.workspace`) had, each part
+/// once: its presets and font, sounds, tab-strip buttons, preset icons and
+/// browser presets, in that order, as earlier builds did one by one.
+fn import_old_den(settings: &mut Settings) {
+    if settings.imported_den && settings.imported_den_sounds && settings.imported_den_buttons && settings.imported_den_icons && settings.imported_den_browsers {
+        return;
+    }
+    if let Some(den) = old_den_settings() {
+        if !settings.imported_den {
+            import_den(settings, &den);
+        }
+        if !settings.imported_den_sounds {
+            import_den_sounds(settings, &den);
+        }
+        if !settings.imported_den_buttons {
+            import_den_buttons(settings, &den);
+        }
+        if !settings.imported_den_icons {
+            import_den_icons(settings, &den);
+        }
+        if !settings.imported_den_browsers {
+            import_den_browsers(settings, &den);
+        }
+    }
+    settings.imported_den = true;
+    settings.imported_den_sounds = true;
+    settings.imported_den_buttons = true;
+    settings.imported_den_icons = true;
+    settings.imported_den_browsers = true;
+    write_json("settings.json", settings);
+}
+
+/// The Tauri den's settings file, if it is there.
+fn old_den_settings() -> Option<serde_json::Value> {
+    let appdata = std::env::var_os("APPDATA")?;
+    let text = std::fs::read_to_string(PathBuf::from(appdata).join("den.workspace").join("settings.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// den's notification sounds and volume.
-fn import_den_sounds(settings: &mut Settings) {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let path = PathBuf::from(appdata).join("den.workspace").join("settings.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(den) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+fn import_den_sounds(settings: &mut Settings, den: &serde_json::Value) {
     if let Some(done) = den["notifySoundDone"].as_str() {
         settings.notify_sound_done = done.to_string();
     }
@@ -462,11 +484,7 @@ fn import_den_sounds(settings: &mut Settings) {
 }
 
 /// den's choice of tab-strip buttons (its plain shell is a preset there).
-fn import_den_buttons(settings: &mut Settings) {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let path = PathBuf::from(appdata).join("den.workspace").join("settings.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(den) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+fn import_den_buttons(settings: &mut Settings, den: &serde_json::Value) {
     let buttons = &den["groupButtons"];
     if let Some(browser) = buttons["browser"].as_bool() {
         settings.group_buttons.browser = browser;
@@ -481,11 +499,7 @@ fn import_den_buttons(settings: &mut Settings) {
 }
 
 /// Give presets taken over from den before icons came their den icon.
-fn import_den_icons(settings: &mut Settings) {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let path = PathBuf::from(appdata).join("den.workspace").join("settings.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(den) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+fn import_den_icons(settings: &mut Settings, den: &serde_json::Value) {
     for key in ["terminalPresets", "agentPresets", "browserPresets"] {
         for preset in den[key].as_array().into_iter().flatten() {
             let Some(icon) = preset["icon"].as_str() else { continue };
@@ -498,11 +512,7 @@ fn import_den_icons(settings: &mut Settings) {
 }
 
 /// Take den's browser presets and home page over, once.
-fn import_den_browsers(settings: &mut Settings) {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let path = PathBuf::from(appdata).join("den.workspace").join("settings.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(den) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+fn import_den_browsers(settings: &mut Settings, den: &serde_json::Value) {
     if let Some(home) = den["browserHome"].as_str().map(str::trim).filter(|h| !h.is_empty()) {
         settings.browser_home = home.to_string();
     }
@@ -511,25 +521,20 @@ fn import_den_browsers(settings: &mut Settings) {
         if url.is_empty() {
             continue;
         }
+        let name = preset["name"].as_str().unwrap_or(&url).to_string();
         settings.presets.push(Preset {
-            name: preset["name"].as_str().unwrap_or(&url).to_string(),
-            command: url,
-            agent: false,
             browser: true,
             pinned: preset["pinned"].as_bool().unwrap_or(true),
             color: preset["color"].as_str().map(str::to_string),
             icon: preset["icon"].as_str().map(str::to_string),
+            ..Preset::new(name, url)
         });
     }
 }
 
-/// Take the Tauri den's terminal and agent presets and its font over, once
-/// (from `%APPDATA%\den.workspace`): den then starts with the buttons it had.
-fn import_den(settings: &mut Settings) {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return };
-    let path = PathBuf::from(appdata).join("den.workspace").join("settings.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return };
-    let Ok(den) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+/// Take the Tauri den's terminal and agent presets and its font over, once:
+/// den then starts with the buttons it had.
+fn import_den(settings: &mut Settings, den: &serde_json::Value) {
     let mut presets = Vec::new();
     for (key, agent) in [("terminalPresets", false), ("agentPresets", true)] {
         for preset in den[key].as_array().into_iter().flatten() {
@@ -538,14 +543,13 @@ fn import_den(settings: &mut Settings) {
             if command.is_empty() {
                 continue;
             }
+            let name = preset["name"].as_str().unwrap_or(&command).to_string();
             presets.push(Preset {
-                name: preset["name"].as_str().unwrap_or(&command).to_string(),
-                command,
                 agent,
-                browser: false,
                 pinned: preset["pinned"].as_bool().unwrap_or(true),
                 color: preset["color"].as_str().map(str::to_string),
                 icon: preset["icon"].as_str().map(str::to_string),
+                ..Preset::new(name, command)
             });
         }
     }

@@ -11,12 +11,14 @@
 //! PSScriptAnalyzer where dprint has none. The plugins read no project config.
 
 use std::{
-    io::Write as _,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
-use super::ai;
+use super::{
+    http::{self, Cancel, Progress},
+    process,
+};
 
 /// A formatter and the program it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -463,12 +465,12 @@ fn dprint_cache() -> PathBuf {
 
 /// The kit's file, once downloaded.
 fn installed(kit: &Kit) -> Option<PathBuf> {
-    ai::find_file(&tools_dir().join(kit.dir), kit.file, 4)
+    super::find_file(&tools_dir().join(kit.dir), kit.file, 4)
 }
 
 /// Download and unpack `kit` (with dprint for a plugin), unless it is there
 /// already. Resumable.
-pub fn install(kit: &'static Kit, cancel: &ai::Cancel, progress: ai::Progress) -> Result<(), String> {
+pub fn install(kit: &'static Kit, cancel: &Cancel, progress: Progress) -> Result<(), String> {
     if kit.kind == Kind::Plugin {
         install(&DPRINT, cancel, progress)?;
     }
@@ -479,16 +481,16 @@ pub fn install(kit: &'static Kit, cancel: &ai::Cancel, progress: ai::Progress) -
     let dest = root.join(kit.dir);
     if kit.kind == Kind::Zip {
         let archive = root.join("downloads").join(format!("{}.zip", kit.dir));
-        ai::download(kit.url, &archive, Some(kit.sha256), kit.name, cancel, progress)?;
+        http::download(kit.url, &archive, Some(kit.sha256), kit.name, cancel, progress)?;
         let tmp = root.join(format!("{}.tmp", kit.dir));
-        ai::unpack(&archive, &tmp, kit.name)?;
+        process::unpack(&archive, &tmp, kit.name)?;
         let _ = std::fs::remove_dir_all(&dest);
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&archive);
     } else {
         let file = dest.join(kit.file);
         let part = root.join("downloads").join(kit.file);
-        ai::download(kit.url, &part, Some(kit.sha256), kit.name, cancel, progress)?;
+        http::download(kit.url, &part, Some(kit.sha256), kit.name, cancel, progress)?;
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
         if kit.kind == Kind::Plugin {
@@ -721,22 +723,8 @@ pub fn run(tool: &Tool, path: &Path, text: &str) -> Result<String, String> {
 }
 
 /// Run `cmd` without a window, `text` on its stdin.
-fn output(mut cmd: Command, text: &str) -> Result<std::process::Output, String> {
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let mut child = cmd.spawn().map_err(|err| err.to_string())?;
-    if let Some(mut pipe) = child.stdin.take() {
-        // From its own thread, so a large file cannot deadlock against a full stdout.
-        let text = text.to_string();
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(text.as_bytes());
-        });
-    }
-    child.wait_with_output().map_err(|err| err.to_string())
+fn output(cmd: Command, text: &str) -> Result<std::process::Output, String> {
+    process::output_with_input(cmd, Some(text)).map_err(|err| err.to_string())
 }
 
 /// The formatted text with the line endings the file had (rustfmt writes

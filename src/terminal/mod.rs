@@ -85,6 +85,23 @@ pub fn init(cx: &mut App) {
         })
         .detach();
     }
+    crate::pane::register(cx, TERMINAL, |data, window, cx| {
+        let cwd = data["cwd"].as_str().map(PathBuf::from).filter(|dir| dir.is_dir()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let program = data["program"].as_str().map(str::to_string);
+        let agent = data["agent"].as_bool().unwrap_or(program.as_deref() == Some("claude"));
+        // A program comes back anew; Claude Code picks its conversation up
+        // again: the one its hooks named, else the folder's last.
+        let command = match data["resume"].as_str() {
+            Some(resume) => Some(resume.to_string()),
+            None => program.as_deref().map(|program| match agent::program_of(program.split_whitespace().next().unwrap_or("")).as_str() {
+                "claude" => agent::claude_resume(Some(program), None, false),
+                _ => program.to_string(),
+            }),
+        };
+        let history = data["scrollback"].as_str().map(str::to_string);
+        let launch = Launch { cwd, program, command, history, agent };
+        std::rc::Rc::new(cx.new(|cx| TerminalPanel::new(launch, window, cx)))
+    });
     let context = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("ctrl-w", SendText("\x17".into()), context),
@@ -813,15 +830,7 @@ impl Pane for TerminalPanel {
             return Some(crate::preset_icon::render(preset, preset.icon.as_deref(), 16., cx));
         }
         crate::preset_icon::has_program_logo(&program).then(|| {
-            let preset = crate::settings::Preset {
-                name: program.clone(),
-                command: program.clone(),
-                agent: true,
-                browser: false,
-                pinned: false,
-                color: None,
-                icon: None,
-            };
+            let preset = crate::settings::Preset { agent: true, pinned: false, ..crate::settings::Preset::new(program.clone(), program.clone()) };
             crate::preset_icon::render(&preset, None, 16., cx)
         })
     }

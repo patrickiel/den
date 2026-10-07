@@ -43,6 +43,7 @@ use crate::{
     terminal::TerminalPanel,
     defaults::Kind,
     layout::{Axis, Node, NodeId, PaneId, Side},
+    ui::menu_action,
     workspace::Workspace,
 };
 
@@ -733,7 +734,7 @@ impl Workspace {
                     .ghost()
                     .icon(Icon::new(IconName::SquareTerminal))
                     .tooltip("New Terminal (Ctrl+Shift+T)")
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(Some(group), None, window, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(Some(group), None, false, window, cx))),
             ))
             .when(buttons.browser && self.defaults.allows(&self.tree, group, Kind::Browsers), |this| this.child(
                 Button::new(("group-browser", group))
@@ -744,8 +745,7 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _, window, cx| this.open_browser(Some(group), None, window, cx))),
             ))
             .children(Settings::get(cx).presets.iter().enumerate().filter(|(_, preset)| {
-                let kind = if preset.browser { Kind::Browsers } else if preset.agent { Kind::Agents } else { Kind::Terminals };
-                preset.pinned && self.defaults.allows(&self.tree, group, kind)
+                preset.pinned && self.defaults.allows(&self.tree, group, preset.kind())
             }).map(|(ix, preset)| {
                 let launch = preset.clone();
                 let name = preset.name.clone();
@@ -775,7 +775,7 @@ impl Workspace {
                                 if launch.browser {
                                     this.open_browser(Some(group), Some(launch.command.clone()), window, cx);
                                 } else {
-                                    this.open_terminal(Some(group), Some(launch.clone()), window, cx);
+                                    this.open_terminal(Some(group), Some(launch.command.clone()), launch.agent, window, cx);
                                 }
                             })),
                     )
@@ -862,27 +862,27 @@ impl Workspace {
         let right = tabs[ix + 1..].to_vec();
         let (alone, last) = (others.is_empty(), right.is_empty());
         let mut menu = menu
-            .item(act(this, "Close", move |ws, window, cx| ws.request_close_pane(pane, window, cx)).icon(Icon::new(IconName::X)))
-            .item(act(this, "Close Others", move |ws, window, cx| ws.request_close_panes(others.clone(), window, cx)).disabled(alone))
-            .item(act(this, "Close to the Right", move |ws, window, cx| ws.request_close_panes(right.clone(), window, cx)).disabled(last))
-            .item(act(this, "Close All", move |ws, window, cx| ws.request_close_panes(tabs.clone(), window, cx)).icon(Icon::new(IconName::ListX)));
+            .item(menu_action(this, "Close", move |ws, window, cx| ws.request_close_pane(pane, window, cx)).icon(Icon::new(IconName::X)))
+            .item(menu_action(this, "Close Others", move |ws, window, cx| ws.request_close_panes(others.clone(), window, cx)).disabled(alone))
+            .item(menu_action(this, "Close to the Right", move |ws, window, cx| ws.request_close_panes(right.clone(), window, cx)).disabled(last))
+            .item(menu_action(this, "Close All", move |ws, window, cx| ws.request_close_panes(tabs.clone(), window, cx)).icon(Icon::new(IconName::ListX)));
 
         if let Ok(file) = view.clone().downcast::<FilePanel>() {
             let path = file.read(cx).path().to_path_buf();
             menu = menu.separator();
             if self.preview == Some(pane) {
-                menu = menu.item(act(this, "Keep Open", move |ws, _, cx| ws.toggle_preview(pane, cx)).icon(Icon::new(IconName::Pin)));
+                menu = menu.item(menu_action(this, "Keep Open", move |ws, _, cx| ws.toggle_preview(pane, cx)).icon(Icon::new(IconName::Pin)));
             }
             menu = path_items(menu, this, &path, &self.root);
             let dir = path.parent().map(|dir| dir.to_path_buf()).unwrap_or_else(|| self.root.clone());
             menu = menu.item(
-                act(this, "Open Terminal Here", move |ws, window, cx| ws.open_shell_in(dir.clone(), window, cx)).icon(Icon::new(IconName::SquareTerminal)),
+                menu_action(this, "Open Terminal Here", move |ws, window, cx| ws.open_shell_in(dir.clone(), window, cx)).icon(Icon::new(IconName::SquareTerminal)),
             );
         } else if let Ok(diff) = view.clone().downcast::<DiffPanel>() {
             let path = diff.read(cx).path().to_path_buf();
             let open = path.clone();
             menu = menu.separator().item(
-                act(this, "Open File", move |ws, window, cx| ws.open_file(open.clone(), false, window, cx))
+                menu_action(this, "Open File", move |ws, window, cx| ws.open_file(open.clone(), false, window, cx))
                     .icon(Icon::new(IconName::File))
                     .disabled(!path.is_file()),
             );
@@ -892,15 +892,15 @@ impl Workspace {
             let open = url.clone();
             menu = menu
                 .separator()
-                .item(act(this, "Copy URL", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))).icon(Icon::new(IconName::Link)))
-                .item(act(this, "Open in Default Browser", move |_, _, cx| cx.open_url(&open)).icon(Icon::new(IconName::SquareArrowOutUpRight)))
-                .item(act(this, "Reload", move |_, _, cx| browser.read(cx).reload()).icon(Icon::new(IconName::RotateCw)));
+                .item(menu_action(this, "Copy URL", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))).icon(Icon::new(IconName::Link)))
+                .item(menu_action(this, "Open in Default Browser", move |_, _, cx| cx.open_url(&open)).icon(Icon::new(IconName::SquareArrowOutUpRight)))
+                .item(menu_action(this, "Reload", move |_, _, cx| browser.read(cx).reload()).icon(Icon::new(IconName::RotateCw)));
         } else if let Ok(terminal) = view.clone().downcast::<TerminalPanel>() {
             let cwd = terminal.read(cx).cwd().to_string_lossy().to_string();
             menu = menu
                 .separator()
-                .item(act(this, "Duplicate", move |ws, window, cx| ws.duplicate_terminal(pane, window, cx)).icon(Icon::new(IconName::CopyPlus)))
-                .item(act(this, "Copy Working Directory", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))).icon(Icon::new(IconName::Copy)));
+                .item(menu_action(this, "Duplicate", move |ws, window, cx| ws.duplicate_terminal(pane, window, cx)).icon(Icon::new(IconName::CopyPlus)))
+                .item(menu_action(this, "Copy Working Directory", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(cwd.clone()))).icon(Icon::new(IconName::Copy)));
         }
 
         // Splitting moves the tab into a new group, as dragging it to a side
@@ -909,14 +909,14 @@ impl Workspace {
         let own_window = alone && floating && self.tree.is_root(group);
         let menu = menu
             .separator()
-            .item(act(this, "Split Right", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Right), None, cx)).icon(Icon::new(IconName::Columns2)).disabled(alone))
-            .item(act(this, "Split Down", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Bottom), None, cx)).icon(Icon::new(IconName::Rows2)).disabled(alone))
+            .item(menu_action(this, "Split Right", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Right), None, cx)).icon(Icon::new(IconName::Columns2)).disabled(alone))
+            .item(menu_action(this, "Split Down", move |ws, _, cx| ws.move_tab(pane, group, Some(Side::Bottom), None, cx)).icon(Icon::new(IconName::Rows2)).disabled(alone))
             .separator()
-            .item(act(this, "Move into New Window", move |ws, _, cx| ws.float_tab(pane, None, cx)).icon(Icon::new(IconName::ExternalLink)).disabled(own_window));
+            .item(menu_action(this, "Move into New Window", move |ws, _, cx| ws.float_tab(pane, None, cx)).icon(Icon::new(IconName::ExternalLink)).disabled(own_window));
         if !floating {
             return menu;
         }
-        menu.item(act(this, "Move into Main Window", move |ws, _, cx| ws.dock_tab(pane, cx)).icon(Icon::new(IconName::Minimize)))
+        menu.item(menu_action(this, "Move into Main Window", move |ws, _, cx| ws.dock_tab(pane, cx)).icon(Icon::new(IconName::Minimize)))
     }
 
     /// The container's ⋮ menu.
@@ -973,29 +973,17 @@ impl Workspace {
     }
 }
 
-/// A menu item running `run` on the workspace.
-fn act(
-    this: &WeakEntity<Workspace>,
-    label: &'static str,
-    run: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
-) -> PopupMenuItem {
-    let this = this.clone();
-    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-        _ = this.update(cx, |ws, cx| run(ws, window, cx));
-    })
-}
-
 /// A file's paths, and showing it, as the Explorer's menu has them.
 fn path_items(menu: PopupMenu, this: &WeakEntity<Workspace>, path: &std::path::Path, root: &std::path::Path) -> PopupMenu {
     let full = path.display().to_string();
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/");
     let (on_disk, inside) = (path.exists(), path.starts_with(root));
     let (reveal, show) = (path.to_path_buf(), path.to_path_buf());
-    menu.item(act(this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.clone()))).icon(Icon::new(IconName::Copy)))
-        .item(act(this, "Copy Relative Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()))).icon(Icon::new(IconName::Copy)))
-        .item(act(this, "Reveal in File Explorer", move |_, _, _| crate::explorer::reveal(&reveal)).icon(Icon::new(IconName::FolderOpen)).disabled(!on_disk))
+    menu.item(menu_action(this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.clone()))).icon(Icon::new(IconName::Copy)))
+        .item(menu_action(this, "Copy Relative Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(rel.clone()))).icon(Icon::new(IconName::Copy)))
+        .item(menu_action(this, "Reveal in File Explorer", move |_, _, _| crate::explorer::reveal(&reveal)).icon(Icon::new(IconName::FolderOpen)).disabled(!on_disk))
         .item(
-            act(this, "Reveal in Explorer View", move |ws, window, cx| ws.reveal_in_sidebar(show.clone(), window, cx))
+            menu_action(this, "Reveal in Explorer View", move |ws, window, cx| ws.reveal_in_sidebar(show.clone(), window, cx))
                 .icon(Icon::new(IconName::Files))
                 .disabled(!on_disk || !inside),
         )

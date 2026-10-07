@@ -9,12 +9,14 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
+
+use super::http;
 
 /// Found images, and misses, by email key.
 static CACHE: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
@@ -107,21 +109,16 @@ pub fn fetch(email: &str, github: Option<(String, String, String)>) -> Option<Pa
             None => (None, true),
         },
     };
-    let found = url.and_then(|url| download(&url, &dir().join(format!("{key}.img"))).ok());
+    let found = url.and_then(|url| {
+        let path = dir().join(format!("{key}.img"));
+        http::fetch_to_file(&url, &path, MAX_BYTES).ok().map(|()| path)
+    });
     if found.is_none() && definitive {
         let _ = std::fs::create_dir_all(dir());
         let _ = std::fs::write(dir().join(format!("{key}.none")), "");
     }
     remember(&key, found.clone());
     found
-}
-
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(20))
-        .redirects(8)
-        .build()
 }
 
 /// The commit author's avatar URL from the GitHub API: `Ok(None)` when the
@@ -132,7 +129,7 @@ fn api_avatar_url(owner: &str, repo: &str, hash: &str) -> Result<Option<String>,
         return Err(());
     }
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{hash}");
-    let response = agent().get(&url).set("Accept", "application/vnd.github+json").set("User-Agent", "den").call();
+    let response = http::AGENT.get(&url).set("Accept", "application/vnd.github+json").set("User-Agent", "den").call();
     match response {
         Ok(response) => {
             let json: serde_json::Value = response.into_json().map_err(drop)?;
@@ -148,24 +145,6 @@ fn api_avatar_url(owner: &str, repo: &str, hash: &str) -> Result<Option<String>,
         Err(ureq::Error::Status(404 | 422, _)) => Ok(None),
         Err(_) => Err(()),
     }
-}
-
-/// Fetch `url` to `path`, through a temporary file so a half-written image
-/// never shows.
-fn download(url: &str, path: &Path) -> Result<PathBuf, String> {
-    let response = agent().get(url).call().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(response.into_reader(), MAX_BYTES), &mut bytes).map_err(|e| e.to_string())?;
-    if bytes.is_empty() {
-        return Err("empty".into());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let part = path.with_extension("part");
-    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(part, path).map_err(|e| e.to_string())?;
-    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

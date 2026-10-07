@@ -1,7 +1,7 @@
-//! The file and Settings pane kinds; terminals are in `terminal.rs`.
+//! The file and Settings pane kinds.
 //!
-//! `init` registers each kind's builder, which makes the pane again from what
-//! its `dump` saved.
+//! `init` registers the builders that make a saved pane again from what its
+//! `dump` saved: the file's here, the others' with their kinds.
 
 use std::{
     path::{Path, PathBuf},
@@ -25,9 +25,9 @@ use serde_json::{Value, json};
 
 use crate::{
     SaveFile,
+    defaults::Kind,
     pane::{self, Pane, PaneEvent},
     settings::{Preset, Settings, SidebarSide, ThemeChoice},
-    terminal::{self, TerminalPanel},
 };
 
 pub const FILE: &str = "File";
@@ -38,20 +38,6 @@ pub fn init(cx: &mut App) {
         let path = PathBuf::from(data["path"].as_str().unwrap_or_default());
         Rc::new(cx.new(|cx| FilePanel::new(path, window, cx)))
     });
-    pane::register(cx, crate::diff::DIFF, |data, _, cx| {
-        let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
-        let (path, top, rel) = (PathBuf::from(text("path")), PathBuf::from(text("top")), text("rel"));
-        let staged = data["staged"].as_bool().unwrap_or(false);
-        if let Some(hash) = data["hash"].as_str() {
-            let commit = crate::diff::CommitRevs {
-                hash: hash.to_string(),
-                parent: data["parent"].as_str().map(str::to_string),
-                old_rel: data["old_rel"].as_str().map_or_else(|| rel.clone(), str::to_string),
-            };
-            return Rc::new(cx.new(|cx| crate::diff::DiffPanel::for_commit(path, top, rel, commit, cx)));
-        }
-        Rc::new(cx.new(|cx| crate::diff::DiffPanel::new(path, top, rel, staged, cx)))
-    });
     pane::register(cx, crate::browser::BROWSER, |data, window, cx| {
         let url = data["url"].as_str().map(str::to_string);
         Rc::new(cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx)))
@@ -61,7 +47,7 @@ pub fn init(cx: &mut App) {
         let id = data["id"].as_str().unwrap_or_default().to_string();
         let listing = serde_json::from_value::<crate::backend::extensions::Listing>(data["listing"].clone()).ok();
         // A preview whose extension got installed meanwhile opens as its page.
-        let installed = crate::extensions::Extensions::get(cx).entries.iter().any(|e| e.id == id);
+        let installed = crate::extensions::Extensions::get(cx).entry(&id).is_some();
         match listing.filter(|_| !installed) {
             Some(listing) => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::preview(listing, cx))),
             None => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::new(id, window, cx))),
@@ -71,27 +57,6 @@ pub fn init(cx: &mut App) {
         let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
         let (id, view, root) = (text("id"), text("view"), PathBuf::from(text("root")));
         Rc::new(cx.new(|cx| crate::extension_view::ExtensionView::new(id, view, root, cx)))
-    });
-    pane::register(cx, terminal::TERMINAL, |data, window, cx| {
-        let cwd = data["cwd"]
-            .as_str()
-            .map(PathBuf::from)
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        let program = data["program"].as_str().map(str::to_string);
-        let agent = data["agent"].as_bool().unwrap_or(program.as_deref() == Some("claude"));
-        // A program comes back anew; Claude Code picks its conversation up
-        // again: the one its hooks named, else the folder's last.
-        let command = match data["resume"].as_str() {
-            Some(resume) => Some(resume.to_string()),
-            None => program.as_deref().map(|program| match crate::backend::agent::program_of(program.split_whitespace().next().unwrap_or("")).as_str() {
-                "claude" => crate::backend::agent::claude_resume(Some(program), None, false),
-                _ => program.to_string(),
-            }),
-        };
-        let history = data["scrollback"].as_str().map(str::to_string);
-        let launch = terminal::Launch { cwd, program, command, history, agent };
-        Rc::new(cx.new(|cx| TerminalPanel::new(launch, window, cx)))
     });
 }
 
@@ -356,7 +321,7 @@ impl FilePanel {
         crate::toast::push(window, format!("Downloading {}…", kit.name), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { crate::backend::format::install(kit, &crate::backend::ai::Cancel::default(), &mut |_, _, _| {}) })
+                .background_spawn(async move { crate::backend::format::install(kit, &crate::backend::http::Cancel::default(), &mut |_, _, _| {}) })
                 .await;
             _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => this.format(false, window, cx),
@@ -965,26 +930,6 @@ pub struct SettingsPanel {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Which list of Settings a preset is in.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PresetKind {
-    Terminal,
-    Agent,
-    Browser,
-}
-
-impl PresetKind {
-    fn of(preset: &Preset) -> Self {
-        if preset.browser {
-            PresetKind::Browser
-        } else if preset.agent {
-            PresetKind::Agent
-        } else {
-            PresetKind::Terminal
-        }
-    }
-}
-
 impl SettingsPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = Settings::get(cx).clone();
@@ -1157,16 +1102,16 @@ impl SettingsPanel {
 
     /// The presets of one section (agents or terminals), as den lists them:
     /// mark (click for another colour), pin, name, command, order, remove.
-    fn render_presets(&self, kind: PresetKind, cx: &mut Context<Self>) -> Div {
-        let agents = kind == PresetKind::Agent;
-        let browsers = kind == PresetKind::Browser;
+    fn render_presets(&self, kind: Kind, cx: &mut Context<Self>) -> Div {
+        let agents = kind == Kind::Agents;
+        let browsers = kind == Kind::Browsers;
         let theme = cx.theme().clone();
         let presets = Settings::get(cx).presets.clone();
-        let indices: Vec<usize> = presets.iter().enumerate().filter(|(_, p)| PresetKind::of(p) == kind).map(|(ix, _)| ix).collect();
+        let indices: Vec<usize> = presets.iter().enumerate().filter(|(_, p)| p.kind() == kind).map(|(ix, _)| ix).collect();
         let section = match kind {
-            PresetKind::Terminal => "terminal",
-            PresetKind::Agent => "agent",
-            PresetKind::Browser => "browser",
+            Kind::Agents => "agent",
+            Kind::Browsers => "browser",
+            _ => "terminal",
         };
         v_flex()
             .w_full()
@@ -1266,19 +1211,159 @@ impl SettingsPanel {
                         .label("Add Preset")
                         .on_click(move |_, _, cx| {
                             Settings::update(cx, |s| {
-                                s.presets.push(Preset {
-                                    name: if agents { "New agent".into() } else if browsers { "New page".into() } else { "New preset".into() },
-                                    command: String::new(),
-                                    agent: agents,
-                                    browser: browsers,
-                                    pinned: true,
-                                    color: None,
-                                    icon: None,
-                                })
+                                let name = if agents { "New agent" } else if browsers { "New page" } else { "New preset" };
+                                s.presets.push(Preset { agent: agents, browser: browsers, ..Preset::new(name, "") })
                             })
                         }),
                 ),
             )
+    }
+}
+
+impl SettingsPanel {
+    /// The theme menu: the built-in and imported themes (hovering one
+    /// previews it), Import and Remove.
+    fn render_theme_menu(&self, settings: &Settings, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let builtin = settings.color_theme.is_empty();
+        let imported: Vec<(String, String, bool)> = self.themes.iter().map(|t| (t.id.clone(), t.theme.name.clone(), t.theme.dark)).collect();
+        let current_theme = if builtin {
+            if settings.theme == ThemeChoice::Dark { "Dark".to_string() } else { "Light".to_string() }
+        } else {
+            imported.iter().find(|(id, ..)| *id == settings.color_theme).map_or_else(|| settings.color_theme.clone(), |(_, name, _)| name.clone())
+        };
+        let (base, color_theme) = (settings.theme, settings.color_theme.clone());
+        let this = cx.weak_entity();
+        Button::new("theme")
+            .small()
+            .outline()
+            .label(current_theme)
+            .icon(Icon::new(IconName::ChevronDown))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                // Hovering a theme previews it; closing the menu goes back to the chosen one.
+                cx.subscribe_self(|_, _: &DismissEvent, cx| crate::theme::apply(cx)).detach();
+                let item = |label: String, choice: ThemeChoice, id: String, checked: bool| {
+                    let hover_id = id.clone();
+                    PopupMenuItem::element(move |_, _| {
+                        let id = hover_id.clone();
+                        div().id(SharedString::from(format!("theme-item-{label}"))).w_full().child(label.clone()).on_hover(move |hovered, _, cx| {
+                            if *hovered {
+                                crate::theme::preview(choice, &id, cx);
+                            }
+                        })
+                    })
+                    .checked(checked)
+                    .on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        Settings::update(cx, |s| {
+                            s.theme = choice;
+                            s.color_theme = id;
+                        })
+                    })
+                };
+                let mut menu = menu
+                    .item(item("Dark".into(), ThemeChoice::Dark, String::new(), builtin && base == ThemeChoice::Dark))
+                    .item(item("Light".into(), ThemeChoice::Light, String::new(), builtin && base == ThemeChoice::Light));
+                if !imported.is_empty() {
+                    menu = menu.separator();
+                }
+                for (id, name, dark) in &imported {
+                    let choice = if *dark { ThemeChoice::Dark } else { ThemeChoice::Light };
+                    menu = menu.item(item(name.clone(), choice, id.clone(), color_theme == *id));
+                }
+                let import = this.clone();
+                menu = menu.separator().item(PopupMenuItem::new("Import VS Code Theme…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
+                    _ = import.update(cx, |this, cx| this.import_theme(window, cx));
+                }));
+                if !builtin {
+                    let remove = this.clone();
+                    menu = menu.item(PopupMenuItem::new("Remove This Theme").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
+                        _ = remove.update(cx, |this, cx| {
+                            let id = Settings::get(cx).color_theme.clone();
+                            crate::theme::remove(&id);
+                            this.themes = crate::theme::imported();
+                            Settings::update(cx, |s| s.color_theme.clear());
+                        });
+                    }));
+                }
+                menu
+            })
+    }
+
+    /// The AI model menu: den's presets and the added models, each with
+    /// its download, and adding one by link or file.
+    fn render_ai_model(&self, settings: &Settings, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        use crate::backend::ai;
+        let current = settings.ai_model.clone();
+        let label = ai::MODEL_PRESETS.iter().find(|p| p.url == current).map_or_else(|| ai::model_name(&current), |p| p.name.to_string());
+        // The added models, and the chosen one when it is neither a preset nor on the list.
+        let mut customs = settings.ai_custom_models.clone();
+        if !ai::MODEL_PRESETS.iter().any(|p| p.url == current) && !customs.contains(&current) {
+            customs.push(current.clone());
+        }
+        let this = cx.weak_entity();
+        Button::new("ai-model")
+            .small()
+            .outline()
+            .label(label)
+            .icon(Icon::new(IconName::ChevronDown))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                for preset in ai::MODEL_PRESETS {
+                    let (url, name, context) = (preset.url, preset.name, preset.context);
+                    let detail = format!("{} · {}", preset.size, preset.fits);
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| menu_entry(format!("ai-model-{name}"), name, &detail, vec![model_download(url)], cx))
+                            .checked(current == url)
+                            .on_click(move |_, _, cx| {
+                                Settings::update(cx, |s| {
+                                    s.ai_model = url.to_string();
+                                    s.ai_context_size = context;
+                                })
+                            }),
+                    );
+                }
+                if !customs.is_empty() {
+                    menu = menu.separator();
+                }
+                for model in &customs {
+                    let (model, pick) = (model.clone(), model.clone());
+                    let checked = current == model;
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            let detail = if ai::is_download(&model) { "link" } else { "file" };
+                            let forget = model.clone();
+                            let forget = Download::Forget(Rc::new(move |_, cx| {
+                                Settings::update(cx, |s| {
+                                    s.ai_custom_models.retain(|m| *m != forget);
+                                    if s.ai_model == forget {
+                                        s.ai_model.clear();
+                                    }
+                                })
+                            }));
+                            let mut actions = Vec::new();
+                            if ai::is_download(&model) {
+                                actions.push(model_download(&model));
+                            }
+                            if !ai::model_downloaded(&model) {
+                                actions.push(forget);
+                            }
+                            menu_entry(format!("ai-model-{model}"), ai::model_name(&model), detail, actions, cx)
+                        })
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let pick = pick.clone();
+                            Settings::update(cx, |s| s.ai_model = pick)
+                        }),
+                    );
+                }
+                let (by_link, by_file) = (this.clone(), this.clone());
+                menu.separator()
+                    .item(PopupMenuItem::new("Add Model from Link…").icon(Icon::new(IconName::Globe)).on_click(move |_, window, cx| {
+                        _ = by_link.update(cx, |this, cx| this.add_model_link(window, cx));
+                    }))
+                    .item(PopupMenuItem::new("Add GGUF File…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
+                        _ = by_file.update(cx, |this, cx| this.add_model_file(window, cx));
+                    }))
+            })
     }
 }
 
@@ -1405,7 +1490,7 @@ fn menu_entry(id: String, name: impl Into<SharedString>, detail: &str, actions: 
 fn model_download(model: &str) -> Download {
     use crate::backend::ai;
     let key = format!("ai-model-{model}");
-    if let Some(progress) = download_progress(&key) {
+    if let Some(progress) = crate::downloads::download_progress(&key) {
         return Download::Busy(progress);
     }
     let model = model.to_string();
@@ -1420,7 +1505,7 @@ fn model_download(model: &str) -> Download {
         Download::Get(Rc::new(move |window, cx| {
             let mut config = Settings::get(cx).ai_config();
             config.model = model.clone();
-            start_download(key.clone(), name.clone(), window, cx, move |cancel, progress| ai::install(&config, cancel, progress))
+            crate::downloads::start_download(key.clone(), name.clone(), window, cx, move |cancel, progress| ai::install(&config, cancel, progress))
         }))
     }
 }
@@ -1435,132 +1520,40 @@ fn add_custom_model(model: String, cx: &mut App) {
     });
 }
 
-/// Downloads started from Settings, by key, with their progress.
-static DOWNLOADS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-
-pub(crate) fn download_progress(key: &str) -> Option<String> {
-    DOWNLOADS.lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, progress)| progress.clone())
-}
-
-fn set_download_progress(key: &str, progress: Option<String>) {
-    if let Ok(mut downloads) = DOWNLOADS.lock() {
-        downloads.retain(|(k, _)| k != key);
-        if let Some(progress) = progress {
-            downloads.push((key.to_string(), progress));
-        }
-    }
-}
-
-/// Run `job` (a download) on its own thread, its progress shown in the menu
-/// entry `key` meanwhile; a failure becomes a toast.
-fn start_download(
-    key: String,
-    what: impl Into<String>,
-    window: &mut Window,
-    cx: &mut App,
-    job: impl FnOnce(&crate::backend::ai::Cancel, crate::backend::ai::Progress) -> Result<(), String> + Send + 'static,
-) {
-    start_download_then(key, what, window, cx, job, |_, _| {});
-}
-
-/// [`start_download`], then `done` once it succeeded.
-fn start_download_then(
-    key: String,
-    what: impl Into<String>,
-    window: &mut Window,
-    cx: &mut App,
-    job: impl FnOnce(&crate::backend::ai::Cancel, crate::backend::ai::Progress) -> Result<(), String> + Send + 'static,
-    done: impl FnOnce(&mut Window, &mut App) + 'static,
-) {
-    if download_progress(&key).is_some() {
-        return;
-    }
-    set_download_progress(&key, Some("Starting…".into()));
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Result<(), String>>>();
-    std::thread::spawn(move || {
-        let result = job(&crate::backend::ai::Cancel::default(), &mut |stage, done, total| {
-            let progress = if total == 0 { format!("{stage}…") } else { format!("{}%", done * 100 / total) };
-            set_download_progress(&key, Some(progress));
-            _ = tx.unbounded_send(None);
-        });
-        set_download_progress(&key, None);
-        _ = tx.unbounded_send(Some(result));
-    });
-    let what = what.into();
-    let handle = window.window_handle();
-    let mut done = Some(done);
-    cx.spawn(async move |cx| {
-        use futures::StreamExt as _;
-        while let Some(update) = rx.next().await {
-            _ = handle.update(cx, |_, window, cx| {
-                match update {
-                    Some(Err(err)) => crate::toast::push(window, format!("Could not download {what}: {err}"), cx),
-                    Some(Ok(())) => {
-                        if let Some(done) = done.take() {
-                            done(window, cx);
-                        }
-                    }
-                    None => {}
-                }
-                window.refresh();
-            });
-        }
-    })
-    .detach();
-}
-
-/// Fetch `repo`'s latest release, ask, and download it for the next start.
-/// `current` is the installed version when this is an update.
-pub(crate) fn get_extension(repo: String, current: Option<String>, window: &mut Window, cx: &mut App) {
-    use gpui_kit::component::WindowExt as _;
-    let handle = window.window_handle();
-    cx.spawn(async move |cx| {
-        let fetch = repo.clone();
-        let result = cx.background_spawn(async move { crate::backend::extensions::fetch_manifest(&fetch) }).await;
-        _ = handle.update(cx, |_, window, cx| {
-            let manifest = match result.and_then(|m| m.check_api().map(|()| m)) {
-                Ok(manifest) => manifest,
-                Err(err) => return crate::toast::push(window, err, cx),
-            };
-            if let Some(current) = &current
-                && !crate::update::newer(&manifest.version, current)
-            {
-                return crate::toast::push(window, format!("{} {current} is the newest version.", manifest.name), cx);
+/// The downloaded formatters: a menu of every kit with its state.
+fn render_formatters() -> impl IntoElement {
+    let kits = crate::backend::format::kits();
+    let downloaded = kits.iter().filter(|kit| kit.is_installed()).count();
+    Button::new("formatters")
+        .small()
+        .outline()
+        .label(format!("{downloaded} of {} downloaded", kits.len()))
+        .icon(Icon::new(IconName::ChevronDown))
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+            for &kit in crate::backend::format::kits() {
+                menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                    let key = format!("formatter-{}", kit.name);
+                    let installed = kit.is_installed();
+                    let detail = format!("{} · {}", kit.formats, if installed { kit.version() } else { kit.size });
+                    let download = if let Some(progress) = crate::downloads::download_progress(&key) {
+                        Download::Busy(progress)
+                    } else if installed {
+                        Download::Remove(Rc::new(move |window, cx| {
+                            if let Err(err) = crate::backend::format::remove(kit) {
+                                crate::toast::push(window, format!("Could not remove {}: {err}", kit.name), cx);
+                            }
+                        }))
+                    } else {
+                        let key = key.clone();
+                        Download::Get(Rc::new(move |window, cx| {
+                            crate::downloads::start_download(key.clone(), kit.name, window, cx, move |cancel, progress| crate::backend::format::install(kit, cancel, progress))
+                        }))
+                    };
+                    menu_entry(key, kit.name, &detail, vec![download], cx)
+                }));
             }
-            let (title, ok) = if current.is_some() { ("Update Extension", "Update") } else { ("Install Extension", "Install") };
-            let about = if manifest.description.is_empty() { String::new() } else { format!("{}\n\n", manifest.description) };
-            let text = format!(
-                "{} {} from github.com/{repo}.\n\n{about}An extension is native code: it runs inside den with your permissions, so install only what you trust. It loads at the next start.",
-                manifest.name, manifest.version
-            );
-            window.open_alert_dialog(cx, move |dialog, _, _| {
-                let manifest = manifest.clone();
-                dialog.title(title).description(text.clone()).ok_text(ok).show_cancel(true).on_ok(move |_, window, cx| {
-                    let (job, done) = (manifest.clone(), manifest.clone());
-                    crate::toast::push(window, format!("Downloading {}…", manifest.name), cx);
-                    start_download_then(
-                        format!("ext-install-{}", manifest.id),
-                        manifest.name.clone(),
-                        window,
-                        cx,
-                        move |cancel, progress| crate::backend::extensions::install(&job, cancel, progress),
-                        move |_, cx| crate::extensions::installed(done, cx),
-                    );
-                    true
-                })
-            });
-        });
-    })
-    .detach();
-}
-
-pub(crate) fn open_extensions_folder() {
-    let dir = crate::backend::extensions::dir();
-    let _ = std::fs::create_dir_all(&dir);
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-    }
+            menu
+        })
 }
 
 fn choice<T: Copy + PartialEq + 'static>(
@@ -1577,6 +1570,32 @@ fn choice<T: Copy + PartialEq + 'static>(
         .on_click(move |_, _, cx| Settings::update(cx, |settings| set(settings, value)))
 }
 
+/// A setting switched on or off.
+fn toggle(name: &'static str, description: &'static str, id: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &App) -> Div {
+    let switch = Switch::new(id).checked(on).on_click(move |checked, _, cx| {
+        let checked = *checked;
+        Settings::update(cx, |s| set(s, checked))
+    });
+    setting_row(name, description, switch, cx)
+}
+
+/// A number stepped down or up (`step` with `false` or `true`) by two
+/// buttons, shown between them `width` wide; `after` runs on each step.
+fn stepper(id: &'static str, value: String, width: Pixels, step: fn(&mut Settings, bool), after: fn(&App)) -> impl IntoElement {
+    let button = |suffix: &'static str, icon: IconName, up: bool| {
+        Button::new(SharedString::from(format!("{id}-{suffix}"))).small().outline().icon(Icon::new(icon)).on_click(move |_, _, cx| {
+            Settings::update(cx, |s| step(s, up));
+            after(cx);
+        })
+    };
+    h_flex()
+        .gap_2()
+        .items_center()
+        .child(button("less", IconName::Minus, false))
+        .child(div().w(width).text_center().text_sm().child(value))
+        .child(button("more", IconName::Plus, true))
+}
+
 impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_preset_rows(window, cx);
@@ -1584,70 +1603,6 @@ impl Render for SettingsPanel {
         let words: Vec<String> = self.search.read(cx).value().to_lowercase().split_whitespace().map(str::to_string).collect();
         FILTER.with(|filter| *filter.borrow_mut() = (words, "", 0));
 
-        // Theme: a select of the built-in and imported themes, with Import and Remove.
-        let builtin = settings.color_theme.is_empty();
-        let imported: Vec<(String, String, bool)> = self.themes.iter().map(|t| (t.id.clone(), t.theme.name.clone(), t.theme.dark)).collect();
-        let current_theme = if builtin {
-            if settings.theme == ThemeChoice::Dark { "Dark".to_string() } else { "Light".to_string() }
-        } else {
-            imported.iter().find(|(id, ..)| *id == settings.color_theme).map_or_else(|| settings.color_theme.clone(), |(_, name, _)| name.clone())
-        };
-        let (base, color_theme) = (settings.theme, settings.color_theme.clone());
-        let this = cx.weak_entity();
-        let theme = Button::new("theme")
-            .small()
-            .outline()
-            .label(current_theme)
-            .icon(Icon::new(IconName::ChevronDown))
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                // Hovering a theme previews it; closing the menu goes back to the chosen one.
-                cx.subscribe_self(|_, _: &DismissEvent, cx| crate::theme::apply(cx)).detach();
-                let item = |label: String, choice: ThemeChoice, id: String, checked: bool| {
-                    let hover_id = id.clone();
-                    PopupMenuItem::element(move |_, _| {
-                        let id = hover_id.clone();
-                        div().id(SharedString::from(format!("theme-item-{label}"))).w_full().child(label.clone()).on_hover(move |hovered, _, cx| {
-                            if *hovered {
-                                crate::theme::preview(choice, &id, cx);
-                            }
-                        })
-                    })
-                    .checked(checked)
-                    .on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        Settings::update(cx, |s| {
-                            s.theme = choice;
-                            s.color_theme = id;
-                        })
-                    })
-                };
-                let mut menu = menu
-                    .item(item("Dark".into(), ThemeChoice::Dark, String::new(), builtin && base == ThemeChoice::Dark))
-                    .item(item("Light".into(), ThemeChoice::Light, String::new(), builtin && base == ThemeChoice::Light));
-                if !imported.is_empty() {
-                    menu = menu.separator();
-                }
-                for (id, name, dark) in &imported {
-                    let choice = if *dark { ThemeChoice::Dark } else { ThemeChoice::Light };
-                    menu = menu.item(item(name.clone(), choice, id.clone(), color_theme == *id));
-                }
-                let import = this.clone();
-                menu = menu.separator().item(PopupMenuItem::new("Import VS Code Theme…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-                    _ = import.update(cx, |this, cx| this.import_theme(window, cx));
-                }));
-                if !builtin {
-                    let remove = this.clone();
-                    menu = menu.item(PopupMenuItem::new("Remove This Theme").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
-                        _ = remove.update(cx, |this, cx| {
-                            let id = Settings::get(cx).color_theme.clone();
-                            crate::theme::remove(&id);
-                            this.themes = crate::theme::imported();
-                            Settings::update(cx, |s| s.color_theme.clear());
-                        });
-                    }));
-                }
-                menu
-            });
         let sidebar = h_flex()
             .gap_1()
             .child(choice("side-left", "Left", SidebarSide::Left, settings.sidebar_position, |s, v| {
@@ -1656,24 +1611,13 @@ impl Render for SettingsPanel {
             .child(choice("side-right", "Right", SidebarSide::Right, settings.sidebar_position, |s, v| {
                 s.sidebar_position = v
             }));
-        let font_size = h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                Button::new("font-smaller")
-                    .small()
-                    .outline()
-                    .icon(Icon::new(IconName::Minus))
-                    .on_click(|_, _, cx| Settings::update(cx, |s| s.editor_font_size = (s.editor_font_size - 1.).max(8.))),
-            )
-            .child(div().w_8().text_center().text_sm().child(format!("{}", settings.editor_font_size)))
-            .child(
-                Button::new("font-larger")
-                    .small()
-                    .outline()
-                    .icon(Icon::new(IconName::Plus))
-                    .on_click(|_, _, cx| Settings::update(cx, |s| s.editor_font_size = (s.editor_font_size + 1.).min(32.))),
-            );
+        let font_size = stepper(
+            "font",
+            format!("{}", settings.editor_font_size),
+            px(32.),
+            |s, up| s.editor_font_size = if up { (s.editor_font_size + 1.).min(32.) } else { (s.editor_font_size - 1.).max(8.) },
+            |_| {},
+        );
 
         let body = v_flex()
             .id("settings")
@@ -1686,7 +1630,7 @@ impl Render for SettingsPanel {
                     .px_2()
                     .pb_4()
                     .child(section_title("Appearance", cx))
-                    .child(setting_row("Theme", "Colours of the whole window.", theme, cx))
+                    .child(setting_row("Theme", "Colours of the whole window.", self.render_theme_menu(&settings, cx), cx))
                     .child(setting_row(
                         "Sidebar position",
                         "Which side of the groups the Explorer, Search, Source Control and Extensions sit on.",
@@ -1696,70 +1640,13 @@ impl Render for SettingsPanel {
                     .child(section_title("Editor", cx))
                     .child(setting_row("Font family", "Editor and terminal font; empty for the theme's monospace font.", div().w(px(260.)).child(Input::new(&self.font_family).small()), cx))
                     .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
-                    .child(setting_row(
-                        "Line numbers",
-                        "Show line numbers in the gutter.",
-                        Switch::new("line-numbers").checked(settings.line_numbers).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.line_numbers = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Soft wrap",
-                        "Wrap long lines at the edge of the editor.",
-                        Switch::new("soft-wrap").checked(settings.soft_wrap).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.soft_wrap = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Format on save",
-                        "Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded.",
-                        Switch::new("format-on-save").checked(settings.format_on_save).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.format_on_save = checked)
-                        }),
-                        cx,
-                    ))
+                    .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
+                    .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
+                    .child(toggle("Format on save", "Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded.", "format-on-save", settings.format_on_save, |s, v| s.format_on_save = v, cx))
                     .child(setting_row(
                         "Downloaded formatters",
                         "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
-                        {
-                            let kits = crate::backend::format::kits();
-                            let downloaded = kits.iter().filter(|kit| kit.is_installed()).count();
-                            Button::new("formatters")
-                                .small()
-                                .outline()
-                                .label(format!("{downloaded} of {} downloaded", kits.len()))
-                                .icon(Icon::new(IconName::ChevronDown))
-                                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                                    for &kit in crate::backend::format::kits() {
-                                        menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                                            let key = format!("formatter-{}", kit.name);
-                                            let installed = kit.is_installed();
-                                            let detail = format!("{} · {}", kit.formats, if installed { kit.version() } else { kit.size });
-                                            let download = if let Some(progress) = download_progress(&key) {
-                                                Download::Busy(progress)
-                                            } else if installed {
-                                                Download::Remove(Rc::new(move |window, cx| {
-                                                    if let Err(err) = crate::backend::format::remove(kit) {
-                                                        crate::toast::push(window, format!("Could not remove {}: {err}", kit.name), cx);
-                                                    }
-                                                }))
-                                            } else {
-                                                let key = key.clone();
-                                                Download::Get(Rc::new(move |window, cx| {
-                                                    start_download(key.clone(), kit.name, window, cx, move |cancel, progress| crate::backend::format::install(kit, cancel, progress))
-                                                }))
-                                            };
-                                            menu_entry(key, kit.name, &detail, vec![download], cx)
-                                        }));
-                                    }
-                                    menu
-                                })
-                        },
+                        render_formatters(),
                         cx,
                     ))
                     .child(section_title("Source Control", cx))
@@ -1777,80 +1664,7 @@ impl Render for SettingsPanel {
                     .child(setting_row(
                         "Model",
                         "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder). Add your own GGUF model by link or file.",
-                        {
-                            use crate::backend::ai;
-                            let current = settings.ai_model.clone();
-                            let label = ai::MODEL_PRESETS.iter().find(|p| p.url == current).map_or_else(|| ai::model_name(&current), |p| p.name.to_string());
-                            // The added models, and the chosen one when it is neither a preset nor on the list.
-                            let mut customs = settings.ai_custom_models.clone();
-                            if !ai::MODEL_PRESETS.iter().any(|p| p.url == current) && !customs.contains(&current) {
-                                customs.push(current.clone());
-                            }
-                            let this = cx.weak_entity();
-                            Button::new("ai-model")
-                                .small()
-                                .outline()
-                                .label(label)
-                                .icon(Icon::new(IconName::ChevronDown))
-                                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                                    for preset in ai::MODEL_PRESETS {
-                                        let (url, name, context) = (preset.url, preset.name, preset.context);
-                                        let detail = format!("{} · {}", preset.size, preset.fits);
-                                        menu = menu.item(
-                                            PopupMenuItem::element(move |_, cx| menu_entry(format!("ai-model-{name}"), name, &detail, vec![model_download(url)], cx))
-                                                .checked(current == url)
-                                                .on_click(move |_, _, cx| {
-                                                    Settings::update(cx, |s| {
-                                                        s.ai_model = url.to_string();
-                                                        s.ai_context_size = context;
-                                                    })
-                                                }),
-                                        );
-                                    }
-                                    if !customs.is_empty() {
-                                        menu = menu.separator();
-                                    }
-                                    for model in &customs {
-                                        let (model, pick) = (model.clone(), model.clone());
-                                        let checked = current == model;
-                                        menu = menu.item(
-                                            PopupMenuItem::element(move |_, cx| {
-                                                let detail = if ai::is_download(&model) { "link" } else { "file" };
-                                                let forget = model.clone();
-                                                let forget = Download::Forget(Rc::new(move |_, cx| {
-                                                    Settings::update(cx, |s| {
-                                                        s.ai_custom_models.retain(|m| *m != forget);
-                                                        if s.ai_model == forget {
-                                                            s.ai_model.clear();
-                                                        }
-                                                    })
-                                                }));
-                                                let mut actions = Vec::new();
-                                                if ai::is_download(&model) {
-                                                    actions.push(model_download(&model));
-                                                }
-                                                if !ai::model_downloaded(&model) {
-                                                    actions.push(forget);
-                                                }
-                                                menu_entry(format!("ai-model-{model}"), ai::model_name(&model), detail, actions, cx)
-                                            })
-                                            .checked(checked)
-                                            .on_click(move |_, _, cx| {
-                                                let pick = pick.clone();
-                                                Settings::update(cx, |s| s.ai_model = pick)
-                                            }),
-                                        );
-                                    }
-                                    let (by_link, by_file) = (this.clone(), this.clone());
-                                    menu.separator()
-                                        .item(PopupMenuItem::new("Add Model from Link…").icon(Icon::new(IconName::Globe)).on_click(move |_, window, cx| {
-                                            _ = by_link.update(cx, |this, cx| this.add_model_link(window, cx));
-                                        }))
-                                        .item(PopupMenuItem::new("Add GGUF File…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-                                            _ = by_file.update(cx, |this, cx| this.add_model_file(window, cx));
-                                        }))
-                                })
-                        },
+                        self.render_ai_model(&settings, cx),
                         cx,
                     ))
                     .child(setting_row(
@@ -1877,92 +1691,25 @@ impl Render for SettingsPanel {
                     .child(setting_row(
                         "Context size",
                         "Tokens the model reads at once; bigger fits larger changes in one go but needs more memory.",
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Button::new("ai-ctx-less").small().outline().icon(Icon::new(IconName::Minus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.ai_context_size = (s.ai_context_size / 2).max(2048))
-                            }))
-                            .child(div().w_16().text_center().text_sm().child(format!("{}K", settings.ai_context_size / 1024)))
-                            .child(Button::new("ai-ctx-more").small().outline().icon(Icon::new(IconName::Plus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.ai_context_size = (s.ai_context_size * 2).min(131_072))
-                            })),
+                        stepper(
+                            "ai-ctx",
+                            format!("{}K", settings.ai_context_size / 1024),
+                            px(64.),
+                            |s, up| s.ai_context_size = if up { (s.ai_context_size * 2).min(131_072) } else { (s.ai_context_size / 2).max(2048) },
+                            |_| {},
+                        ),
                         cx,
                     ))
-                    .child(setting_row(
-                        "Use the GPU",
-                        "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.",
-                        Switch::new("ai-gpu").checked(settings.ai_gpu).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.ai_gpu = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Style from history",
-                        "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).",
-                        Switch::new("ai-derive").checked(settings.ai_derive_style).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.ai_derive_style = checked)
-                        }),
-                        cx,
-                    ))
+                    .child(toggle("Use the GPU", "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.", "ai-gpu", settings.ai_gpu, |s, v| s.ai_gpu = v, cx))
+                    .child(toggle("Style from history", "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).", "ai-derive", settings.ai_derive_style, |s, v| s.ai_derive_style = v, cx))
                     .child(section_title("Tabs", cx))
-                    .child(setting_row(
-                        "Close buttons",
-                        "Show a close button on each tab (a middle-click closes a tab either way).",
-                        Switch::new("tab-close").checked(settings.tab_close_button).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.tab_close_button = checked)
-                        }),
-                        cx,
-                    ))
+                    .child(toggle("Close buttons", "Show a close button on each tab (a middle-click closes a tab either way).", "tab-close", settings.tab_close_button, |s, v| s.tab_close_button = v, cx))
                     .child(section_title("Notifications", cx))
-                    .child(setting_row(
-                        "Notifications",
-                        "When a terminal's program wants you (an agent finished or waits for input, a bell) while you look at another tab or window.",
-                        Switch::new("notifications").checked(settings.notifications).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.notifications = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Toast",
-                        "A message in the window's corner; click it to go to the tab.",
-                        Switch::new("notify-toast").checked(settings.notify_toast).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.notify_toast = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Tab mark",
-                        "A dot on the tab until you look at it.",
-                        Switch::new("notify-tab").checked(settings.notify_tab).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.notify_tab = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Sound",
-                        "A sound for a finished turn or a question, picked below.",
-                        Switch::new("notify-sound").checked(settings.notify_sound).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.notify_sound = checked)
-                        }),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Taskbar",
-                        "Flash the taskbar button while the window is in the background.",
-                        Switch::new("notify-taskbar").checked(settings.notify_taskbar).on_click(|checked, _, cx| {
-                            let checked = *checked;
-                            Settings::update(cx, |s| s.notify_taskbar = checked)
-                        }),
-                        cx,
-                    ))
+                    .child(toggle("Notifications", "When a terminal's program wants you (an agent finished or waits for input, a bell) while you look at another tab or window.", "notifications", settings.notifications, |s, v| s.notifications = v, cx))
+                    .child(toggle("Toast", "A message in the window's corner; click it to go to the tab.", "notify-toast", settings.notify_toast, |s, v| s.notify_toast = v, cx))
+                    .child(toggle("Tab mark", "A dot on the tab until you look at it.", "notify-tab", settings.notify_tab, |s, v| s.notify_tab = v, cx))
+                    .child(toggle("Sound", "A sound for a finished turn or a question, picked below.", "notify-sound", settings.notify_sound, |s, v| s.notify_sound = v, cx))
+                    .child(toggle("Taskbar", "Flash the taskbar button while the window is in the background.", "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
                     .child(setting_row(
                         "Tab strip buttons",
                         "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu.",
@@ -1986,20 +1733,16 @@ impl Render for SettingsPanel {
                     .child(setting_row(
                         "Volume",
                         "Of the notification sounds.",
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Button::new("volume-less").small().outline().icon(Icon::new(IconName::Minus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.notify_volume = s.notify_volume.saturating_sub(10));
+                        stepper(
+                            "volume",
+                            format!("{}%", settings.notify_volume),
+                            px(48.),
+                            |s, up| s.notify_volume = if up { (s.notify_volume + 10).min(100) } else { s.notify_volume.saturating_sub(10) },
+                            |cx| {
                                 let s = Settings::get(cx);
                                 crate::sound::play_named(&s.notify_sound_done, s.notify_volume);
-                            }))
-                            .child(div().w_12().text_center().text_sm().child(format!("{}%", settings.notify_volume)))
-                            .child(Button::new("volume-more").small().outline().icon(Icon::new(IconName::Plus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.notify_volume = (s.notify_volume + 10).min(100));
-                                let s = Settings::get(cx);
-                                crate::sound::play_named(&s.notify_sound_done, s.notify_volume);
-                            })),
+                            },
+                        ),
                         cx,
                     ))
                     .child(section_title("Terminal", cx))
@@ -2007,28 +1750,25 @@ impl Render for SettingsPanel {
                     .child(setting_row(
                         "Scrollback",
                         "Lines a terminal keeps above the screen, for new terminals.",
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(Button::new("scrollback-less").small().outline().icon(Icon::new(IconName::Minus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.scrollback = s.scrollback.saturating_sub(1000).max(1000))
-                            }))
-                            .child(div().w_16().text_center().text_sm().child(settings.scrollback.to_string()))
-                            .child(Button::new("scrollback-more").small().outline().icon(Icon::new(IconName::Plus)).on_click(|_, _, cx| {
-                                Settings::update(cx, |s| s.scrollback = (s.scrollback + 1000).min(200_000))
-                            })),
+                        stepper(
+                            "scrollback",
+                            settings.scrollback.to_string(),
+                            px(64.),
+                            |s, up| s.scrollback = if up { (s.scrollback + 1000).min(200_000) } else { s.scrollback.saturating_sub(1000).max(1000) },
+                            |_| {},
+                        ),
                         cx,
                     ))
                     .child(preset_section(
                         "Terminal Presets",
                         "Programs a tab-strip button starts in a new terminal: a dev server, a script. The plain shell has its own button.",
-                        self.render_presets(PresetKind::Terminal, cx),
+                        self.render_presets(Kind::Terminals, cx),
                         cx,
                     ))
                     .child(preset_section(
                         "Agent Presets",
                         "Coding agents, started in a shell like terminal presets but opening where agents go, so a group can be the default for agents apart from terminals. Pinned presets get their own button; click a preset's mark for another colour.",
-                        self.render_presets(PresetKind::Agent, cx),
+                        self.render_presets(Kind::Agents, cx),
                         cx,
                     ))
                     .child(section_title("Browser", cx))
@@ -2036,7 +1776,7 @@ impl Render for SettingsPanel {
                     .child(preset_section(
                         "Browser Presets",
                         "Pages a tab-strip button opens in a new browser tab: a dev server, docs. The plain browser has its own button.",
-                        self.render_presets(PresetKind::Browser, cx),
+                        self.render_presets(Kind::Browsers, cx),
                         cx,
                     )),
             );

@@ -42,17 +42,9 @@ pub(crate) fn newer(a: &str, b: &str) -> bool {
     parse(a) > parse(b)
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout_read(std::time::Duration::from_secs(60))
-        .redirects(8)
-        .build()
-}
-
 /// The newest release if it is newer than this build.
 pub fn check() -> Result<Option<Release>, String> {
-    let manifest: serde_json::Value = agent()
+    let manifest: serde_json::Value = crate::backend::http::AGENT
         .get(MANIFEST_URL)
         .call()
         .map_err(|e| format!("Cannot reach the update server: {e}"))?
@@ -108,11 +100,10 @@ fn verify_with(public_key: &str, bytes: &[u8], signature: &str) -> Result<(), St
     key.verify(bytes, &signature, false).map_err(|_| "The download's signature does not match: not installed.".to_string())
 }
 
-/// Download and check the installer; its path.
+/// Download and check the installer; its path. (An installer is some 15 MB;
+/// the cap only guards against a wrong manifest.)
 fn download(release: &Release) -> Result<PathBuf, String> {
-    let response = agent().get(&release.url).call().map_err(|e| format!("Download failed: {e}"))?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes).map_err(|e| format!("Download failed: {e}"))?;
+    let bytes = crate::backend::http::get_bytes(&release.url, 200 * 1024 * 1024).map_err(|e| format!("Download failed: {e}"))?;
     verify(&bytes, &release.signature)?;
     let path = std::env::temp_dir().join(format!("den_{}_setup.exe", release.version));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;

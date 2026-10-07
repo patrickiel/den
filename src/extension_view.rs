@@ -166,7 +166,7 @@ impl ExtensionView {
                     let this = cx.weak_entity();
                     let action = item.id.clone();
                     let mut button = Button::new(SharedString::from(format!("tool-{}", item.id))).small().ghost().selected(item.active);
-                    if let Some(icon) = icon(&item.icon, cx) {
+                    if let Some(icon) = crate::ui::lucide_icon(&item.icon, cx) {
                         button = button.icon(icon);
                     }
                     if !item.label.is_empty() {
@@ -351,7 +351,7 @@ impl ExtensionView {
             .when(span.italic, |this| this.italic())
             .when(span.mono, |this| this.font_family(crate::settings::mono_font(cx)))
             .when_some(background, |this, bg| this.px_1p5().h(px(18.)).rounded(px(4.)).text_xs().bg(bg).text_color(parse_color(&span.color).unwrap_or(gpui_kit::white())))
-            .when_some(icon(&span.icon, cx), |this, icon| this.child(icon.xsmall()))
+            .when_some(crate::ui::lucide_icon(&span.icon, cx), |this, icon| this.child(icon.xsmall()))
             .when(background.is_none() && !span.text.is_empty(), |this| this.flex_shrink(1.).min_w_0().truncate())
             .child(span.text.clone());
         if !span.tooltip.is_empty() {
@@ -460,22 +460,13 @@ fn build_menu(
             let mut entry = PopupMenuItem::new(item.label.clone()).disabled(item.disabled).on_click(move |_, _, cx| {
                 _ = this.update(cx, |this, cx| this.send(&action, Some(&row), data.as_deref(), None, cx));
             });
-            if let Some(icon) = icon(&item.icon, cx) {
+            if let Some(icon) = crate::ui::lucide_icon(&item.icon, cx) {
                 entry = entry.icon(icon);
             }
             popup = popup.item(entry);
         }
     }
     popup
-}
-
-/// A Lucide icon by name, when den has it.
-fn icon(name: &str, cx: &App) -> Option<Icon> {
-    if name.is_empty() {
-        return None;
-    }
-    let path = format!("icons/{name}.svg");
-    cx.asset_source().load(&path).ok().flatten().is_some().then(|| Icon::default().path(path))
 }
 
 impl EventEmitter<PaneEvent> for ExtensionView {}
@@ -497,7 +488,7 @@ impl Pane for ExtensionView {
 
     fn icon_element(&self, cx: &App) -> Option<AnyElement> {
         let kind = Extensions::get(cx).view_kind(&self.id, &self.view)?;
-        Some(icon(&kind.icon, cx)?.small().into_any_element())
+        Some(crate::ui::lucide_icon(&kind.icon, cx)?.small().into_any_element())
     }
 
     fn label(&self, cx: &App) -> SharedString {

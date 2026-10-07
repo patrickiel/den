@@ -13,6 +13,7 @@ mod browser;
 mod defaults;
 mod diff;
 mod dirty_diff;
+mod downloads;
 mod encoding;
 mod explorer;
 mod extension_panel;
@@ -37,6 +38,7 @@ mod sound;
 mod terminal;
 mod theme;
 mod toast;
+mod ui;
 mod update;
 mod workspace;
 

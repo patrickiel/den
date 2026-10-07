@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::backend::extensions::Listing;
 use crate::extensions::{self, Entry, Extensions};
-use crate::extensions_view::{avatar, listing_avatar, status};
+use crate::extensions_view::{avatar, entry_actions, listing_avatar, status};
 use crate::pane::{Pane, PaneEvent};
 
 pub const EXTENSION: &str = "Extension";
@@ -67,7 +67,7 @@ impl Focusable for ExtensionPanel {
 
 impl ExtensionPanel {
     pub fn new(id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let entry = entry(&id, cx).cloned();
+        let entry = Extensions::get(cx).entry(&id).cloned();
         let readme = entry
             .as_ref()
             .and_then(|e| Some(Readme::Text(std::fs::read_to_string(e.dir.join("README.md")).ok()?.into(), Some(e.dir.clone()))))
@@ -132,7 +132,7 @@ impl ExtensionPanel {
     /// Put `key` back to its default, and its box with it (which sets the
     /// default again as it changes, a value equal to the default).
     fn reset(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let default = entry(&self.id, cx)
+        let default = Extensions::get(cx).entry(&self.id)
             .and_then(|e| e.manifest.as_ref())
             .and_then(|m| m.settings.iter().find(|s| s.key == key))
             .map(|s| text_of(&s.default))
@@ -149,7 +149,7 @@ impl ExtensionPanel {
         let wanted = vec![listing.clone()];
         cx.defer(move |cx| extensions::want_icons(wanted, cx));
         let theme = cx.theme().clone();
-        let progress = crate::panels::download_progress(&format!("ext-install-{}", listing.id));
+        let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&listing.id));
         let url = format!("https://github.com/{}", listing.repo);
         let action: AnyElement = if let Some(progress) = progress {
             div().text_sm().text_color(theme.muted_foreground).child(progress).into_any_element()
@@ -166,7 +166,7 @@ impl ExtensionPanel {
                 .primary()
                 .icon(Icon::new(IconName::Download))
                 .label("Install")
-                .on_click(move |_, window, cx| crate::panels::get_extension(repo.clone(), None, window, cx))
+                .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), None, window, cx))
                 .into_any_element()
         };
         h_flex()
@@ -209,56 +209,8 @@ impl ExtensionPanel {
         let theme = cx.theme().clone();
         let manifest = entry.manifest.as_ref();
         let (dot, status) = status(entry, cx);
-        let id = entry.id.clone();
-        let enabled = extensions::is_enabled(&id, cx);
-        let removed = entry.change.as_deref() == Some(extensions::REMOVED);
-        let progress = crate::panels::download_progress(&format!("ext-install-{id}"));
         let repository = manifest.map(|m| m.repository.clone()).filter(|r| !r.is_empty());
-        let update = repository.clone().zip(manifest.map(|m| m.version.clone()));
-        let (remove_id, switch_id) = (id.clone(), id.clone());
-
-        let actions = h_flex().gap_2().items_center().pt_1();
-        let actions = if removed {
-            actions
-        } else if let Some(progress) = progress {
-            actions.child(div().text_sm().text_color(theme.muted_foreground).child(progress))
-        } else {
-            actions
-                .when_some(update, |this, (repo, version)| {
-                    this.child(
-                        Button::new("ext-page-update")
-                            .small()
-                            .primary()
-                            .icon(Icon::new(IconName::RefreshCw))
-                            .label("Check for Update")
-                            .on_click(move |_, window, cx| crate::panels::get_extension(repo.clone(), Some(version.clone()), window, cx)),
-                    )
-                })
-                .child(
-                    Button::new("ext-page-uninstall")
-                        .small()
-                        .outline()
-                        .icon(Icon::new(IconName::Trash))
-                        .label("Uninstall")
-                        .on_click(move |_, window, cx| {
-                            if let Err(err) = extensions::uninstall(&remove_id, cx) {
-                                crate::toast::push(window, format!("Could not uninstall: {err}"), cx);
-                            }
-                            window.refresh();
-                        }),
-                )
-                .child(
-                    h_flex().gap_2().items_center().pl_2().child(
-                        Switch::new("ext-page-on")
-                            .checked(enabled)
-                            .label(if enabled { "On" } else { "Off" })
-                            .on_click(move |checked, window, cx| {
-                                extensions::set_enabled(&switch_id, *checked, cx);
-                                window.refresh();
-                            }),
-                    ),
-                )
-        };
+        let actions = entry_actions(entry, None, false, cx);
 
         h_flex()
             .px_8()
@@ -466,10 +418,6 @@ impl ExtensionPanel {
     }
 }
 
-fn entry<'a>(id: &str, cx: &'a App) -> Option<&'a Entry> {
-    Extensions::get(cx).entries.iter().find(|e| e.id == id)
-}
-
 /// A value as its text box shows it.
 fn text_of(value: &Value) -> String {
     match value {
@@ -503,7 +451,7 @@ impl Pane for ExtensionPanel {
     }
 
     fn label(&self, cx: &App) -> SharedString {
-        let name = entry(&self.id, cx).map(|e| e.name().to_string()).or_else(|| self.listing.as_ref().map(|l| l.name.clone())).unwrap_or_else(|| self.id.clone());
+        let name = Extensions::get(cx).entry(&self.id).map(|e| e.name().to_string()).or_else(|| self.listing.as_ref().map(|l| l.name.clone())).unwrap_or_else(|| self.id.clone());
         format!("Extension: {name}").into()
     }
 
@@ -517,7 +465,7 @@ impl Pane for ExtensionPanel {
 
 impl Render for ExtensionPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(entry) = entry(&self.id, cx).cloned() else {
+        let Some(entry) = Extensions::get(cx).entry(&self.id).cloned() else {
             let Some(listing) = self.listing.clone() else {
                 return v_flex()
                     .size_full()

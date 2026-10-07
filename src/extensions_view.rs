@@ -4,7 +4,7 @@
 //! curated index offers (Available), each with Install. A card opens the
 //! extension's page (`extension_panel.rs`), with its README and settings.
 //! Everything it shows is the `Extensions` global; installing and the rest go
-//! through `extensions.rs` and the download helpers in `panels.rs`.
+//! through `extensions.rs` and `downloads.rs`.
 
 use std::path::PathBuf;
 
@@ -74,8 +74,17 @@ impl ExtensionsView {
 
     fn install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(repo) = self.repository(cx) {
-            crate::panels::get_extension(repo, None, window, cx);
+            crate::downloads::get_extension(repo, None, window, cx);
         }
+    }
+}
+
+fn open_extensions_folder() {
+    let dir = crate::backend::extensions::dir();
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
     }
 }
 
@@ -187,71 +196,79 @@ fn card_frame(face: Face, bottom: impl IntoElement, selected: bool, on_click: im
         )
 }
 
-fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> impl IntoElement {
+/// An installed extension's controls: Update when the index has a newer
+/// version (else Check for Update), Uninstall, and its on/off switch. Small
+/// icon buttons for a card (`compact`), labelled ones for the page.
+pub(crate) fn entry_actions(entry: &Entry, update: Option<&Listing>, compact: bool, cx: &App) -> Div {
     let theme = cx.theme();
     let id = entry.id.clone();
+    let scope = if compact { "view" } else { "page" };
     let manifest = entry.manifest.as_ref();
-    let (dot, status) = status(entry, cx);
     let removed = entry.change.as_deref() == Some(extensions::REMOVED);
-    let progress = crate::panels::download_progress(&format!("ext-install-{id}"));
+    let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&id));
     let check = manifest.filter(|m| !m.repository.is_empty()).map(|m| (m.repository.clone(), m.version.clone()));
-    let update = update.zip(manifest).map(|(listing, m)| (listing.repo, m.version.clone(), listing.version));
+    let newer = update.zip(manifest).map(|(listing, m)| (listing.repo.clone(), m.version.clone(), listing.version.clone()));
+    let enabled = extensions::is_enabled(&id, cx);
     let (remove_id, switch_id) = (id.clone(), id.clone());
+    let button = |action: &str| Button::new(SharedString::from(format!("ext-{scope}-{action}-{id}"))).map(|b| if compact { b.xsmall() } else { b.small() });
 
-    let controls = h_flex().gap_0p5().items_center().flex_none();
-    let controls = if removed {
-        controls
-    } else if let Some(progress) = progress {
-        controls.child(div().text_xs().text_color(theme.muted_foreground).child(progress))
-    } else {
-        controls
-            .map(|this| match (update, check) {
-                // The index knows of a newer version: say so.
-                (Some((repo, installed, newer)), _) => this.child(
-                    Button::new(SharedString::from(format!("ext-view-update-{id}")))
-                        .xsmall()
-                        .primary()
-                        .label("Update")
-                        .tooltip(format!("Version {newer} is out"))
-                        .on_click(move |_, window, cx| crate::panels::get_extension(repo.clone(), Some(installed.clone()), window, cx)),
-                ),
-                (None, Some((repo, version))) => this.child(
-                    Button::new(SharedString::from(format!("ext-view-update-{id}")))
-                        .xsmall()
-                        .ghost()
-                        .icon(Icon::new(IconName::RefreshCw))
-                        .tooltip("Check for an Update")
-                        .on_click(move |_, window, cx| crate::panels::get_extension(repo.clone(), Some(version.clone()), window, cx)),
-                ),
-                (None, None) => this,
-            })
-            .child(
-                Button::new(SharedString::from(format!("ext-view-remove-{id}")))
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::new(IconName::Trash))
-                    .tooltip("Uninstall")
-                    .on_click(move |_, window, cx| {
-                        if let Err(err) = extensions::uninstall(&remove_id, cx) {
-                            crate::toast::push(window, format!("Could not uninstall: {err}"), cx);
-                        }
+    let actions = h_flex().items_center().flex_none().map(|this| if compact { this.gap_0p5() } else { this.gap_2().pt_1() });
+    if removed {
+        return actions;
+    }
+    if let Some(progress) = progress {
+        return actions.child(div().map(|this| if compact { this.text_xs() } else { this.text_sm() }).text_color(theme.muted_foreground).child(progress));
+    }
+    actions
+        .map(|this| match (newer, check) {
+            // The index knows of a newer version: say so.
+            (Some((repo, installed, newer)), _) => this.child(
+                button("update")
+                    .primary()
+                    .label("Update")
+                    .tooltip(format!("Version {newer} is out"))
+                    .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), Some(installed.clone()), window, cx)),
+            ),
+            (None, Some((repo, version))) => this.child(
+                button("update")
+                    .map(|b| if compact { b.ghost() } else { b.primary().label("Check for Update") })
+                    .icon(Icon::new(IconName::RefreshCw))
+                    .tooltip("Check for an Update")
+                    .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), Some(version.clone()), window, cx)),
+            ),
+            (None, None) => this,
+        })
+        .child(
+            button("remove")
+                .map(|b| if compact { b.ghost() } else { b.outline().label("Uninstall") })
+                .icon(Icon::new(IconName::Trash))
+                .tooltip("Uninstall")
+                .on_click(move |_, window, cx| {
+                    if let Err(err) = extensions::uninstall(&remove_id, cx) {
+                        crate::toast::push(window, format!("Could not uninstall: {err}"), cx);
+                    }
+                    window.refresh();
+                }),
+        )
+        .child(
+            // Not a click on the card as well.
+            div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).map(|this| if compact { this } else { this.pl_2() }).child(
+                Switch::new(SharedString::from(format!("ext-{scope}-on-{id}")))
+                    .map(|s| if compact { s.xsmall() } else { s.label(if enabled { "On" } else { "Off" }) })
+                    .checked(enabled)
+                    .tooltip(if enabled { "Turn Off" } else { "Turn On" })
+                    .on_click(move |checked, window, cx| {
+                        extensions::set_enabled(&switch_id, *checked, cx);
                         window.refresh();
                     }),
-            )
-            .child(
-                // Not a click on the card as well.
-                div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(
-                    Switch::new(SharedString::from(format!("ext-view-on-{id}")))
-                        .xsmall()
-                        .checked(extensions::is_enabled(&id, cx))
-                        .tooltip(if extensions::is_enabled(&id, cx) { "Turn Off" } else { "Turn On" })
-                        .on_click(move |checked, window, cx| {
-                            extensions::set_enabled(&switch_id, *checked, cx);
-                            window.refresh();
-                        }),
-                ),
-            )
-    };
+            ),
+        )
+}
+
+fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let manifest = entry.manifest.as_ref();
+    let (dot, status) = status(entry, cx);
     let bottom = h_flex()
         .gap_2()
         .items_center()
@@ -264,7 +281,7 @@ fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl F
                 .child(div().size(px(7.)).rounded_full().flex_none().bg(dot))
                 .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(status)),
         )
-        .child(controls);
+        .child(entry_actions(entry, update.as_ref(), true, cx));
     let face = Face {
         id: entry.id.clone(),
         icon: avatar(entry, 36.),
@@ -277,7 +294,7 @@ fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl F
 
 fn available_card(listing: &Listing, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    let progress = crate::panels::download_progress(&format!("ext-install-{}", listing.id));
+    let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&listing.id));
     let author = listing.repo.split('/').next().unwrap_or_default().to_string();
     let action: AnyElement = if let Some(progress) = progress {
         div().text_xs().text_color(theme.muted_foreground).child(progress).into_any_element()
@@ -289,7 +306,7 @@ fn available_card(listing: &Listing, selected: bool, on_click: impl Fn(&ClickEve
             .xsmall()
             .primary()
             .label("Install")
-            .on_click(move |_, window, cx| crate::panels::get_extension(repo.clone(), None, window, cx))
+            .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), None, window, cx))
             .into_any_element()
     };
     let bottom = h_flex()
@@ -357,7 +374,7 @@ impl Render for ExtensionsView {
                             .child(header_button("ext-view-log", IconName::FileText, "Show extensions.log").on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(ExtensionsEvent::Open(crate::backend::extensions::log_path()));
                             })))
-                            .child(header_button("ext-view-folder", IconName::FolderOpen, "Open Extensions Folder").on_click(|_, _, _| crate::panels::open_extensions_folder())),
+                            .child(header_button("ext-view-folder", IconName::FolderOpen, "Open Extensions Folder").on_click(|_, _, _| open_extensions_folder())),
                     ),
             )
             .child(div().px_2().pb_1().flex_none().child(Input::new(&self.query).small().cleanable(true)))

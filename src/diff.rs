@@ -35,6 +35,20 @@ actions!(diff, [OpenDiffedFile]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("ctrl-enter", OpenDiffedFile, Some("Diff"))]);
+    crate::pane::register(cx, DIFF, |data, _, cx| {
+        let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
+        let (path, top, rel) = (PathBuf::from(text("path")), PathBuf::from(text("top")), text("rel"));
+        let staged = data["staged"].as_bool().unwrap_or(false);
+        if let Some(hash) = data["hash"].as_str() {
+            let commit = CommitRevs {
+                hash: hash.to_string(),
+                parent: data["parent"].as_str().map(str::to_string),
+                old_rel: data["old_rel"].as_str().map_or_else(|| rel.clone(), str::to_string),
+            };
+            return Rc::new(cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)));
+        }
+        Rc::new(cx.new(|cx| DiffPanel::new(path, top, rel, staged, cx)))
+    });
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

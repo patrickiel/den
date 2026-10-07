@@ -13,8 +13,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 
 use super::{
-    ai::{self, AiConfig, Cancel},
+    ai::{self, AiConfig},
     git,
+    http::{CANCELLED, Cancel},
 };
 
 /// Rough size of a token for code and English; low on purpose.
@@ -75,17 +76,12 @@ struct Changes {
 
 // -- Style -------------------------------------------------------------------
 
+/// The last `n` commits' messages.
 fn recent_messages(top: &Path, n: usize) -> Vec<Message> {
-    let Ok(out) = git::run(top, &["log", "-n", &n.to_string(), "--format=%s%x1f%b%x1e", "HEAD"], None) else { return Vec::new() };
-    if !out.ok() {
-        return Vec::new();
-    }
-    out.stdout
-        .split('\u{1e}')
-        .filter_map(|record| {
-            let (subject, body) = record.trim_start_matches('\n').split_once('\u{1f}')?;
-            Some(Message { subject: subject.trim().to_string(), body: body.trim().to_string() })
-        })
+    git::log(top, &["HEAD".into()], n, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| Message { subject: c.subject.trim().to_string(), body: c.body })
         .filter(|m| !m.subject.is_empty())
         .collect()
 }
@@ -545,7 +541,7 @@ pub fn generate(top: &Path, config: &AiConfig, cancel: &Cancel, status: &mut dyn
     for scale in [1.0, 0.5, 0.25] {
         result = attempt(top, config, &style, &examples, exclude, scale, cancel, status, text);
         match &result {
-            Err(err) if *err != ai::CANCELLED && is_context_error(err) => status("Too big for the model's context; trying smaller…".into()),
+            Err(err) if *err != CANCELLED && is_context_error(err) => status("Too big for the model's context; trying smaller…".into()),
             _ => break,
         }
     }

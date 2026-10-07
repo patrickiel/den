@@ -7,10 +7,11 @@
 
 use std::{
     collections::HashSet,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
+
+use super::process;
 
 /// A git run that started: its exit code and output.
 #[derive(Clone, Debug)]
@@ -54,29 +55,14 @@ pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Err
         .env("LC_ALL", "C")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let mut child = cmd.spawn().map_err(|e| {
+        .env_remove("GIT_INDEX_FILE");
+    let out = process::output_with_input(cmd, stdin).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::NotFound
         } else {
             Error::Failed(e.to_string())
         }
     })?;
-    if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_string), child.stdin.take()) {
-        // Its own thread, so a long message cannot deadlock against a full stdout pipe.
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(text.as_bytes());
-        });
-    }
-    let out = child.wait_with_output().map_err(|e| Error::Failed(e.to_string()))?;
     Ok(Output {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -109,7 +95,8 @@ pub struct FileStatus {
     pub rel: String,
     pub index: Code,
     pub worktree: Code,
-    pub renamed_from: Option<PathBuf>,
+    /// The path it had before a rename, relative like `rel`.
+    pub renamed_from: Option<String>,
     /// An unmerged entry; `index`/`worktree` hold the conflict letters.
     pub conflict: bool,
 }
@@ -236,7 +223,7 @@ pub fn parse_status(raw: &str, top: &Path) -> Status {
                 parts.next();
                 let xy: Vec<char> = parts.next().unwrap_or("..").chars().collect();
                 let rel = parts.nth(fields - 2).unwrap_or_default().to_string();
-                let renamed_from = (kind == '2').then(|| abs(tokens.next().unwrap_or_default()));
+                let renamed_from = (kind == '2').then(|| tokens.next().unwrap_or_default().to_string());
                 status.files.push(FileStatus {
                     path: abs(&rel),
                     rel,
@@ -274,20 +261,21 @@ fn unborn(top: &Path) -> bool {
     run(top, &["rev-parse", "--verify", "-q", "HEAD"], None).is_ok_and(|out| !out.ok())
 }
 
-fn with_paths<'a>(base: &[&'a str], rels: &'a [String]) -> Vec<&'a str> {
+/// `git <base>` on the paths `rels`, handed over on stdin: a command line
+/// could not hold thousands of them.
+fn with_pathspec(top: &Path, base: &[&str], rels: &[String]) -> Result<(), Error> {
     let mut args = base.to_vec();
-    args.push("--");
-    args.extend(rels.iter().map(String::as_str));
-    args
+    args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
+    check(top, &args, Some(&rels.join("\0"))).map(drop)
 }
 
 pub fn stage(top: &Path, rels: &[String]) -> Result<(), Error> {
-    check(top, &with_paths(&["add", "-A"], rels), None).map(drop)
+    with_pathspec(top, &["add", "-A"], rels)
 }
 
 pub fn unstage(top: &Path, rels: &[String]) -> Result<(), Error> {
     let base: &[&str] = if unborn(top) { &["rm", "--cached", "-r", "-q"] } else { &["restore", "--staged"] };
-    check(top, &with_paths(base, rels), None).map(drop)
+    with_pathspec(top, base, rels)
 }
 
 /// Working-tree changes only: tracked files go back to the index, untracked
@@ -296,7 +284,7 @@ pub fn discard(top: &Path, files: &[FileStatus]) -> Result<(), Error> {
     let tracked: Vec<String> = files.iter().filter(|f| !f.untracked()).map(|f| f.rel.clone()).collect();
     let untracked: Vec<PathBuf> = files.iter().filter(|f| f.untracked()).map(|f| f.path.clone()).collect();
     if !tracked.is_empty() {
-        check(top, &with_paths(&["checkout", "-q"], &tracked), None)?;
+        with_pathspec(top, &["checkout", "-q"], &tracked)?;
     }
     if !untracked.is_empty() {
         trash::delete_all(&untracked).map_err(|e| Error::Failed(format!("Could not move to the Recycle Bin: {e}")))?;
@@ -604,24 +592,28 @@ pub struct CommitFile {
 pub fn commit_files(top: &Path, hash: &str) -> Result<(Option<String>, Vec<CommitFile>), Error> {
     let parent = run(top, &["rev-parse", "--verify", "-q", &format!("{hash}^")], None)?;
     let parent = parent.ok().then(|| parent.stdout.trim().to_string()).filter(|p| !p.is_empty());
-    let out = check(top, &["diff-tree", "--no-commit-id", "-r", "-M", "--root", "--name-status", hash], None)?;
+    let out = check(top, &["diff-tree", "--no-commit-id", "-r", "-M", "--root", "--name-status", "-z", hash], None)?;
     Ok((parent, parse_name_status(&out.stdout)))
 }
 
-/// `M\tsrc/a.rs` and `R087\told\tnew` lines.
+/// `M\0src/a.rs\0` and `R087\0old\0new\0` records (`-z`, so a name with
+/// spaces or non-ASCII letters comes through as it is).
 pub fn parse_name_status(raw: &str) -> Vec<CommitFile> {
-    raw.lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let status = parts.next()?.chars().next()?;
-            let first = parts.next()?.to_string();
-            let (old_rel, rel) = match parts.next() {
-                Some(second) => (first, second.to_string()),
-                None => (first.clone(), first),
-            };
-            Some(CommitFile { status, rel, old_rel })
-        })
-        .collect()
+    let mut files = Vec::new();
+    let mut parts = raw.split('\0').filter(|p| !p.is_empty());
+    while let Some(code) = parts.next() {
+        let Some(status) = code.chars().next() else { continue };
+        let Some(first) = parts.next() else { break };
+        let (old_rel, rel) = match status {
+            'R' | 'C' => match parts.next() {
+                Some(second) => (first.to_string(), second.to_string()),
+                None => break,
+            },
+            _ => (first.to_string(), first.to_string()),
+        };
+        files.push(CommitFile { status, rel, old_rel });
+    }
+    files
 }
 
 /// What a commit changed, as `--shortstat` counts it.
@@ -681,7 +673,7 @@ mod commit_file_tests {
 
     #[test]
     fn plain_and_renamed_files() {
-        let files = parse_name_status("M\tsrc/a.rs\nR087\told.rs\tnew.rs\nA\tb.txt\n");
+        let files = parse_name_status("M\0src/a.rs\0R087\0old.rs\0new.rs\0A\0b.txt\0");
         assert_eq!(files[0], CommitFile { status: 'M', rel: "src/a.rs".into(), old_rel: "src/a.rs".into() });
         assert_eq!(files[1], CommitFile { status: 'R', rel: "new.rs".into(), old_rel: "old.rs".into() });
         assert_eq!(files[2].status, 'A');
@@ -730,7 +722,7 @@ mod tests {
         assert_eq!(added.letter(), 'A');
 
         let renamed = status.files.iter().find(|f| f.rel == "lib/new.rs").unwrap();
-        assert_eq!(renamed.renamed_from, Some(top().join("lib").join("old.rs")));
+        assert_eq!(renamed.renamed_from.as_deref(), Some("lib/old.rs"));
         assert_eq!(renamed.letter(), 'R');
 
         let conflict = status.files.iter().find(|f| f.rel == "conflict.txt").unwrap();
@@ -866,6 +858,26 @@ mod tests {
         assert!(topic.refs.iter().any(|r| r.kind == RefKind::Tag && r.name == "v1"));
         assert!(topic.refs.iter().any(|r| r.kind == RefKind::Local && r.name == "topic" && !r.head));
         assert_eq!(commit_stat(&top, &commits[0].hash).unwrap().files, 1);
+
+        // Paths go to git on stdin, as they are: a space, a non-ASCII letter.
+        std::fs::write(dir.join("with space.txt"), "s").unwrap();
+        std::fs::write(dir.join("ü.txt"), "u").unwrap();
+        stage(&top, &["with space.txt".into(), "ü.txt".into()]).unwrap();
+        assert_eq!(super::status(&top).unwrap().files.iter().filter(|f| f.staged()).count(), 2);
+        commit(&top, "names", false).unwrap();
+        let head = log(&top, &["HEAD".into()], 1, 0).unwrap().remove(0);
+        let names: Vec<String> = commit_files(&top, &head.hash).unwrap().1.into_iter().map(|f| f.rel).collect();
+        assert_eq!(names, ["with space.txt", "ü.txt"]);
+        // A staged rename is unstaged as one: the old path comes back deleted,
+        // the new one untracked.
+        check(&top, &["mv", "with space.txt", "moved.txt"], None).unwrap();
+        let status = super::status(&top).unwrap();
+        let renamed = status.files.iter().find(|f| f.rel == "moved.txt").unwrap();
+        assert_eq!(renamed.renamed_from.as_deref(), Some("with space.txt"));
+        unstage(&top, &["moved.txt".into(), "with space.txt".into()]).unwrap();
+        let letters: Vec<(String, char)> = super::status(&top).unwrap().files.iter().map(|f| (f.rel.clone(), f.letter())).collect();
+        assert!(letters.contains(&("moved.txt".into(), 'U')) && letters.contains(&("with space.txt".into(), 'D')), "{letters:?}");
+        std::fs::rename(dir.join("moved.txt"), dir.join("with space.txt")).unwrap();
 
         std::fs::write(dir.join("a.txt"), "two").unwrap();
         let changed = super::status(&top).unwrap().files;
