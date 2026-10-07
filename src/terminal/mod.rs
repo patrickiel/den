@@ -184,6 +184,18 @@ struct GridSize {
     lines: usize,
 }
 
+/// The last `max` lines of `term` (`lines` by `columns`) as plain text,
+/// trailing blank lines dropped: that much of the history and the screen,
+/// not all of the history.
+fn tail_text(term: &Term<Listener>, lines: usize, columns: usize, max: usize) -> String {
+    let history = term.grid().history_size().min(max) as i32;
+    let start = alacritty_terminal::index::Point::new(Line(-history), Column(0));
+    let end = alacritty_terminal::index::Point::new(Line(lines as i32 - 1), Column(columns.saturating_sub(1)));
+    let text = term.bounds_to_string(start, end);
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    lines[lines.len().saturating_sub(max)..].join("\n")
+}
+
 impl Dimensions for GridSize {
     fn total_lines(&self) -> usize {
         self.lines
@@ -245,6 +257,8 @@ pub struct TerminalPanel {
     /// (it changes when its tab moves to a floating window).
     focus_window: Option<WindowId>,
     _focus_subscriptions: Vec<Subscription>,
+    /// Redrawn when Settings change (the font, its size).
+    _settings: Subscription,
     _reader: Option<Task<()>>,
 }
 
@@ -292,6 +306,7 @@ impl TerminalPanel {
             wheel_lines: 0,
             focus_window: None,
             _focus_subscriptions: Vec::new(),
+            _settings: cx.observe_global::<Settings>(|_, cx| cx.notify()),
             _reader: None,
         };
         if let Some(history) = history.filter(|h| !h.trim().is_empty()) {
@@ -707,12 +722,7 @@ impl TerminalPanel {
 
     /// The last `max` lines of output as plain text, trailing blank lines dropped.
     fn scrollback(&self, max: usize) -> String {
-        let grid = self.term.grid();
-        let start = alacritty_terminal::index::Point::new(Line(-(grid.history_size() as i32)), Column(0));
-        let end = alacritty_terminal::index::Point::new(Line(self.lines as i32 - 1), Column(self.columns.saturating_sub(1)));
-        let text = self.term.bounds_to_string(start, end);
-        let lines: Vec<&str> = text.trim_end().lines().collect();
-        lines[lines.len().saturating_sub(max)..].join("\n")
+        tail_text(&self.term, self.lines, self.columns, max)
     }
 
     /// The folder the shell is in, as its prompt last reported.
@@ -910,5 +920,22 @@ impl Render for TerminalPanel {
                         .child("[process exited]"),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, GridSize, Listener, Processor, Term, tail_text};
+
+    #[test]
+    fn scrollback_keeps_the_last_lines() {
+        let config = Config { scrolling_history: 2000, ..Config::default() };
+        let mut term = Term::new(config, &GridSize { columns: 20, lines: 5 }, Listener::default());
+        let mut parser: Processor = Processor::new();
+        for i in 0..1000 {
+            parser.advance(&mut term, format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(tail_text(&term, 5, 20, 3), "line 997\nline 998\nline 999");
+        assert_eq!(tail_text(&term, 5, 20, 2000).lines().count(), 1000);
     }
 }

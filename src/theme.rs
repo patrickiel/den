@@ -51,13 +51,13 @@ pub fn apply(cx: &mut App) {
 /// hover); `apply` goes back to the chosen one.
 pub fn preview(choice: ThemeChoice, color_theme: &str, cx: &mut App) {
     let imported = (!color_theme.is_empty()).then(|| load(color_theme)).flatten();
-    let theme = match imported {
+    let theme = match &imported {
         Some(theme) => theme,
         None => builtin(choice == ThemeChoice::Dark),
     };
     let base = builtin(theme.dark);
-    crate::terminal::colors::set_palette(terminal_palette(&theme, &base));
-    let config = match serde_json::from_value::<ThemeConfig>(to_config(&theme, &base)) {
+    crate::terminal::colors::set_palette(terminal_palette(theme, base));
+    let config = match serde_json::from_value::<ThemeConfig>(to_config(theme, base)) {
         Ok(config) => Rc::new(config),
         Err(err) => {
             eprintln!("den: theme {}: {err}", theme.name);
@@ -480,10 +480,14 @@ fn terminal_palette(theme: &VsTheme, base: &VsTheme) -> crate::terminal::colors:
 // -- Built in ----------------------------------------------------------------
 
 /// den's Dark or Light (VS Code's Dark Modern and Light Modern, Dark+ and
-/// Light+ token colours).
-pub fn builtin(dark: bool) -> VsTheme {
-    let value = if dark { dark_theme() } else { light_theme() };
-    parse(&value.to_string(), if dark { "dark" } else { "light" }).expect("built-in themes parse")
+/// Light+ token colours), each built once.
+pub fn builtin(dark: bool) -> &'static VsTheme {
+    static BUILTIN: std::sync::LazyLock<[VsTheme; 2]> = std::sync::LazyLock::new(|| [make(false), make(true)]);
+    fn make(dark: bool) -> VsTheme {
+        let value = if dark { dark_theme() } else { light_theme() };
+        parse(&value.to_string(), if dark { "dark" } else { "light" }).expect("built-in themes parse")
+    }
+    &BUILTIN[dark as usize]
 }
 
 fn rule(scope: &str, foreground: &str) -> Value {
@@ -750,7 +754,7 @@ mod tests {
     fn built_in_themes_become_component_themes() {
         for dark in [true, false] {
             let theme = builtin(dark);
-            let config: gpui_kit::component::ThemeConfig = serde_json::from_value(to_config(&theme, &theme)).unwrap();
+            let config: gpui_kit::component::ThemeConfig = serde_json::from_value(to_config(theme, theme)).unwrap();
             assert!(config.highlight.is_some());
         }
     }

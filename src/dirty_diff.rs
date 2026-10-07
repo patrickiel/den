@@ -3,7 +3,7 @@
 //! index. Green for added lines, blue for changed ones, a red mark where
 //! lines were deleted.
 
-use std::path::Path;
+use std::{borrow::Cow, path::Path, time::Duration};
 
 use similar::{DiffOp, TextDiff};
 
@@ -21,14 +21,15 @@ pub enum Mark {
 /// per keystroke).
 const MAX_BYTES: usize = 2_000_000;
 
-/// The marked lines (from 0) of `current` against `base`.
+/// The marked lines (from 0) of `current` against `base`, which has LF line
+/// endings (as [`index_text`] gives it) where the buffer may have CRLF.
 pub fn marks(base: &str, current: &str) -> Vec<(usize, Mark)> {
     if base.len() > MAX_BYTES || current.len() > MAX_BYTES {
         return Vec::new();
     }
-    // The index has LF where the buffer may have CRLF (core.autocrlf).
-    let (base, current) = (base.replace("\r\n", "\n"), current.replace("\r\n", "\n"));
-    let diff = TextDiff::from_lines(&base, &current);
+    let current = if current.contains('\r') { Cow::Owned(current.replace("\r\n", "\n")) } else { Cow::Borrowed(current) };
+    // This runs on every keystroke: a rougher diff beats a long one.
+    let diff = TextDiff::configure().timeout(Duration::from_millis(200)).diff_lines(base, &*current);
     let mut out = Vec::new();
     for op in diff.ops() {
         match *op {
@@ -41,26 +42,14 @@ pub fn marks(base: &str, current: &str) -> Vec<(usize, Mark)> {
     out
 }
 
-/// The file's text in the git index, `None` when it is not in a repository
-/// or not tracked (an untracked file gets no marks, as in VS Code).
+/// The file's text in the git index, with LF line endings; `None` when it is
+/// not in a repository or not tracked (an untracked file gets no marks, as in
+/// VS Code).
 pub fn index_text(path: &Path) -> Option<String> {
-    let dir = path.parent()?;
-    let top = git::run(dir, &["rev-parse", "--show-toplevel"], None).ok().filter(|o| o.ok())?.stdout.trim().to_string();
-    let top = Path::new(&top);
-    let rel = path.strip_prefix(top).ok().or_else(|| {
-        // git prints forward slashes and the case it stores; compare loosely.
-        let key = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
-        let (full, base) = (key(path), key(top));
-        full.strip_prefix(&format!("{base}/")).map(|_| Path::new(""))
-    })?;
-    let rel = if rel.as_os_str().is_empty() {
-        let full = path.to_string_lossy().replace('\\', "/");
-        full[top.to_string_lossy().len() + 1..].to_string()
-    } else {
-        rel.to_string_lossy().replace('\\', "/")
-    };
-    let out = git::run(top, &["show", &format!(":{rel}")], None).ok().filter(|o| o.ok())?;
-    Some(out.stdout)
+    let (dir, name) = (path.parent()?, path.file_name()?.to_str()?);
+    // `:./name` names the index entry of the file in the current folder.
+    let text = git::show_in(dir, "", &format!("./{name}")).ok().flatten()?;
+    Some(text.replace("\r\n", "\n"))
 }
 
 #[cfg(test)]

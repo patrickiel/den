@@ -6,7 +6,11 @@
 //! arrangement saves as a `LayoutState`: per session on every change, and
 //! as a layout preset under a name.
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -37,7 +41,7 @@ use crate::{
     layout_view::{Drop, Dragged, DropHint, Zones},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
-    repo::Repo,
+    repo::{Refresh, Repo},
     extension_panel::ExtensionPanel,
     extensions_view::{ExtensionsEvent, ExtensionsView},
     scm::{ScmEvent, ScmView},
@@ -84,15 +88,25 @@ pub(crate) fn sync_jump_list(cx: &mut App) {
 
 /// Each folder by its name, with as many parents as it takes to tell it from
 /// the others: `root` first, then the recent folders other than it.
-fn recent_names(root: &PathBuf, cx: &App) -> (Vec<String>, Vec<PathBuf>) {
+fn recent_names(root: &std::path::Path, cx: &App) -> (Vec<String>, Vec<PathBuf>) {
     let recent: Vec<PathBuf> = AppState::get(cx)
         .recent
         .iter()
         .filter(|p| crate::repo::key(p) != crate::repo::key(root))
         .cloned()
         .collect();
-    let all: Vec<PathBuf> = std::iter::once(root.clone()).chain(recent.iter().cloned()).collect();
+    let all: Vec<PathBuf> = std::iter::once(root.to_path_buf()).chain(recent.iter().cloned()).collect();
     (crate::settings::unique_names(&all), recent)
+}
+
+/// `root`'s name for the title bar: with parents enough to tell it from the
+/// other recent folders, else the folder itself.
+fn session_name(root: &std::path::Path, cx: &App) -> String {
+    recent_names(root, cx)
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| root.file_name().map_or_else(|| root.display().to_string(), |name| name.to_string_lossy().to_string()))
 }
 
 /// The session switcher's menu, from the recent folders as they are now.
@@ -321,6 +335,9 @@ pub struct Workspace {
     _subscriptions: Vec<Subscription>,
     /// The active file as last told to the extensions.
     active_file: Option<PathBuf>,
+    /// The folder's name in the title bar (see [`session_name`]), kept up
+    /// with the recent folders.
+    session_name: String,
 }
 
 impl Workspace {
@@ -392,17 +409,26 @@ impl Workspace {
                 }
             }),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            // The recent folders decide how much of the path the title shows.
+            cx.observe_global::<AppState>(|this, cx| {
+                this.session_name = session_name(&this.root, cx);
+                cx.notify();
+            }),
+            // The title bar shows the extensions' buttons.
+            cx.observe_global::<crate::extensions::Extensions>(|_, cx| cx.notify()),
             // The Source Control button counts the changes.
             cx.observe(&repo, |_, _, cx| cx.notify()),
             cx.on_app_quit(|this, cx| {
                 crate::backend::ai::stop();
                 this.save_session(cx);
+                crate::settings::flush(cx);
                 async {}
             }),
         ];
 
         let tree = Tree::new();
         let active_group = tree.root.id();
+        let session_name = session_name(&root, cx);
         let mut this = Self {
             root,
             tree,
@@ -435,6 +461,7 @@ impl Workspace {
             layout_file_text: None,
             _subscriptions,
             active_file: None,
+            session_name,
         };
         this.start_watching(window, cx);
         // Once per run, a little after start: is there a newer den?
@@ -1209,7 +1236,7 @@ impl Workspace {
         }));
     }
 
-    fn on_disk_changed(&mut self, batch: std::collections::BTreeSet<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_disk_changed(&mut self, batch: BTreeSet<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let outside_git: Vec<PathBuf> = batch.iter().filter(|p| !watch::in_git_dir(p)).cloned().collect();
         if !outside_git.is_empty() {
             self.explorer.update(cx, |explorer, cx| explorer.paths_changed(&outside_git, cx));
@@ -1220,10 +1247,21 @@ impl Workspace {
                 }
             }
         }
-        if !outside_git.is_empty() || batch.iter().any(|p| watch::is_git_state(p)) {
-            self.repo.update(cx, |repo, cx| repo.refresh(cx));
-            self.reload_diffs(cx);
-        }
+        // What git keeps changed (a commit, a checkout, a fetch): the commits
+        // too, and everything when a remote may have. Files changed: the
+        // status, unless they are all ignored (a build writing its output).
+        let git_state: Vec<&PathBuf> = batch.iter().filter(|p| watch::is_git_state(p)).collect();
+        let level = if git_state.iter().any(|p| p.file_name().is_some_and(|name| name == "config")) {
+            Refresh::Reload
+        } else if !git_state.is_empty() {
+            Refresh::Full
+        } else if outside_git.is_empty() || outside_git.iter().all(|p| self.repo.read(cx).is_ignored(p)) {
+            return;
+        } else {
+            Refresh::Status
+        };
+        self.repo.update(cx, |repo, cx| repo.request(level, cx));
+        self.reload_diffs((level == Refresh::Status).then_some(&batch), cx);
     }
 
     /// The change to `path` (`rel` in the repository) side by side, in an
@@ -1232,10 +1270,7 @@ impl Workspace {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
         let existing = self.find_pane::<DiffPanel>(|diff| diff.path() == path && diff.staged() == staged && diff.commit().is_none(), cx);
         if let Some(diff) = existing.and_then(|pane| self.pane_as::<DiffPanel>(pane)) {
-            diff.update(cx, |diff, cx| {
-                diff.reload();
-                cx.notify();
-            });
+            diff.update(cx, |diff, cx| diff.reload(cx));
         }
         self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::new(path, top, rel, staged, cx)), window, cx);
     }
@@ -1248,17 +1283,24 @@ impl Workspace {
         self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)), window, cx);
     }
 
-    fn reload_diffs(&mut self, cx: &mut Context<Self>) {
-        // The index changed (a stage, a commit, a checkout): new gutter marks.
-        for (_, file) in self.panes_of::<FilePanel>() {
-            file.update(cx, |file, cx| file.refresh_git_base(cx));
+    /// After git's own state changed (`None`: a stage, a commit, a checkout),
+    /// every file's gutter marks and every working-tree diff read again;
+    /// after files changed, only the diff tabs of those files (an open file
+    /// reloads itself).
+    fn reload_diffs(&mut self, batch: Option<&BTreeSet<PathBuf>>, cx: &mut Context<Self>) {
+        if batch.is_none() {
+            for (_, file) in self.panes_of::<FilePanel>() {
+                file.update(cx, |file, cx| file.refresh_git_base(cx));
+            }
         }
+        let changed: Option<HashSet<String>> = batch.map(|batch| batch.iter().map(|p| crate::repo::key(p)).collect());
         for (_, diff) in self.panes_of::<DiffPanel>() {
-            if diff.read(cx).commit().is_none() {
-                diff.update(cx, |diff, cx| {
-                    diff.reload();
-                    cx.notify();
-                });
+            let wanted = {
+                let diff = diff.read(cx);
+                diff.commit().is_none() && changed.as_ref().is_none_or(|changed| changed.contains(&crate::repo::key(diff.path())))
+            };
+            if wanted {
+                diff.update(cx, |diff, cx| diff.reload(cx));
             }
         }
     }
@@ -1731,11 +1773,6 @@ impl Workspace {
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = AppState::get(cx).sidebar.clone();
-        let session_name = self
-            .root
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.root.display().to_string());
         let root_node = self.tree.root.id();
         let root_is_split = !self.tree.root.is_group();
         let this = cx.weak_entity();
@@ -1790,7 +1827,7 @@ impl Workspace {
                 div()
                     .flex_none()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.session_switcher(session_name, cx)),
+                    .child(self.session_switcher(cx)),
             )
             .child(
                 h_flex().flex_1().justify_end().px_2().child(
@@ -1835,7 +1872,7 @@ impl Workspace {
 
     fn extension_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(extensions) = cx.try_global::<crate::extensions::Extensions>() else { return Vec::new() };
-        let active_file = self.active_file(cx).map(|path| path.to_string_lossy().into_owned());
+        let active_file = self.active_file.as_ref().map(|path| path.to_string_lossy().into_owned());
         let mut elements = Vec::new();
         for set in extensions.buttons_for(&self.root) {
             for button in &set.buttons {
@@ -1944,9 +1981,8 @@ impl Workspace {
 
     /// The session name in the title bar, as den's: the folders opened before,
     /// and opening another.
-    fn session_switcher(&self, name: String, cx: &mut Context<Self>) -> impl IntoElement {
-        let (names, _) = recent_names(&self.root, cx);
-        let name = names.into_iter().next().unwrap_or(name);
+    fn session_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let name = self.session_name.clone();
         let this = cx.weak_entity();
         let root = self.root.clone();
         Button::new("session")

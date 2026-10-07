@@ -6,8 +6,9 @@
 use std::{
     cell::Cell,
     ops::Range,
-    rc::Rc,
     path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
 };
 
 use gpui_kit::assets::IconName;
@@ -75,7 +76,8 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
     // git keeps LF where the working copy has CRLF (core.autocrlf): compare
     // the lines, not their endings.
     let (old, new) = (old.replace("\r\n", "\n"), new.replace("\r\n", "\n"));
-    let diff = TextDiff::from_lines(&old, &new);
+    // A huge change gets a rougher diff rather than a long wait.
+    let diff = TextDiff::configure().timeout(Duration::from_millis(500)).diff_lines(&old, &new);
     let mut out = Vec::new();
     let mut removed: Vec<(usize, String)> = Vec::new();
     let mut added: Vec<(usize, String)> = Vec::new();
@@ -114,6 +116,29 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
     out
 }
 
+/// Both sides' text: a commit's parent and the commit, HEAD and the index
+/// (staged), or the index and the file. A side with no such file is empty
+/// (added, deleted); one git cannot read is the error shown instead.
+fn load_sides(top: &Path, rel: &str, path: &Path, staged: bool, commit: Option<&CommitRevs>) -> Result<(String, String), String> {
+    let side = |rev: &str, rel: &str| git::show_in(top, rev, rel).map(Option::unwrap_or_default).map_err(|e| e.to_string());
+    if let Some(commit) = commit {
+        let old = match &commit.parent {
+            Some(parent) => side(parent, &commit.old_rel)?,
+            None => String::new(),
+        };
+        return Ok((old, side(&commit.hash, rel)?));
+    }
+    if staged {
+        return Ok((side("HEAD", rel)?, side("", rel)?));
+    }
+    let new = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    Ok((side("", rel)?, new))
+}
+
 /// What a commit diff compares.
 #[derive(Clone, Debug)]
 pub struct CommitRevs {
@@ -150,16 +175,29 @@ pub struct DiffPanel {
     /// While a side's scrollbar thumb is dragged: the side, and how far
     /// right of the thumb's left edge it is held.
     h_grab: Option<(usize, Pixels)>,
+    /// Counts the reloads, so a slow one cannot overwrite a later one.
+    generation: u64,
+    _reload: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl DiffPanel {
     pub fn new(path: PathBuf, top: PathBuf, rel: String, staged: bool, cx: &mut Context<Self>) -> Self {
+        Self::build(path, top, rel, staged, None, cx)
+    }
+
+    /// A commit's change to one file.
+    pub fn for_commit(path: PathBuf, top: PathBuf, rel: String, commit: CommitRevs, cx: &mut Context<Self>) -> Self {
+        Self::build(path, top, rel, false, Some(commit), cx)
+    }
+
+    fn build(path: PathBuf, top: PathBuf, rel: String, staged: bool, commit: Option<CommitRevs>, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             path,
             top,
             rel,
             staged,
-            commit: None,
+            commit,
             rows: Vec::new(),
             error: None,
             focus_handle: cx.focus_handle(),
@@ -170,16 +208,11 @@ impl DiffPanel {
             char_width: px(8.),
             list_bounds: Default::default(),
             h_grab: None,
+            generation: 0,
+            _reload: None,
+            _subscriptions: vec![cx.observe_global::<Settings>(|_, cx| cx.notify())],
         };
-        this.reload();
-        this
-    }
-
-    /// A commit's change to one file.
-    pub fn for_commit(path: PathBuf, top: PathBuf, rel: String, commit: CommitRevs, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::new(path, top, rel, false, cx);
-        this.commit = Some(commit);
-        this.reload();
+        this.reload(cx);
         this
     }
 
@@ -195,24 +228,41 @@ impl DiffPanel {
         self.staged
     }
 
-    /// Read both sides again (after the file or the index changed).
-    pub fn reload(&mut self) {
-        let side = |rev: &str| git::show(&self.top, rev, &self.rel).unwrap_or_default();
-        let (old, new) = if let Some(commit) = &self.commit {
-            let old = commit.parent.as_deref().map(|p| git::show(&self.top, p, &commit.old_rel).unwrap_or_default()).unwrap_or_default();
-            (old, side(&commit.hash))
-        } else if self.staged {
-            (side("HEAD"), side(""))
-        } else {
-            (side(""), std::fs::read_to_string(&self.path).unwrap_or_default())
-        };
-        self.error = None;
-        self.rows = rows(&old, &new);
-        let width = |line: &Option<(usize, String)>| line.as_ref().map_or(0, |(_, t)| t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum());
-        self.widest = [
-            self.rows.iter().map(|r| width(&r.left)).max().unwrap_or(0),
-            self.rows.iter().map(|r| width(&r.right)).max().unwrap_or(0),
-        ];
+    /// Read both sides again (after the file or the index changed), off the
+    /// UI thread; a reload asked for later wins over one still running.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        let (top, rel, path, staged, commit) = (self.top.clone(), self.rel.clone(), self.path.clone(), self.staged, self.commit.clone());
+        self._reload = Some(cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_spawn(async move {
+                    let (old, new) = load_sides(&top, &rel, &path, staged, commit.as_ref())?;
+                    let rows = rows(&old, &new);
+                    let width = |line: &Option<(usize, String)>| line.as_ref().map_or(0, |(_, t)| t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum());
+                    let widest = [rows.iter().map(|r| width(&r.left)).max().unwrap_or(0), rows.iter().map(|r| width(&r.right)).max().unwrap_or(0)];
+                    Ok::<_, String>((rows, widest))
+                })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match loaded {
+                    Ok((rows, widest)) => {
+                        this.error = None;
+                        this.rows = rows;
+                        this.widest = widest;
+                    }
+                    Err(err) => {
+                        this.error = Some(err.into());
+                        this.rows = Vec::new();
+                        this.widest = [0; 2];
+                    }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     /// How far `side` can scroll across: its longest line past the room

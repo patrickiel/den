@@ -81,14 +81,21 @@ fn icon_key(listing: &Listing) -> String {
 /// Fetch the icons of these listings that aren't kept yet, a few at a time.
 /// Called for the cards being drawn, so a long index costs only what is seen.
 pub fn want_icons(listings: Vec<Listing>, cx: &mut App) {
+    // Each icon is looked at once a session. This runs as the cards draw, so
+    // the global is only touched (which wakes the views) for new ones.
+    let asked = &cx.global::<Extensions>().icons_asked;
+    let new: Vec<Listing> = listings.into_iter().filter(|listing| !asked.contains(&icon_key(listing))).collect();
+    if new.is_empty() {
+        return;
+    }
     let extensions = cx.global_mut::<Extensions>();
-    for listing in listings {
-        // Each icon is looked at once a session; this runs as cards draw.
-        if !extensions.icons_asked.insert(icon_key(&listing)) {
-            continue;
-        }
-        if backend::icon_path(&listing).is_some_and(|path| !path.is_file()) {
-            extensions.icon_queue.push_back(listing);
+    for listing in new {
+        let key = icon_key(&listing);
+        extensions.icons_asked.insert(key.clone());
+        match backend::icon_path(&listing) {
+            Some(path) if !path.is_file() => extensions.icon_queue.push_back(listing),
+            Some(_) => _ = extensions.icons_ready.insert(key),
+            None => {}
         }
     }
     let start = ICON_FETCHES.saturating_sub(extensions.icon_fetches).min(extensions.icon_queue.len());
@@ -97,9 +104,11 @@ pub fn want_icons(listings: Vec<Listing>, cx: &mut App) {
         cx.spawn(async move |cx| {
             // Each runner takes icons off the queue until it is empty.
             while let Some(listing) = cx.update(|cx| cx.global_mut::<Extensions>().icon_queue.pop_front()) {
+                let key = icon_key(&listing);
                 let fetched = cx.background_spawn(async move { backend::fetch_icon(&listing) }).await;
                 if fetched.is_ok() {
-                    cx.update(|cx| cx.refresh_windows());
+                    // Into the global, which wakes the views.
+                    cx.update(|cx| _ = cx.global_mut::<Extensions>().icons_ready.insert(key));
                 }
             }
             cx.update(|cx| cx.global_mut::<Extensions>().icon_fetches -= 1);
@@ -124,6 +133,8 @@ pub struct Extensions {
     /// Icons already looked at this session, by [`icon_key`]: kept, queued,
     /// fetched or failed (a failed one is tried again at the next start).
     icons_asked: std::collections::HashSet<String>,
+    /// Icons on disk, by [`icon_key`]: the cards show these.
+    icons_ready: std::collections::HashSet<String>,
     /// Icon fetches running, at most [`ICON_FETCHES`].
     icon_fetches: usize,
     running: Vec<(String, mpsc::Sender<Message>)>,
@@ -159,6 +170,11 @@ impl Extensions {
 
     pub fn entry(&self, id: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// The listing's icon is on disk (see [`want_icons`]).
+    pub fn icon_ready(&self, listing: &Listing) -> bool {
+        self.icons_ready.contains(&icon_key(listing))
     }
 
     fn entry_mut(&mut self, id: &str) -> Option<&mut Entry> {
@@ -253,7 +269,6 @@ fn on_report(report: Report, cx: &mut App) {
             if !buttons.is_empty() {
                 extensions.buttons.push(Buttons { id, root, buttons });
             }
-            cx.refresh_windows();
             return;
         }
         Report::Run { root, command, cwd } => return run_in_terminal(Path::new(&root), command, cwd.map(PathBuf::from), cx),
@@ -263,7 +278,6 @@ fn on_report(report: Report, cx: &mut App) {
         }
         Report::SetView { id, root, view, content } => {
             cx.global_mut::<Extensions>().view_mut(&id, Path::new(&root), &view).merge(*content);
-            cx.refresh_windows();
             return;
         }
         Report::Prompt { id, root, prompt } => {
@@ -283,7 +297,6 @@ fn on_report(report: Report, cx: &mut App) {
     if let Some(message) = toast {
         show_toast(name, message, cx);
     }
-    cx.refresh_windows();
 }
 
 fn show_toast(title: String, message: String, cx: &mut App) {
@@ -305,12 +318,10 @@ pub fn refresh_index(force: bool, cx: &mut App) {
         extensions.available = listings;
         if age < INDEX_MAX_AGE && !force {
             extensions.index_current = true;
-            cx.refresh_windows();
             return;
         }
     }
     extensions.index = IndexState::Loading;
-    cx.refresh_windows();
     cx.spawn(async move |cx| {
         let result = cx
             .background_spawn(async {
@@ -328,7 +339,6 @@ pub fn refresh_index(force: bool, cx: &mut App) {
                 }
                 Err(err) => extensions.index = IndexState::Failed(err),
             }
-            cx.refresh_windows();
         });
     })
     .detach();
@@ -521,7 +531,6 @@ pub fn installed(manifest: Manifest, cx: &mut App) {
             change: Some(change),
         }),
     }
-    cx.refresh_windows();
 }
 
 /// Whether a button's `file_pattern` matches `path`; one that doesn't compile

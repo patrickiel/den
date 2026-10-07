@@ -71,7 +71,7 @@ impl ExtensionView {
             searches: Vec::new(),
             scrolled_to: None,
             menu_target: Rc::default(),
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![cx.observe_global::<Extensions>(|_, cx| cx.notify()), cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify())],
         }
     }
 

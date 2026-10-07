@@ -482,7 +482,7 @@ impl ScmView {
                             .child(action("fetch", IconName::RefreshCcw, "Fetch", |r, cx| r.fetch(cx), cx))
                             .child(action("pull", IconName::ArrowDown, "Pull", |r, cx| r.pull(cx), cx))
                             .child(action("push", IconName::ArrowUp, push_tooltip, |r, cx| r.push(cx), cx))
-                            .child(action("refresh", IconName::RotateCw, "Refresh", |r, cx| r.refresh(cx), cx))
+                            .child(action("refresh", IconName::RotateCw, "Refresh", |r, cx| r.reload(cx), cx))
                             .child({
                                 let weak = cx.weak_entity();
                                 Button::new("scm-more")
@@ -788,14 +788,20 @@ impl ScmView {
             return cx.notify();
         }
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let parent = self.commit_by_hash(&hash, cx).and_then(|c| c.parents.first().cloned());
         self.expanded.insert(hash.clone(), None);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let key = hash.clone();
-            let files = cx.background_spawn(async move { git::commit_files(&top, &hash) }).await;
+            let files = cx
+                .background_spawn({
+                    let parent = parent.clone();
+                    async move { git::commit_files(&top, &hash, parent.as_deref()) }
+                })
+                .await;
             _ = this.update(cx, |this, cx| {
                 if let Some(slot) = this.expanded.get_mut(&key) {
-                    *slot = Some(files.unwrap_or_default());
+                    *slot = Some((parent, files.unwrap_or_default()));
                 }
                 cx.notify();
             });
@@ -811,8 +817,9 @@ impl ScmView {
         if !self.stats.contains_key(&commit.hash) {
             self.stats.insert(commit.hash.clone(), None);
             let (key, hash, top) = (commit.hash.clone(), commit.hash.clone(), top.clone());
+            let parent = commit.parents.first().cloned();
             cx.spawn(async move |this, cx| {
-                let stat = cx.background_spawn(async move { git::commit_stat(&top, &hash) }).await;
+                let stat = cx.background_spawn(async move { git::commit_stat(&top, &hash, parent.as_deref()) }).await;
                 _ = this.update(cx, |this, cx| {
                     match stat {
                         Ok(stat) => _ = this.stats.insert(key, Some(stat)),

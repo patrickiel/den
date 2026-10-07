@@ -57,7 +57,7 @@ impl ExtensionsView {
                 cx.notify();
             }
             _ => {}
-        })];
+        }), cx.observe_global::<Extensions>(|_, cx| cx.notify())];
         Self { query, selected: None, index_requested: false, available_limit: AVAILABLE_PAGE, _subscriptions }
     }
 
@@ -114,7 +114,7 @@ fn letter(id: &str, name: &str, size: f32) -> AnyElement {
 
 /// The image at `path`, else the letter.
 fn icon_or_letter(path: Option<PathBuf>, id: &str, name: &str, size: f32) -> AnyElement {
-    match path.filter(|path| path.is_file()) {
+    match path {
         Some(path) => {
             let (id, name) = (id.to_string(), name.to_string());
             img(path)
@@ -131,13 +131,14 @@ fn icon_or_letter(path: Option<PathBuf>, id: &str, name: &str, size: f32) -> Any
 
 /// An installed extension's icon, else its letter.
 pub(crate) fn avatar(entry: &Entry, size: f32) -> AnyElement {
-    let path = entry.manifest.as_ref().filter(|m| !m.icon.is_empty()).map(|m| entry.dir.join(&m.icon));
+    let path = entry.manifest.as_ref().filter(|m| !m.icon.is_empty()).map(|m| entry.dir.join(&m.icon)).filter(|path| path.is_file());
     icon_or_letter(path, &entry.id, entry.name(), size)
 }
 
-/// A listed extension's icon, as fetched with the index, else its letter.
-pub(crate) fn listing_avatar(listing: &Listing, size: f32) -> AnyElement {
-    icon_or_letter(crate::backend::extensions::icon_path(listing), &listing.id, &listing.name, size)
+/// A listed extension's icon once fetched with the index, else its letter.
+pub(crate) fn listing_avatar(listing: &Listing, size: f32, cx: &App) -> AnyElement {
+    let path = crate::backend::extensions::icon_path(listing).filter(|_| Extensions::get(cx).icon_ready(listing));
+    icon_or_letter(path, &listing.id, &listing.name, size)
 }
 
 /// The dot and words for how `entry` runs, then what the next start changes.
@@ -317,7 +318,7 @@ fn available_card(listing: &Listing, selected: bool, on_click: impl Fn(&ClickEve
         .child(action);
     let face = Face {
         id: listing.id.clone(),
-        icon: listing_avatar(listing, 36.),
+        icon: listing_avatar(listing, 36., cx),
         name: listing.name.clone(),
         version: listing.version.clone(),
         description: listing.description.clone(),

@@ -56,8 +56,9 @@ pub async fn next_batch(rx: &mut UnboundedReceiver<PathBuf>, quiet: Duration, ti
     }
 }
 
-/// Changes git makes inside `.git` that matter (the index, HEAD, refs), as
-/// opposed to the objects and logs it churns through.
+/// Changes git makes inside `.git` that matter (the index, HEAD, refs, the
+/// config with its remotes), as opposed to the objects and logs it churns
+/// through.
 pub fn is_git_state(path: &Path) -> bool {
     let mut components = path.components().map(|c| c.as_os_str().to_string_lossy().to_string());
     if !components.any(|c| c == ".git") {
@@ -65,7 +66,7 @@ pub fn is_git_state(path: &Path) -> bool {
     }
     let rest: Vec<String> = components.collect();
     match rest.first().map(String::as_str) {
-        Some("index" | "HEAD" | "MERGE_HEAD" | "FETCH_HEAD" | "ORIG_HEAD") => true,
+        Some("index" | "HEAD" | "MERGE_HEAD" | "FETCH_HEAD" | "ORIG_HEAD" | "config") => true,
         Some("refs") => true,
         _ => false,
     }
@@ -85,6 +86,7 @@ mod tests {
         assert!(is_git_state(Path::new("/r/.git/index")));
         assert!(is_git_state(Path::new("/r/.git/HEAD")));
         assert!(is_git_state(Path::new("/r/.git/refs/heads/main")));
+        assert!(is_git_state(Path::new("/r/.git/config")));
         assert!(!is_git_state(Path::new("/r/.git/objects/ab/cdef")));
         assert!(!is_git_state(Path::new("/r/src/main.rs")));
         assert!(in_git_dir(Path::new("/r/.git/objects/ab")));

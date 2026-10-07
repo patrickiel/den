@@ -8,6 +8,11 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use gpui_kit::*;
@@ -237,13 +242,16 @@ impl Settings {
         cx.global::<Self>()
     }
 
-    /// Change a setting, apply it and save the file. Observers of the global
-    /// (open editors, the workspace) pick the change up.
+    /// Change a setting: the theme follows when that is what changed, the
+    /// file is written a moment later, and observers of the global (the
+    /// panes, the workspace) pick the change up.
     pub fn update(cx: &mut App, f: impl FnOnce(&mut Self)) {
+        let (theme, color_theme) = (Self::get(cx).theme, Self::get(cx).color_theme.clone());
         f(cx.global_mut::<Self>());
-        apply_theme(cx);
-        write_json("settings.json", Self::get(cx));
-        cx.refresh_windows();
+        if Self::get(cx).theme != theme || Self::get(cx).color_theme != color_theme {
+            apply_theme(cx);
+        }
+        write_later(File::Settings, cx);
     }
 }
 
@@ -315,7 +323,7 @@ impl AppState {
 
     pub fn update<R>(cx: &mut App, f: impl FnOnce(&mut Self) -> R) -> R {
         let result = f(cx.global_mut::<Self>());
-        write_json("state.json", Self::get(cx));
+        write_later(File::State, cx);
         result
     }
 
@@ -341,6 +349,13 @@ pub fn init(cx: &mut App) {
     import_old_den(&mut settings);
     cx.set_global::<Settings>(settings);
     cx.set_global::<AppState>(read_json("state.json").unwrap_or_default());
+    cx.set_global(Pending::default());
+    // A write still waiting would be cut off with the app.
+    cx.on_app_quit(|cx| {
+        flush(cx);
+        async {}
+    })
+    .detach();
     apply_theme(cx);
 }
 
@@ -413,12 +428,101 @@ fn read_json<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
-fn write_json<T: Serialize>(name: &str, value: &T) {
-    let dir = data_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(json) = serde_json::to_string_pretty(value) {
-        let _ = std::fs::write(dir.join(name), json);
+/// den's two files under [`data_dir`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum File {
+    Settings,
+    State,
+}
+
+impl File {
+    fn name(self) -> &'static str {
+        match self {
+            File::Settings => "settings.json",
+            File::State => "state.json",
+        }
     }
+
+    /// The file's content, from the global it holds.
+    fn text(self, cx: &App) -> String {
+        match self {
+            File::Settings => pretty(Settings::get(cx)),
+            File::State => pretty(AppState::get(cx)),
+        }
+    }
+}
+
+fn pretty<T: Serialize>(value: &T) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default()
+}
+
+/// The writes waiting for a quiet moment, one per file.
+#[derive(Default)]
+struct Pending {
+    settings: Option<Task<()>>,
+    state: Option<Task<()>>,
+}
+
+impl Global for Pending {}
+
+/// Write `file` half a second after the last change to it (each change
+/// starts the wait over), off the UI thread.
+fn write_later(file: File, cx: &mut App) {
+    let task = cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_millis(500)).await;
+        let text = cx.update(|cx| file.text(cx));
+        cx.background_spawn(async move { write_file(file, &text) }).await;
+    });
+    let pending = cx.default_global::<Pending>();
+    match file {
+        File::Settings => pending.settings = Some(task),
+        File::State => pending.state = Some(task),
+    }
+}
+
+/// Write what waits, now (on quit, where a wait would be cut off).
+pub fn flush(cx: &mut App) {
+    *cx.default_global::<Pending>() = Pending::default();
+    for file in [File::Settings, File::State] {
+        write_file(file, &file.text(cx));
+    }
+}
+
+fn write_json<T: Serialize>(file: File, value: &T) {
+    write_file(file, &pretty(value));
+}
+
+/// Write `text` to `file` unless that is what it holds already. The first
+/// failure is reported; den runs on without the file.
+fn write_file(file: File, text: &str) {
+    static WRITTEN: Mutex<[u64; 2]> = Mutex::new([0; 2]);
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let hash = hasher.finish();
+    let Ok(mut written) = WRITTEN.lock() else { return };
+    if written[file as usize] == hash {
+        return;
+    }
+    match write_text(&data_dir().join(file.name()), text) {
+        Ok(()) => written[file as usize] = hash,
+        Err(err) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!("den: could not write {}: {err}", file.name());
+            }
+        }
+    }
+}
+
+/// Write `text` through a temporary file beside `path`, so a crash never
+/// leaves it half written.
+fn write_text(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The editor and terminal font: the one set in Settings, else the theme's.
@@ -460,7 +564,7 @@ fn import_old_den(settings: &mut Settings) {
     settings.imported_den_buttons = true;
     settings.imported_den_icons = true;
     settings.imported_den_browsers = true;
-    write_json("settings.json", settings);
+    write_json(File::Settings, settings);
 }
 
 /// The Tauri den's settings file, if it is there.
@@ -570,8 +674,19 @@ fn import_den(settings: &mut Settings, den: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_names;
+    use super::{unique_names, write_text};
     use std::path::PathBuf;
+
+    #[test]
+    fn writes_through_a_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("den-write-test-{}", std::process::id()));
+        let path = dir.join("state.json");
+        write_text(&path, "one").unwrap();
+        write_text(&path, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn names(paths: &[&str]) -> Vec<String> {
         unique_names(&paths.iter().map(PathBuf::from).collect::<Vec<_>>())

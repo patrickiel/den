@@ -92,6 +92,8 @@ impl ExtensionPanel {
             }));
         }
         let tab = if matches!(readme, Readme::Missing(_)) && !settings.is_empty() { Tab::Settings } else { Tab::Details };
+        _subscriptions.push(cx.observe_global::<Extensions>(|_, cx| cx.notify()));
+        _subscriptions.push(cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()));
         Self { id, listing: None, focus_handle: cx.focus_handle(), tab, readme, inputs, _subscriptions }
     }
 
@@ -121,7 +123,7 @@ impl ExtensionPanel {
             tab: Tab::Details,
             readme,
             inputs: Vec::new(),
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![cx.observe_global::<Extensions>(|_, cx| cx.notify())],
         }
     }
 
@@ -175,7 +177,7 @@ impl ExtensionPanel {
             .pb_4()
             .gap_5()
             .items_start()
-            .child(listing_avatar(listing, 88.))
+            .child(listing_avatar(listing, 88., cx))
             .child(
                 v_flex()
                     .flex_1()

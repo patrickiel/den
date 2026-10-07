@@ -14,7 +14,7 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState, Input, InputEvent, InputState, Position, TabSize},
+    input::{Editor, EditorState, Input, InputEvent, InputState, Position, RopeExt as _, TabSize},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     switch::Switch,
@@ -95,6 +95,8 @@ pub struct FilePanel {
     encoding: String,
     /// Tabs or spaces, and the width: detected, or picked in the status bar.
     indent: (bool, usize),
+    /// The buffer has Windows line endings (the status bar says which).
+    crlf: bool,
     /// The highlighter's language.
     language: String,
     /// The file in the git index, for the gutter marks; `None` outside git.
@@ -112,12 +114,16 @@ pub struct FilePanel {
 impl FilePanel {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let look = Look::of(&path);
-        let (text, encoding, error) = match crate::encoding::read(&path, None) {
-            _ if look == Look::Image => (String::new(), "utf8".to_string(), (!path.is_file()).then(|| SharedString::from("The file is gone"))),
-            Ok((text, encoding)) => (text, encoding, None),
-            Err(err) => (String::new(), "utf8".to_string(), Some(SharedString::from(err))),
+        let (text, encoding, error) = if look == Look::Image {
+            (String::new(), "utf8".to_string(), (!path.is_file()).then(|| SharedString::from("The file is gone")))
+        } else {
+            match crate::encoding::read(&path, None) {
+                Ok((text, encoding)) => (text, encoding, None),
+                Err(err) => (String::new(), "utf8".to_string(), Some(SharedString::from(err))),
+            }
         };
         let indent = crate::encoding::detect_indent(&text).unwrap_or((false, 4));
+        let crlf = text.contains("\r\n");
         let state = crate::settings::AppState::get(cx);
         let preview = match look {
             Look::Markdown => state.preview_markdown,
@@ -143,8 +149,10 @@ impl FilePanel {
         let _subscriptions = vec![
             cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.update_marks(cx);
-                    let dirty = editor.read(cx).value() != this.saved;
+                    let text = editor.read(cx).value();
+                    this.crlf = text.contains("\r\n");
+                    this.update_marks(&text, cx);
+                    let dirty = text != this.saved;
                     if dirty != this.dirty {
                         this.dirty = dirty;
                         cx.emit(PaneEvent::Changed);
@@ -171,6 +179,7 @@ impl FilePanel {
             svg: None,
             encoding,
             indent,
+            crlf,
             language,
             git_base: None,
             marks: Vec::new(),
@@ -198,16 +207,18 @@ impl FilePanel {
             _ = this.update(cx, |this, cx| {
                 if this.git_base != base {
                     this.git_base = base;
-                    this.update_marks(cx);
+                    let text = this.editor.read(cx).value();
+                    this.update_marks(&text, cx);
                 }
             });
         })
         .detach();
     }
 
-    fn update_marks(&mut self, cx: &mut Context<Self>) {
+    /// Mark the lines of `text` (the buffer) that differ from the index.
+    fn update_marks(&mut self, text: &str, cx: &mut Context<Self>) {
         let marks = match &self.git_base {
-            Some(base) => crate::dirty_diff::marks(base, &self.editor.read(cx).value()),
+            Some(base) => crate::dirty_diff::marks(base, text),
             None => Vec::new(),
         };
         if marks != self.marks {
@@ -242,11 +253,15 @@ impl FilePanel {
             return;
         }
         self.saved = text.clone().into();
+        self.crlf = text.contains("\r\n");
         self.editor.update(cx, |editor, cx| {
             let position = editor.cursor_position();
             editor.set_value(text, window, cx);
             editor.set_cursor_position(position, window, cx);
         });
+        // Setting the value is no edit, so the marks are not told of it.
+        let text = self.saved.clone();
+        self.update_marks(&text, cx);
         cx.notify();
     }
 
@@ -255,7 +270,7 @@ impl FilePanel {
             return;
         }
         // Format on save, when the file has a formatter; saved either way.
-        if Settings::get(cx).format_on_save && crate::backend::format::tool_for(&self.path).is_ok() {
+        if Settings::get(cx).format_on_save {
             return self.format(true, window, cx);
         }
         self.write(window, cx);
@@ -521,7 +536,7 @@ impl FilePanel {
     /// Ask for `line` or `line:column` and go there.
     fn prompt_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
-        let lines = self.editor.read(cx).value().lines().count().max(1);
+        let lines = self.editor.read(cx).text().lines_len().max(1);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Line (1–{lines}), or line:column")));
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, {
@@ -565,8 +580,10 @@ impl FilePanel {
             Ok((text, encoding)) => {
                 self.encoding = encoding;
                 self.saved = text.clone().into();
+                self.crlf = text.contains("\r\n");
                 self.editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
-                self.update_marks(cx);
+                let text = self.saved.clone();
+                self.update_marks(&text, cx);
             }
             Err(err) => crate::toast::push(window, format!("Could not reopen: {err}"), cx),
         }
@@ -597,6 +614,7 @@ impl FilePanel {
                 editor.set_cursor_position(position, window, cx);
             });
         }
+        self.crlf = crlf;
     }
 
     /// The bar under the file, as den's: cursor position (Go to Line),
@@ -606,7 +624,7 @@ impl FilePanel {
         let theme = cx.theme().clone();
         let editor = self.editor.read(cx);
         let position = editor.cursor_position();
-        let crlf = editor.value().contains("\r\n");
+        let crlf = self.crlf;
         let language = LANGUAGES.iter().find(|(id, _)| *id == self.language).map_or_else(
             || {
                 let mut chars = self.language.chars();
@@ -764,7 +782,7 @@ impl FilePanel {
         }
         let theme = cx.theme();
         let colors = (theme.green, theme.blue, theme.red);
-        let lines = self.editor.read(cx).value().lines().count().max(1);
+        let lines = self.editor.read(cx).text().lines_len().max(1);
         let marks = self.marks.clone();
         let bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> = Default::default();
         let seek = {
@@ -969,6 +987,8 @@ impl SettingsPanel {
                     Settings::update(cx, |s| s.shell = value);
                 }
             }),
+            // The dialog shows what it changes.
+            cx.observe_global::<Settings>(|_, cx| cx.notify()),
         ];
         Self {
             focus_handle: cx.focus_handle(),
