@@ -30,6 +30,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+    scroll::{Scrollbar, ScrollbarMode, ScrollbarThumbStyle},
     tab::{Tab, TabBar},
     v_flex,
 };
@@ -450,22 +451,29 @@ impl Workspace {
 
         let theme = cx.theme();
         let current = self.defaults.own(id, true);
-        // The same tray whether or not the container is a default: its
-        // default button says so.
-        let tray = theme.muted_foreground.opacity(0.10);
+        // A frame around its groups, not another surface: a faint line and
+        // barely a tint, so nesting shows as nested frames.
+        let frame = theme.muted_foreground.opacity(0.20);
+        let tray = theme.muted_foreground.opacity(0.04);
         let hint = self.zone_overlay(id);
+        let hover_group = SharedString::from(format!("container-header-{id}"));
 
         v_flex()
             .id(("container", id))
             .relative()
             .size_full()
             .rounded(px(6.))
+            .border_1()
+            .border_color(frame)
             .bg(tray)
             .px(px(GUTTER))
             .pb(px(GUTTER))
             .child(
                 h_flex()
                     .id(("container-header", id))
+                    // The header only: hovering a group inside must not
+                    // reveal the container's actions.
+                    .group(hover_group.clone())
                     .relative()
                     .flex_none()
                     .h(px(HEADER))
@@ -489,11 +497,23 @@ impl Workspace {
                             .cursor_grab()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into()))),
+                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into())))
+                            .child(Icon::new(IconName::GripHorizontal).xsmall())
+                            .when_some(current, |this, kind| this.child(div().truncate().child(kind.label()))),
                     )
-                    .child(self.default_button(id, true, current, false, cx))
-                    .children(self.container_actions(id, "container", true, cx))
-                    .child(self.container_menu(id, cx))
+                    // The kind badge is state, so it stays; with no kind the
+                    // default button is just another action and hides with
+                    // the rest until the header is hovered.
+                    .when(current.is_some(), |this| this.child(self.default_button(id, true, current, false, cx)))
+                    .child(
+                        h_flex()
+                            .gap_0p5()
+                            .invisible()
+                            .group_hover(hover_group, |this| this.visible())
+                            .when(current.is_none(), |this| this.child(self.default_button(id, true, current, false, cx)))
+                            .children(self.container_actions(id, "container", true, cx))
+                            .child(self.container_menu(id, cx)),
+                    )
                     .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Header(id))),
             )
             .child(div().flex_1().min_h_0().child(body))
@@ -649,7 +669,19 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_tab_strip(&self, group: NodeId, tabs: &[PaneId], active: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab_strip(&self, group: NodeId, tabs: &[PaneId], active: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The strip's scroll, and the tab it last showed: a tab that becomes
+        // the active one is scrolled into view, as in VS Code.
+        let scroll = window.use_keyed_state(("tab-strip-scroll", group), cx, |_, _| (ScrollHandle::new(), None::<PaneId>));
+        let (handle, shown) = scroll.read(cx).clone();
+        let active_pane = tabs.get(active).copied();
+        if active_pane != shown {
+            if active_pane.is_some() {
+                handle.scroll_to_item(active);
+            }
+            scroll.update(cx, |state, _| state.1 = active_pane);
+        }
+
         let theme = cx.theme();
         let close_buttons = Settings::get(cx).tab_close_button;
         let buttons = Settings::get(cx).group_buttons;
@@ -798,6 +830,7 @@ impl Workspace {
             // A tab's height (gpui-kit's default size), so an empty group's
             // strip does not grow when its first tab opens.
             .min_h(px(32.))
+            .track_scroll(&handle)
             .children(tab_elements)
             .last_empty_space(
                 div()
@@ -838,7 +871,40 @@ impl Workspace {
             .cursor_grab()
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.tab_menu = None))
             .on_drag(GroupDrag { node: group }, |_, _, _, cx| cx.new(|_| DragLabel("Group".into())))
+            // The wheel scrolls the tabs sideways, as in VS Code (the strip
+            // itself only takes horizontal deltas).
+            .on_scroll_wheel({
+                let handle = handle.clone();
+                cx.listener(move |_, event: &ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    if delta.y.abs() <= delta.x.abs() {
+                        return;
+                    }
+                    let max = handle.max_offset().x;
+                    let offset = handle.offset();
+                    let x = (offset.x + delta.y).clamp(-max, px(0.));
+                    if x != offset.x {
+                        handle.set_offset(point(x, offset.y));
+                        cx.notify();
+                    }
+                })
+            })
             .child(strip)
+            // A thin bar flush with the strip's bottom, as VS Code's.
+            .child(
+                Scrollbar::horizontal(&handle)
+                    .id(("tab-strip-scrollbar", group))
+                    .mode(ScrollbarMode::Hover)
+                    .styles(|styles| {
+                        let thin = |thumb: ScrollbarThumbStyle| thumb.width(px(3.)).inset(px(0.)).radius(px(0.));
+                        // No track: it would cover the bottom of the tabs.
+                        styles
+                            .track(|track| track.width(px(3.)).bg(transparent_black()))
+                            .thumb(thin)
+                            .thumb_hover(thin)
+                            .thumb_active(thin)
+                    }),
+            )
             .child(zone_marker(&self.zones, float, Zone::Strip(group)))
             .context_menu(move |menu, _, cx| {
                 let Some(workspace) = this.upgrade() else { return menu };
