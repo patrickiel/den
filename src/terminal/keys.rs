@@ -2,7 +2,8 @@
 
 use gpui_kit::Keystroke;
 
-/// The bytes a terminal sends for a key, or `None` to leave it to the app.
+/// The bytes a terminal sends for a key, or `None` to leave it to the app
+/// (or, for typed text, to the terminal's input handler).
 pub fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     let key = keystroke.key.as_str();
@@ -70,20 +71,14 @@ pub fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
             };
             vec![code]
         }
+        // Typed text (AltGr included, which arrives as Ctrl+Alt on Windows)
+        // comes as characters to the input handler, with dead keys, IMEs and
+        // injected Unicode (voice typing) already composed.
+        _ if !m.alt || m.control || m.platform => return None,
         _ => {
+            // Alt+key: ESC then the character, as xterm's metaSendsEscape.
             let text = keystroke.key_char.clone().or_else(|| (key == "space").then(|| " ".to_string()))?;
-            // AltGr arrives as Ctrl+Alt on Windows: a character the layout gives
-            // instead of the key itself (`|`, `\`, `@` on many layouts) is typed text.
-            if m.control && m.alt && !m.platform && !text.eq_ignore_ascii_case(key) {
-                return Some(text.into_bytes());
-            }
-            if m.control || m.platform {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            if m.alt {
-                bytes.push(0x1b);
-            }
+            let mut bytes = vec![0x1b];
             bytes.extend(text.as_bytes());
             bytes
         }

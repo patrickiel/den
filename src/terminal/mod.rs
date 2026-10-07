@@ -739,6 +739,48 @@ impl Drop for TerminalPanel {
     }
 }
 
+/// Typed text arrives here as characters rather than keys: ordinary typing,
+/// dead keys, AltGr, IME commits and injected Unicode (voice typing tools,
+/// which send no key codes) alike. There is no document behind it, so the
+/// ranges are empty and IME composition only shows in the IME's own window.
+impl EntityInputHandler for TerminalPanel {
+    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        Some(UTF16Selection { range: 0..0, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        if !text.is_empty() {
+            self.input(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes(), cx);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(&mut self, _: Option<Range<usize>>, _: &str, _: Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) {}
+
+    /// The cursor's cell, where the IME puts its candidate window.
+    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        let cursor = self.term.grid().cursor.point;
+        let origin = point(
+            self.origin.x + self.cell.width * cursor.column.0 as f32,
+            self.origin.y + self.cell.height * cursor.line.0.max(0) as f32,
+        );
+        Some(Bounds::new(origin, self.cell))
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+}
+
 impl EventEmitter<PaneEvent> for TerminalPanel {}
 
 impl Focusable for TerminalPanel {

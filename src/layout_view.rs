@@ -283,7 +283,8 @@ impl Workspace {
             .relative()
             .size_full()
             .p_1()
-            .bg(cx.theme().tab_bar)
+            // The window's chrome, not the strip: tab bars stand out from it.
+            .bg(cx.theme().sidebar)
             // These run before the zones inside (capture order): the edge
             // bands win, and elsewhere the target starts empty for the zone
             // under the pointer to set.
@@ -448,11 +449,9 @@ impl Workspace {
 
         let theme = cx.theme();
         let current = self.defaults.own(id, true);
-        let count = self.tree.groups_under(id).len();
         // The same tray whether or not the container is a default: its
         // default button says so.
         let tray = theme.muted_foreground.opacity(0.10);
-        let layout = if horizontal { "side by side" } else { "stacked" };
         let hint = self.zone_overlay(id);
 
         v_flex()
@@ -489,12 +488,7 @@ impl Workspace {
                             .cursor_grab()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into())))
-                            .child(Icon::new(IconName::GripHorizontal).xsmall())
-                            .child(div().truncate().child(match current {
-                                Some(kind) => format!("{count} groups, {layout} · {}", kind.label()),
-                                None => format!("{count} groups, {layout}"),
-                            })),
+                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into()))),
                     )
                     .child(self.default_button(id, true, current, false, cx))
                     .children(self.container_actions(id, "container", true, cx))
@@ -801,6 +795,9 @@ impl Workspace {
             .child(self.group_menu(group, cx));
 
         let strip = TabBar::new(("tab-bar", group))
+            // A tab's height (gpui-kit's default size), so an empty group's
+            // strip does not grow when its first tab opens.
+            .min_h(px(32.))
             .children(tab_elements)
             .last_empty_space(
                 div()

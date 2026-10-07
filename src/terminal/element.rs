@@ -341,12 +341,14 @@ impl Element for TerminalElement {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         plan: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        let focus = self.view.read(cx).focus_handle.clone();
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
         for (bounds, color) in plan.backgrounds.drain(..) {
             window.paint_quad(fill(bounds, color));
         }

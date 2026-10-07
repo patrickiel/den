@@ -21,7 +21,7 @@ impl FloatWindow {
         window.on_window_should_close(cx, move |window, cx| {
             let from = crate::browser::hwnd(window);
             _ = weak.update(cx, |workspace, cx| {
-                workspace.dock_float(id, cx);
+                workspace.dock_float(id, false, cx);
                 if let Some(from) = from {
                     workspace.rehome_browsers(from, cx);
                 }

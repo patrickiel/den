@@ -859,11 +859,12 @@ impl Workspace {
 
     /// Float `id`'s window closes: what it holds goes back into the main
     /// window, beside everything (in place of a lone empty group there).
-    /// Empty groups have nothing to bring back.
-    pub(crate) fn dock_float(&mut self, id: u64, cx: &mut Context<Self>) {
+    /// Closing it drops empty groups, which have nothing to bring back;
+    /// `keep_empty` (its Move into Main Window button) moves them all the same.
+    pub(crate) fn dock_float(&mut self, id: u64, keep_empty: bool, cx: &mut Context<Self>) {
         let Some(root) = self.tree.window_root(Some(id)) else { return };
         let root_id = root.id();
-        if root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
+        if !keep_empty && root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
             if let Some((_, remap)) = self.tree.detach(root_id) {
                 self.defaults.prune(&self.tree, &remap);
             }
@@ -1011,12 +1012,12 @@ impl Workspace {
                             .ghost()
                             .icon(Icon::new(IconName::Minimize))
                             .tooltip("Move into Main Window")
-                            .on_click(cx.listener(move |this, _, _, cx| this.dock_float(id, cx))),
+                            .on_click(cx.listener(move |this, _, _, cx| this.dock_float(id, true, cx))),
                     ),
             );
         self.layout_actions(v_flex().id("float"), cx)
             // Alt+F4 closes this window, not den.
-            .on_action(cx.listener(move |this, _: &crate::Quit, _, cx| this.dock_float(id, cx)))
+            .on_action(cx.listener(move |this, _: &crate::Quit, _, cx| this.dock_float(id, false, cx)))
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
