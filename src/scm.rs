@@ -3,13 +3,19 @@
 //! row and group buttons, and the recent commits. Everything runs through
 //! `Repo`; errors show at the top of the view with git's message.
 
-use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
+use den_extension::view::Graph;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
+    avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex,
+    hover_card::HoverCard,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     v_flex,
@@ -17,9 +23,16 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
 use crate::{
-    backend::git::{self, FileStatus},
+    backend::{
+        avatars,
+        git::{self, FileStatus, RefKind},
+    },
+    git_graph,
     repo::{Repo, RepoState},
 };
+
+/// A commit row's height.
+const COMMIT_ROW: f32 = 22.;
 
 pub enum ScmEvent {
     /// Open a changed file in an editor tab.
@@ -63,7 +76,13 @@ pub struct ScmView {
     /// Generate Commit Message while it runs: how to stop it, and what it does.
     generating: Option<(crate::backend::ai::Cancel, SharedString)>,
     /// Commits expanded to their files, with the files once loaded.
-    expanded: std::collections::HashMap<String, Option<(Option<String>, Vec<git::CommitFile>)>>,
+    expanded: HashMap<String, Option<(Option<String>, Vec<git::CommitFile>)>>,
+    /// What a commit changed, for its hover card: `None` while it loads.
+    stats: HashMap<String, Option<git::Stat>>,
+    /// Authors' avatars by email: `None` when there is none to show.
+    avatars: HashMap<String, Option<PathBuf>>,
+    /// Emails whose avatar is being fetched.
+    avatar_pending: HashSet<String>,
     collapsed: Vec<&'static str>,
     /// Selected rows (by path) in one group, as den selects them: a click
     /// selects one, Ctrl+click adds or removes, Shift+click a range.
@@ -88,6 +107,9 @@ impl ScmView {
             commits_open: true,
             generating: None,
             expanded: Default::default(),
+            stats: Default::default(),
+            avatars: Default::default(),
+            avatar_pending: Default::default(),
             collapsed: Vec::new(),
             selection: Vec::new(),
             selection_group: None,
@@ -783,11 +805,61 @@ impl ScmView {
         .detach();
     }
 
-    fn render_commit_files(&self, hash: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// What a commit's hover card shows beyond the commit itself: what it
+    /// changed, and its author's avatar. Both load in the background once.
+    fn ensure_details(&mut self, commit: &git::Commit, cx: &mut Context<Self>) {
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        if !self.stats.contains_key(&commit.hash) {
+            self.stats.insert(commit.hash.clone(), None);
+            let (key, hash, top) = (commit.hash.clone(), commit.hash.clone(), top.clone());
+            cx.spawn(async move |this, cx| {
+                let stat = cx.background_spawn(async move { git::commit_stat(&top, &hash) }).await;
+                _ = this.update(cx, |this, cx| {
+                    match stat {
+                        Ok(stat) => _ = this.stats.insert(key, Some(stat)),
+                        Err(_) => _ = this.stats.remove(&key),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        let email = commit.email.clone();
+        if self.avatars.contains_key(&email) || self.avatar_pending.contains(&email) || email.is_empty() {
+            return;
+        }
+        if let Some(known) = avatars::cached(&email) {
+            self.avatars.insert(email, known);
+            return;
+        }
+        self.avatar_pending.insert(email.clone());
+        let github = self.repo.read(cx).github.clone().map(|(owner, repo)| (owner, repo, commit.hash.clone()));
+        cx.spawn(async move |this, cx| {
+            let key = email.clone();
+            let found = cx.background_spawn(async move { avatars::fetch(&email, github) }).await;
+            _ = this.update(cx, |this, cx| {
+                this.avatar_pending.remove(&key);
+                this.avatars.insert(key, found);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A commit's files once expanded, each behind the lanes running on
+    /// below the commit.
+    fn render_commit_files(&self, hash: &str, below: &Graph, graph_w: Pixels, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let Some(loaded) = self.expanded.get(hash) else { return Vec::new() };
+        let lanes = |below: &Graph| div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(below.clone(), theme.background));
         let Some((parent, files)) = loaded else {
-            return vec![div().pl(px(44.)).h(px(22.)).text_xs().text_color(theme.muted_foreground).child("Loading…").into_any_element()];
+            return vec![
+                h_flex()
+                    .h(px(COMMIT_ROW))
+                    .child(lanes(below))
+                    .child(div().pl_2().text_xs().text_color(theme.muted_foreground).child("Loading…"))
+                    .into_any_element(),
+            ];
         };
         files
             .iter()
@@ -802,12 +874,12 @@ impl ScmView {
                 let event = std::rc::Rc::new(event);
                 h_flex()
                     .id(SharedString::from(format!("{hash}-{ix}")))
-                    .pl(px(44.))
                     .pr_2()
-                    .h(px(22.))
+                    .h(px(COMMIT_ROW))
                     .gap_2()
                     .text_sm()
                     .hover(|this| this.bg(theme.list_hover))
+                    .child(lanes(below))
                     .child(crate::file_icon::render(&file.rel, 16., cx))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .child(div().flex_none().max_w(px(140.)).truncate().text_xs().text_color(theme.muted_foreground).child(dir))
@@ -822,9 +894,88 @@ impl ScmView {
             .collect()
     }
 
+    /// A commit's row: its graph, subject, branch and tag badges, author and
+    /// age, with a hover card and a menu.
+    fn render_commit(&self, ix: usize, commit: &git::Commit, graph_w: Pixels, now: i64, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let repo = self.repo.read(cx);
+        let graph = repo.row_graph(ix).cloned().unwrap_or_default();
+        let lane_color = git_graph::lane_color(repo.row_lane(ix));
+        let github = repo.github.clone();
+        let open = self.expanded.contains_key(&commit.hash);
+        let files = self.render_commit_files(&commit.hash, &git_graph::continuation(&graph), graph_w, cx);
+        let weak = cx.weak_entity();
+        let hash = commit.hash.clone();
+        let row = h_flex()
+            .id(SharedString::from(commit.hash.clone()))
+            .pr_2()
+            .h(px(COMMIT_ROW))
+            .gap_2()
+            .text_sm()
+            .hover(|this| this.bg(theme.list_hover))
+            .when(open, |this| this.bg(theme.list_active))
+            .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
+            .child(div().flex_1().min_w_0().truncate().child(commit.subject.clone()))
+            .children(commit.refs.iter().map(|r| ref_badge(r, lane_color)))
+            .when(commit.detached_head, |this| this.child(head_badge(theme.muted_foreground)))
+            .child(div().flex_none().max_w(px(90.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
+            .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(git::age(commit.date, now)))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_commit(hash.clone(), cx)))
+            .context_menu({
+                let (weak, commit, github) = (weak.clone(), commit.clone(), github.clone());
+                move |menu, _, cx| ScmView::commit_menu(menu, weak.clone(), &commit, github.clone(), cx)
+            });
+        let card = HoverCard::new(SharedString::from(format!("card-{}", commit.hash)))
+            // Beside the row, over the panes next to the panel, as VS Code's.
+            .anchor(match crate::settings::Settings::get(cx).sidebar_position {
+                crate::settings::SidebarSide::Left => Anchor::LeftCenter,
+                crate::settings::SidebarSide::Right => Anchor::RightCenter,
+            })
+            .open_delay(std::time::Duration::from_millis(500))
+            .on_open_change({
+                let (weak, commit) = (weak.clone(), commit.clone());
+                move |open, _, cx| {
+                    if *open {
+                        _ = weak.update(cx, |this, cx| this.ensure_details(&commit, cx));
+                    }
+                }
+            })
+            .trigger(row)
+            .content({
+                let commit = commit.clone();
+                move |_, _, cx| render_commit_card(&weak, &commit, github.as_ref(), now, cx)
+            });
+        v_flex().child(card).children(files).into_any_element()
+    }
+
+    /// A commit's right-click menu.
+    fn commit_menu(menu: PopupMenu, this: WeakEntity<Self>, commit: &git::Commit, github: Option<(String, String)>, cx: &App) -> PopupMenu {
+        let act = |label: &'static str, run: Box<dyn Fn(&mut ScmView, &mut Window, &mut Context<ScmView>)>| {
+            let this = this.clone();
+            let run = std::rc::Rc::new(run);
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                let run = run.clone();
+                _ = this.update(cx, |view, cx| run(view, window, cx));
+            })
+        };
+        let expanded = this.upgrade().is_some_and(|view| view.read(cx).expanded.contains_key(&commit.hash));
+        let (hash, short, message) = (commit.hash.clone(), commit.short.clone(), commit_message(commit));
+        let toggle = commit.hash.clone();
+        let url = github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{}", commit.hash));
+        menu.item(act(if expanded { "Collapse" } else { "Show Changed Files" }, Box::new(move |v, _, cx| v.toggle_commit(toggle.clone(), cx))))
+            .separator()
+            .item(act("Copy Commit Hash", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(hash.clone())))))
+            .item(act("Copy Short Hash", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(short.clone())))))
+            .item(act("Copy Commit Message", Box::new(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.clone())))))
+            .when_some(url, |menu, url| menu.separator().item(act("Open on GitHub", Box::new(move |_, _, cx| cx.open_url(&url)))))
+    }
+
     fn render_commits(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let commits = self.repo.read(cx).commits.clone();
+        let repo = self.repo.read(cx);
+        let commits = repo.commits.clone();
+        let uncommitted = repo.uncommitted.zip(repo.graph.first().cloned());
+        let graph_w = git_graph::column_width(&repo.graph);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -851,41 +1002,32 @@ impl ScmView {
                     })),
             )
             .when(self.commits_open, |this| {
-                this.children(commits.into_iter().map(|commit| {
-                    let open = self.expanded.contains_key(&commit.hash);
-                    let hash = commit.hash.clone();
-                    let files = self.render_commit_files(&commit.hash, cx);
-                    v_flex().child(h_flex()
-                        .id(SharedString::from(commit.hash.clone()))
-                        .pl(px(8.))
-                        .pr_2()
-                        .h(px(22.))
-                        .gap_2()
-                        .text_sm()
-                        .hover(|this| this.bg(theme.list_hover))
-                        .tooltip({
-                            let tip = format!("{} · {}\n{}", commit.short, commit.author, commit.subject);
-                            move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                        })
-                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(theme.muted_foreground))
-                        .child(Icon::new(IconName::GitCommitHorizontal).small().text_color(theme.muted_foreground))
-                        .child(div().flex_1().min_w_0().truncate().child(commit.subject.clone()))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("{} · {}", commit.author, git::age(commit.date, now))),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_commit(hash.clone(), cx))))
-                        .children(files)
-                }))
+                this.when_some(uncommitted, |this, (count, graph)| {
+                    this.child(
+                        h_flex()
+                            .pr_2()
+                            .h(px(COMMIT_ROW))
+                            .gap_2()
+                            .text_sm()
+                            .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .italic()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{count} change{}", if count == 1 { "" } else { "s" })),
+                            ),
+                    )
+                })
+                .children(commits.iter().enumerate().map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)))
                 .when(more, |this| {
                     this.child(
                         div()
                             .id("load-more")
-                            .pl(px(24.))
-                            .h(px(22.))
+                            .pl(graph_w)
+                            .h(px(COMMIT_ROW))
                             .text_sm()
                             .italic()
                             .text_color(theme.muted_foreground)
@@ -896,6 +1038,137 @@ impl ScmView {
                 })
             })
     }
+}
+
+/// The whole message: the subject, then the body after a blank line.
+fn commit_message(commit: &git::Commit) -> String {
+    if commit.body.is_empty() { commit.subject.clone() } else { format!("{}\n\n{}", commit.subject, commit.body) }
+}
+
+/// A branch or tag at a commit, in its lane's colour: the checked-out
+/// branch filled, the others outlined.
+fn ref_badge(r: &git::CommitRef, color: Hsla) -> impl IntoElement {
+    let icon = match r.kind {
+        RefKind::Local => IconName::GitBranch,
+        RefKind::Remote => IconName::Cloud,
+        RefKind::Tag => IconName::Tag,
+    };
+    badge(icon, r.name.clone(), color, r.head)
+}
+
+/// HEAD on no branch.
+fn head_badge(color: Hsla) -> impl IntoElement {
+    badge(IconName::GitCommitHorizontal, "HEAD", color, false)
+}
+
+fn badge(icon: IconName, name: impl Into<SharedString>, color: Hsla, filled: bool) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .h(px(16.))
+        .px(px(6.))
+        .gap_1()
+        .rounded_full()
+        .text_xs()
+        .border_1()
+        .border_color(color)
+        .map(|this| if filled { this.bg(color).text_color(gpui_kit::white()) } else { this.text_color(color) })
+        .child(Icon::new(icon).xsmall())
+        .child(div().max_w(px(110.)).truncate().child(name.into()))
+}
+
+/// A commit's hover card: who and when, the message, what it changed, and
+/// its hash with a copy button and a link to GitHub.
+fn render_commit_card(view: &WeakEntity<ScmView>, commit: &git::Commit, github: Option<&(String, String)>, now: i64, cx: &App) -> AnyElement {
+    let theme = cx.theme().clone();
+    let (stat, avatar) = match view.upgrade() {
+        Some(view) => {
+            let view = view.read(cx);
+            (view.stats.get(&commit.hash).copied(), view.avatars.get(&commit.email).cloned().flatten())
+        }
+        None => (None, None),
+    };
+    let avatar: AnyElement = match avatar.filter(|path| path.is_file()) {
+        Some(path) => img(path).size(px(20.)).flex_none().rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
+        None => Avatar::new().name(commit.author.clone()).xsmall().into_any_element(),
+    };
+    let when = match git::long_date(&commit.when) {
+        Some(date) => format!("{} ({date})", git::age(commit.date, now)),
+        None => git::age(commit.date, now),
+    };
+    let divider = || div().h(px(1.)).w_full().bg(theme.border);
+    let hash = commit.hash.clone();
+    let url = github.map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{}", commit.hash));
+    v_flex()
+        .w(px(380.))
+        .p_3()
+        .gap_2()
+        .text_sm()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(avatar)
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(commit.author.clone()))
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(when)),
+                ),
+        )
+        .child(divider())
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().whitespace_normal().child(commit.subject.clone()))
+                .when(!commit.body.is_empty(), |this| this.child(div().whitespace_normal().text_xs().text_color(theme.muted_foreground).child(commit.body.clone()))),
+        )
+        .child(divider())
+        .child(match stat {
+            Some(Some(stat)) => {
+                let count = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                h_flex()
+                    .text_xs()
+                    .child(count(stat.files, "file changed", "files changed"))
+                    .when(stat.insertions > 0, |this| {
+                        this.child(", ").child(div().text_color(theme.green).child(format!("{}(+)", count(stat.insertions, "insertion", "insertions"))))
+                    })
+                    .when(stat.deletions > 0, |this| {
+                        this.child(", ").child(div().text_color(theme.red).child(format!("{}(-)", count(stat.deletions, "deletion", "deletions"))))
+                    })
+                    .into_any_element()
+            }
+            _ => div().text_xs().text_color(theme.muted_foreground).child("Loading…").into_any_element(),
+        })
+        .child(divider())
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(Icon::new(IconName::GitCommitHorizontal).small().text_color(theme.muted_foreground))
+                .child(div().font_family(crate::settings::mono_font(cx)).text_xs().text_color(theme.muted_foreground).child(commit.short.clone()))
+                .child(
+                    Button::new("copy-hash")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Copy))
+                        .tooltip("Copy Commit Hash")
+                        .on_click(move |_, window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()));
+                            crate::toast::push(window, "Copied the commit hash", cx);
+                        }),
+                )
+                .when_some(url, |this, url| {
+                    this.child(div().px_1().text_color(theme.muted_foreground).child("|")).child(
+                        Button::new("open-github")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Github))
+                            .label("Open on GitHub")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                }),
+        )
+        .into_any_element()
 }
 
 /// den's git colours: modified yellow, added and untracked green, deleted

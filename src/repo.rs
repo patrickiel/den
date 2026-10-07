@@ -9,9 +9,11 @@ use std::{
     sync::Arc,
 };
 
+use den_extension::view::Graph;
 use gpui_kit::*;
 
 use crate::backend::git::{self, BranchRef, Commit, Error, FileStatus, Status};
+use crate::git_graph;
 
 #[derive(Clone, Debug)]
 pub enum RepoState {
@@ -34,6 +36,15 @@ pub struct Repo {
     root: PathBuf,
     pub state: RepoState,
     pub commits: Vec<Commit>,
+    /// The graph through each row: the uncommitted changes first when there
+    /// are any, then the commits (see [`Self::row_graph`]).
+    pub graph: Vec<Graph>,
+    /// Each row's lane, for its badges' colour.
+    pub lanes: Vec<usize>,
+    /// How many files the working tree changes, when its row leads the graph.
+    pub uncommitted: Option<usize>,
+    /// The GitHub repository the remote is, as `(owner, repo)`.
+    pub github: Option<(String, String)>,
     /// The last operation's failure, with git's message.
     pub error: Option<String>,
     /// What runs now ("Committing…"), for the view to show.
@@ -56,6 +67,10 @@ impl Repo {
             root,
             state: RepoState::Loading,
             commits: Vec::new(),
+            graph: Vec::new(),
+            lanes: Vec::new(),
+            uncommitted: None,
+            github: None,
             error: None,
             busy: None,
             letters: HashMap::new(),
@@ -84,6 +99,17 @@ impl Repo {
         }
     }
 
+    /// The graph through the row of commit `ix` (the uncommitted changes
+    /// take the row before the first commit).
+    pub fn row_graph(&self, ix: usize) -> Option<&Graph> {
+        self.graph.get(ix + self.uncommitted.is_some() as usize)
+    }
+
+    /// The lane of commit `ix`, for its badges' colour.
+    pub fn row_lane(&self, ix: usize) -> usize {
+        self.lanes.get(ix + self.uncommitted.is_some() as usize).copied().unwrap_or(0)
+    }
+
     /// Read status and history again, off the UI thread.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
@@ -95,8 +121,11 @@ impl Repo {
                     let top = git::toplevel(&root)?;
                     let Some(top) = top else { return Ok(None) };
                     let status = git::status(&top)?;
-                    let commits = git::log(&top, count, 0).unwrap_or_default();
-                    Ok::<_, Error>(Some((top, status, commits)))
+                    let revs = git::history_revs(&top, &status);
+                    let commits = git::log(&top, &revs, count, 0).unwrap_or_default();
+                    let github = git::remote_url(&top).and_then(|url| git::github_repo(&url));
+                    let (layout, uncommitted) = lay_out(&status, &commits);
+                    Ok::<_, Error>(Some((top, status, commits, layout, uncommitted, github)))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
@@ -104,9 +133,13 @@ impl Repo {
                     Err(Error::NotFound) => this.state = RepoState::NoGit,
                     Err(err) => this.error = Some(err.to_string()),
                     Ok(None) => this.state = RepoState::NoRepo,
-                    Ok(Some((top, status, commits))) => {
+                    Ok(Some((top, status, commits, layout, uncommitted, github))) => {
                         this.index(&top, &status);
                         this.commits = commits;
+                        this.graph = layout.graphs;
+                        this.lanes = layout.lanes;
+                        this.uncommitted = uncommitted;
+                        this.github = github;
                         this.state = RepoState::Ready {
                             top,
                             status: Arc::new(status),
@@ -272,6 +305,20 @@ impl Repo {
         self.error = None;
         cx.notify();
     }
+}
+
+/// The graph's lanes through the working tree (when it has changes, as a
+/// hollow dot above HEAD) and the commits; HEAD's dot is hollow too.
+fn lay_out(status: &Status, commits: &[Commit]) -> (git_graph::Layout, Option<usize>) {
+    let head = (status.branch.oid != "(initial)" && !status.branch.oid.is_empty()).then(|| status.branch.oid.clone());
+    let uncommitted = (!status.files.is_empty() && head.is_some()).then_some(status.files.len());
+    let head_parent: Vec<String> = head.iter().cloned().collect();
+    let mut nodes = Vec::with_capacity(commits.len() + 1);
+    if uncommitted.is_some() {
+        nodes.push(git_graph::Node { hash: "*", parents: &head_parent, hollow: true, uncommitted: true });
+    }
+    nodes.extend(commits.iter().map(|c| git_graph::Node { hash: &c.hash, parents: &c.parents, hollow: head.as_deref() == Some(&c.hash), uncommitted: false }));
+    (git_graph::layout(&nodes), uncommitted)
 }
 
 #[cfg(test)]

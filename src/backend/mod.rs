@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod ai;
+pub mod avatars;
 pub mod commit_ai;
 pub mod extensions;
 pub mod format;

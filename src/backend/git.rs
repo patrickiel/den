@@ -394,44 +394,195 @@ pub fn create_branch(top: &Path, name: &str) -> Result<(), Error> {
     check(top, &["switch", "-c", name], None).map(drop)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    Local,
+    Remote,
+    Tag,
+}
+
+/// A branch or tag at a commit, as `git log` decorates it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitRef {
+    pub kind: RefKind,
+    /// `main`, `origin/main`, `v1.0`.
+    pub name: String,
+    /// HEAD points at this branch.
+    pub head: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Commit {
     pub hash: String,
     pub short: String,
+    pub parents: Vec<String>,
     pub author: String,
+    pub email: String,
     /// Unix seconds.
     pub date: i64,
+    /// Local time as `2026-10-06 21:30`, for [`long_date`].
+    pub when: String,
     pub subject: String,
+    /// The message after its subject, trimmed.
+    pub body: String,
+    pub refs: Vec<CommitRef>,
+    /// HEAD is this commit, on no branch.
+    pub detached_head: bool,
 }
 
-pub fn log(top: &Path, n: usize, skip: usize) -> Result<Vec<Commit>, Error> {
+/// `n` commits of `revs` (after the first `skip`), newest first with
+/// children before parents, so a graph can be laid out from them.
+pub fn log(top: &Path, revs: &[String], n: usize, skip: usize) -> Result<Vec<Commit>, Error> {
     if unborn(top) {
         return Ok(Vec::new());
     }
-    let format = format!("%H{UNIT}%h{UNIT}%an{UNIT}%at{UNIT}%s{RECORD}");
-    let out = check(
-        top,
-        &["log", &format!("--format={format}"), "-n", &n.to_string(), &format!("--skip={skip}"), "HEAD"],
-        None,
-    )?;
+    let format = format!("--format=%H{UNIT}%h{UNIT}%P{UNIT}%an{UNIT}%ae{UNIT}%at{UNIT}%ad{UNIT}%D{UNIT}%s{UNIT}%b{RECORD}");
+    let (n, skip) = (n.to_string(), format!("--skip={skip}"));
+    let mut args = vec![
+        "log",
+        "--topo-order",
+        "--decorate=full",
+        // Numbers only: Git for Windows' strftime has no `%-d` or `%e`.
+        "--date=format-local:%Y-%m-%d %H:%M",
+        &format,
+        "-n",
+        &n,
+        &skip,
+    ];
+    args.extend(revs.iter().map(String::as_str));
+    args.push("--");
+    let out = check(top, &args, None)?;
     Ok(parse_log(&out.stdout))
 }
 
 pub fn parse_log(raw: &str) -> Vec<Commit> {
     raw.split(RECORD)
         .filter_map(|record| {
-            let record = record.trim_start_matches('\n');
-            let parts: Vec<&str> = record.split(UNIT).collect();
-            let [hash, short, author, date, subject] = parts[..] else { return None };
+            let record = record.trim_start_matches(['\n', '\r']);
+            let parts: Vec<&str> = record.splitn(10, UNIT).collect();
+            let [hash, short, parents, author, email, date, when, decorations, subject, body] = parts[..] else { return None };
+            let (refs, detached_head) = parse_decorations(decorations);
             Some(Commit {
                 hash: hash.into(),
                 short: short.into(),
+                parents: parents.split_whitespace().map(str::to_string).collect(),
                 author: author.into(),
+                email: email.into(),
                 date: date.parse().unwrap_or(0),
+                when: when.into(),
                 subject: subject.into(),
+                body: body.trim().into(),
+                refs,
+                detached_head,
             })
         })
         .collect()
+}
+
+/// `%D` with `--decorate=full`: `HEAD -> refs/heads/main, tag: refs/tags/v1,
+/// refs/remotes/origin/main`. A bare `HEAD` means it is detached.
+pub fn parse_decorations(raw: &str) -> (Vec<CommitRef>, bool) {
+    let mut refs = Vec::new();
+    let mut detached = false;
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (head, full) = match part.strip_prefix("HEAD -> ") {
+            Some(rest) => (true, rest),
+            None if part == "HEAD" => {
+                detached = true;
+                continue;
+            }
+            None => (false, part),
+        };
+        let (kind, name) = if let Some(name) = full.strip_prefix("refs/heads/") {
+            (RefKind::Local, name)
+        } else if let Some(name) = full.strip_prefix("refs/remotes/") {
+            // `origin/HEAD` only points at another branch.
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            (RefKind::Remote, name)
+        } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
+            (RefKind::Tag, name)
+        } else {
+            continue;
+        };
+        refs.push(CommitRef { kind, name: name.to_string(), head });
+    }
+    (refs, detached)
+}
+
+/// The branch the remote checks out (`origin/main`, from `origin/HEAD`),
+/// else a local `main` or `master`.
+pub fn default_branch(top: &Path) -> Option<String> {
+    if let Ok(out) = run(top, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], None)
+        && out.ok()
+        && let Some(name) = out.stdout.trim().strip_prefix("refs/remotes/")
+    {
+        return Some(name.to_string());
+    }
+    ["main", "master"].into_iter().find(|b| is_commit(top, &format!("refs/heads/{b}"))).map(str::to_string)
+}
+
+fn is_commit(top: &Path, rev: &str) -> bool {
+    run(top, &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")], None).is_ok_and(|out| out.ok())
+}
+
+/// What the commit list shows, as VS Code's graph does: HEAD, its upstream
+/// and the default branch, each only when it resolves (an upstream may be
+/// gone).
+pub fn history_revs(top: &Path, status: &Status) -> Vec<String> {
+    let mut revs = vec!["HEAD".to_string()];
+    revs.extend(status.branch.upstream.clone());
+    revs.extend(default_branch(top));
+    let mut seen = HashSet::new();
+    revs.retain(|rev| seen.insert(rev.clone()) && is_commit(top, rev));
+    revs
+}
+
+/// The URL of `origin`, else of the first remote.
+pub fn remote_url(top: &Path) -> Option<String> {
+    let url = |name: &str| run(top, &["remote", "get-url", name], None).ok().filter(|out| out.ok()).map(|out| out.stdout.trim().to_string()).filter(|u| !u.is_empty());
+    url("origin").or_else(|| {
+        let out = run(top, &["remote"], None).ok()?;
+        let first = out.stdout.lines().map(str::trim).find(|r| !r.is_empty())?;
+        url(first)
+    })
+}
+
+/// `(owner, repo)` of a GitHub remote: `https://github.com/o/r.git`,
+/// `git@github.com:o/r.git`, `ssh://git@github.com/o/r`.
+pub fn github_repo(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    let rest = if let Some(rest) = url.strip_prefix("git@github.com:") {
+        rest
+    } else {
+        let without_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+        let without_user = without_scheme.split_once('@').map_or(without_scheme, |(_, rest)| rest);
+        without_user.strip_prefix("github.com/")?
+    };
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, repo) = rest.split_once('/')?;
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
+}
+
+/// `2026-10-06 21:30` (as [`log`] asks git for) as VS Code shows it:
+/// `October 6, 2026 at 9:30 PM`.
+pub fn long_date(when: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let (date, time) = when.trim().split_once(' ')?;
+    let mut date = date.split('-').map(|n| n.parse::<u32>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let (hour, minute) = time.split_once(':')?;
+    let (hour, minute) = (hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?);
+    let month = MONTHS.get(month.checked_sub(1)? as usize)?;
+    let (hour12, half) = match hour {
+        0 => (12, "AM"),
+        1..=11 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    Some(format!("{month} {day}, {year} at {hour12}:{minute:02} {half}"))
 }
 
 /// A file as committed at `rev` (`HEAD`, or `:` for the index), for diffs.
@@ -471,6 +622,42 @@ pub fn parse_name_status(raw: &str) -> Vec<CommitFile> {
             Some(CommitFile { status, rel, old_rel })
         })
         .collect()
+}
+
+/// What a commit changed, as `--shortstat` counts it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stat {
+    pub files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// What `hash` changed against its first parent (everything, for a root).
+pub fn commit_stat(top: &Path, hash: &str) -> Result<Stat, Error> {
+    let parent = run(top, &["rev-parse", "--verify", "-q", &format!("{hash}^")], None)?;
+    let parent = parent.ok().then(|| parent.stdout.trim().to_string()).filter(|p| !p.is_empty());
+    let out = match &parent {
+        Some(parent) => check(top, &["diff", "--shortstat", "-M", parent, hash], None)?,
+        None => check(top, &["diff-tree", "--root", "-r", "-M", "--no-commit-id", "--shortstat", hash], None)?,
+    };
+    Ok(parse_shortstat(&out.stdout))
+}
+
+/// ` 2 files changed, 23 insertions(+), 2 deletions(-)`; parts git leaves
+/// out count as zero.
+pub fn parse_shortstat(raw: &str) -> Stat {
+    let mut stat = Stat::default();
+    for part in raw.lines().last().unwrap_or("").split(',').map(str::trim) {
+        let n: u32 = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        if part.contains("file") {
+            stat.files = n;
+        } else if part.contains("insertion") {
+            stat.insertions = n;
+        } else if part.contains("deletion") {
+            stat.deletions = n;
+        }
+    }
+    stat
 }
 
 /// "3 hours ago", for the commit list.
@@ -566,11 +753,60 @@ mod tests {
 
     #[test]
     fn parses_log_records() {
-        let raw = format!("abc{UNIT}ab{UNIT}Ann{UNIT}100{UNIT}first{RECORD}\ndef{UNIT}de{UNIT}Bob{UNIT}200{UNIT}second{RECORD}\n");
+        let raw = format!(
+            "abc{UNIT}ab{UNIT}def 123{UNIT}Ann{UNIT}ann@x.io{UNIT}100{UNIT}2026-10-06 21:30{UNIT}HEAD -> refs/heads/main{UNIT}first{UNIT}A body.\n\nMore.\n{RECORD}\n\
+             def{UNIT}de{UNIT}{UNIT}Bob{UNIT}bob@x.io{UNIT}200{UNIT}2026-10-05 09:05{UNIT}{UNIT}second{UNIT}\n{RECORD}\n"
+        );
         let commits = parse_log(&raw);
         assert_eq!(commits.len(), 2);
-        assert_eq!(commits[1].author, "Bob");
-        assert_eq!(commits[1].date, 200);
+        assert_eq!(commits[0].parents, ["def", "123"]);
+        assert_eq!(commits[0].body, "A body.\n\nMore.");
+        assert_eq!(commits[0].refs, [CommitRef { kind: RefKind::Local, name: "main".into(), head: true }]);
+        assert_eq!((commits[1].author.as_str(), commits[1].email.as_str(), commits[1].date), ("Bob", "bob@x.io", 200));
+        assert!(commits[1].parents.is_empty() && commits[1].body.is_empty() && commits[1].refs.is_empty());
+        assert_eq!(commits[1].when, "2026-10-05 09:05");
+    }
+
+    #[test]
+    fn parses_decorations() {
+        let (refs, detached) = parse_decorations("HEAD -> refs/heads/main, tag: refs/tags/v0.6.0, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/stash");
+        assert!(!detached);
+        let names: Vec<(RefKind, &str, bool)> = refs.iter().map(|r| (r.kind, r.name.as_str(), r.head)).collect();
+        assert_eq!(names, [(RefKind::Local, "main", true), (RefKind::Tag, "v0.6.0", false), (RefKind::Remote, "origin/main", false)]);
+        let (refs, detached) = parse_decorations("HEAD, refs/heads/feature");
+        assert!(detached);
+        assert_eq!(refs, [CommitRef { kind: RefKind::Local, name: "feature".into(), head: false }]);
+        assert_eq!(parse_decorations(""), (Vec::new(), false));
+    }
+
+    #[test]
+    fn github_repo_forms() {
+        let den = Some(("patrickiel".to_string(), "den".to_string()));
+        assert_eq!(github_repo("https://github.com/patrickiel/den.git"), den);
+        assert_eq!(github_repo("https://github.com/patrickiel/den/"), den);
+        assert_eq!(github_repo("git@github.com:patrickiel/den.git"), den);
+        assert_eq!(github_repo("ssh://git@github.com/patrickiel/den"), den);
+        assert_eq!(github_repo("github.com/patrickiel/den"), den);
+        assert_eq!(github_repo("https://gitlab.com/patrickiel/den.git"), None);
+        assert_eq!(github_repo("https://github.com/patrickiel"), None);
+    }
+
+    #[test]
+    fn parses_shortstat() {
+        let stat = parse_shortstat(" 2 files changed, 23 insertions(+), 2 deletions(-)\n");
+        assert_eq!(stat, Stat { files: 2, insertions: 23, deletions: 2 });
+        let stat = parse_shortstat(" 1 file changed, 1 insertion(+)\n");
+        assert_eq!(stat, Stat { files: 1, insertions: 1, deletions: 0 });
+        assert_eq!(parse_shortstat(""), Stat::default());
+    }
+
+    #[test]
+    fn long_dates_read_like_vscode() {
+        assert_eq!(long_date("2026-10-06 21:30").as_deref(), Some("October 6, 2026 at 9:30 PM"));
+        assert_eq!(long_date("2026-01-01 00:05").as_deref(), Some("January 1, 2026 at 12:05 AM"));
+        assert_eq!(long_date("2026-12-31 12:00").as_deref(), Some("December 31, 2026 at 12:00 PM"));
+        assert_eq!(long_date("2026-13-01 12:00"), None);
+        assert_eq!(long_date("garbage"), None);
     }
 
     #[test]
@@ -600,14 +836,42 @@ mod tests {
         assert!(super::status(&top).unwrap().files[0].staged());
         commit(&top, "first", false).unwrap();
         assert!(super::status(&top).unwrap().files.is_empty());
-        let commits = log(&top, 10, 0).unwrap();
+        let status = super::status(&top).unwrap();
+        let revs = history_revs(&top, &status);
+        assert_eq!(revs, ["HEAD", "main"]);
+        let commits = log(&top, &revs, 10, 0).unwrap();
         assert_eq!(commits[0].subject, "first");
+        assert_eq!(commits[0].email, "t@example.com");
+        assert!(commits[0].parents.is_empty());
+        assert_eq!(commits[0].refs, [CommitRef { kind: RefKind::Local, name: "main".into(), head: true }]);
+        assert_eq!(commit_stat(&top, &commits[0].hash).unwrap(), Stat { files: 1, insertions: 1, deletions: 0 });
+
+        // A branch with a tag, merged back: the graph's shape and decorations.
+        check(&top, &["switch", "-q", "-c", "topic"], None).unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        stage(&top, &["b.txt".into()]).unwrap();
+        commit(&top, "topic", false).unwrap();
+        check(&top, &["tag", "-a", "v1", "-m", "one"], None).unwrap();
+        check(&top, &["switch", "-q", "main"], None).unwrap();
+        std::fs::write(dir.join("a.txt"), "one more").unwrap();
+        stage(&top, &["a.txt".into()]).unwrap();
+        commit(&top, "main again", false).unwrap();
+        check(&top, &["merge", "--no-ff", "-q", "-m", "merge topic", "topic"], None).unwrap();
+        let commits = log(&top, &["HEAD".into()], 10, 0).unwrap();
+        let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects[0], "merge topic");
+        assert_eq!(commits[0].parents.len(), 2);
+        assert_eq!(subjects[3], "first");
+        let topic = commits.iter().find(|c| c.subject == "topic").unwrap();
+        assert!(topic.refs.iter().any(|r| r.kind == RefKind::Tag && r.name == "v1"));
+        assert!(topic.refs.iter().any(|r| r.kind == RefKind::Local && r.name == "topic" && !r.head));
+        assert_eq!(commit_stat(&top, &commits[0].hash).unwrap().files, 1);
 
         std::fs::write(dir.join("a.txt"), "two").unwrap();
         let changed = super::status(&top).unwrap().files;
         discard(&top, &changed).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one");
-        assert_eq!(show(&top, "HEAD", "a.txt").unwrap(), "one");
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one more");
+        assert_eq!(show(&top, "HEAD", "a.txt").unwrap(), "one more");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

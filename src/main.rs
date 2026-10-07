@@ -20,6 +20,7 @@ mod extension_view;
 mod extensions;
 mod extensions_view;
 mod file_icon;
+mod git_graph;
 mod float;
 mod history;
 mod layout;

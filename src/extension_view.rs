@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use crate::extensions::{self, Extensions};
 use crate::pane::{Pane, PaneEvent};
+use crate::git_graph::{GRAPH_PAD, LANE, graph_canvas};
 use crate::preset_icon::parse_color;
 
 pub const EXTENSION_VIEW: &str = "ExtensionView";
@@ -33,10 +34,6 @@ pub const EXTENSION_VIEW: &str = "ExtensionView";
 type Menus = std::collections::BTreeMap<String, Vec<MenuItem>>;
 
 const ROW_HEIGHT: Pixels = px(24.);
-/// A graph's lane, in pixels.
-const LANE: f32 = 14.;
-/// Space before a graph's first lane.
-const GRAPH_PAD: f32 = 4.;
 /// A graph column is at least this wide, for its title.
 const GRAPH_MIN: f32 = 56.;
 
@@ -479,43 +476,6 @@ fn icon(name: &str, cx: &App) -> Option<Icon> {
     }
     let path = format!("icons/{name}.svg");
     cx.asset_source().load(&path).ok().flatten().is_some().then(|| Icon::default().path(path))
-}
-
-/// A row's graph: its lines (a lane change as a curve), then its dots.
-fn graph_canvas(graph: Graph, background: Hsla) -> impl IntoElement {
-    canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
-            let x = |lane: f32| bounds.left() + px(GRAPH_PAD + LANE * lane + LANE / 2.);
-            let y = |t: f32| bounds.top() + bounds.size.height * t;
-            for line in &graph.lines {
-                let Some(color) = parse_color(&line.color) else { continue };
-                let mut path = PathBuilder::stroke(px(2.));
-                if line.dashed {
-                    path = path.dash_array(&[px(3.), px(3.)]);
-                }
-                let (from, to) = (point(x(line.x0), y(line.y0)), point(x(line.x1), y(line.y1)));
-                path.move_to(from);
-                if line.x0 == line.x1 {
-                    path.line_to(to);
-                } else {
-                    let middle = (from.y + to.y) / 2.;
-                    path.cubic_bezier_to(to, point(from.x, middle), point(to.x, middle));
-                }
-                if let Ok(path) = path.build() {
-                    window.paint_path(path, color);
-                }
-            }
-            for dot in &graph.dots {
-                let Some(color) = parse_color(&dot.color) else { continue };
-                let radius = px(4.);
-                let circle = Bounds::centered_at(point(x(dot.x), y(0.5)), size(radius * 2., radius * 2.));
-                let fill = if dot.hollow { background } else { color };
-                window.paint_quad(quad(circle, radius, fill, px(if dot.hollow { 2. } else { 0. }), color, BorderStyle::default()));
-            }
-        },
-    )
-    .size_full()
 }
 
 impl EventEmitter<PaneEvent> for ExtensionView {}
