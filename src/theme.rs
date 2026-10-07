@@ -169,10 +169,10 @@ pub fn parse(text: &str, id: &str) -> anyhow::Result<VsTheme> {
     Ok(VsTheme { name, dark, colors, token_colors })
 }
 
+/// 0 (black) to 255 (white), as the W3C weighs the channels.
 fn luminance(hex: &str) -> Option<f32> {
-    let hex = hex.strip_prefix('#')?;
-    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok().map(f32::from);
-    Some((byte(0)? * 299. + byte(2)? * 587. + byte(4)? * 114.) / 1000.)
+    let color = Rgba::try_from(hex.trim()).ok()?;
+    Some((color.r * 299. + color.g * 587. + color.b * 114.) * 255. / 1000.)
 }
 
 /// `monokai-color-theme` → "Monokai", `dark_modern` → "Dark Modern".
@@ -732,6 +732,7 @@ mod tests {
     fn kind_from_type_or_background() {
         assert!(!parse(r##"{"type":"light","colors":{"a":"#fff"}}"##, "x").unwrap().dark);
         assert!(!parse(r##"{"colors":{"editor.background":"#fafafa"}}"##, "x").unwrap().dark);
+        assert!(!parse(r##"{"colors":{"editor.background":"#fff"}}"##, "x").unwrap().dark);
         assert!(parse(r##"{"colors":{"editor.background":"#101010"}}"##, "x").unwrap().dark);
         assert!(parse("{}", "x").is_err());
     }

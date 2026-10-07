@@ -164,9 +164,21 @@ pub fn has_program_logo(command: &str) -> bool {
     PROGRAM_LOGOS.iter().any(|(p, _)| *p == program)
 }
 
+/// A colour as `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa` (the `#` may be
+/// left out); `None` for anything else, an empty string included.
 pub fn parse_color(hex: &str) -> Option<Hsla> {
-    let value = u32::from_str_radix(hex.trim().trim_start_matches('#'), 16).ok()?;
-    Some(gpui_kit::rgb(value).into())
+    let hex = hex.trim();
+    if hex.is_empty() {
+        return None;
+    }
+    let with_hash;
+    let hex = if hex.starts_with('#') {
+        hex
+    } else {
+        with_hash = format!("#{hex}");
+        &with_hash
+    };
+    Rgba::try_from(hex).ok().map(Hsla::from)
 }
 
 /// The preset's icon, `size` pixels square.
@@ -359,7 +371,7 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{color_hue, glyph_path, hue_color, local_port};
+    use super::{color_hue, glyph_path, hue_color, local_port, parse_color};
 
     #[test]
     fn glyph_files_by_den_names() {
@@ -379,5 +391,15 @@ mod tests {
     fn ports_of_local_servers() {
         assert_eq!(local_port("localhost:5173").as_deref(), Some(":5173"));
         assert_eq!(local_port("https://example.com:8080"), None);
+    }
+
+    #[test]
+    fn parses_short_and_alpha_hex() {
+        let white = parse_color("#ffffff").unwrap();
+        assert_eq!(parse_color("#fff"), Some(white));
+        assert_eq!(parse_color(" fff "), Some(white));
+        assert_eq!(parse_color("#ffffff80").map(|c| (c.a * 100.).round()), Some(50.));
+        assert_eq!(parse_color(""), None);
+        assert_eq!(parse_color("#zzz"), None);
     }
 }

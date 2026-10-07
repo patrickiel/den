@@ -345,7 +345,7 @@ impl AppState {
 }
 
 pub fn init(cx: &mut App) {
-    let mut settings: Settings = read_json("settings.json").unwrap_or_default();
+    let mut settings = read_settings(&data_dir().join("settings.json"));
     import_old_den(&mut settings);
     cx.set_global::<Settings>(settings);
     cx.set_global::<AppState>(read_json("state.json").unwrap_or_default());
@@ -421,6 +421,29 @@ pub(crate) fn data_dir() -> PathBuf {
 /// The most recent folder that still exists, read before the app starts.
 pub fn last_folder() -> Option<PathBuf> {
     read_json::<AppState>("state.json")?.recent.into_iter().find(|p| p.is_dir())
+}
+
+/// The settings file: the defaults when there is none (the Tauri den's are
+/// taken over then). One that cannot be read is kept beside as
+/// `settings.json.bad`, and den starts with the defaults, importing nothing,
+/// so the file stays as it is until a setting changes.
+fn read_settings(path: &Path) -> Settings {
+    let Ok(text) = std::fs::read_to_string(path) else { return Settings::default() };
+    match serde_json::from_str(&text) {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!("den: {} cannot be read ({err}); starting with the defaults", path.display());
+            let _ = std::fs::copy(path, path.with_extension("json.bad"));
+            Settings {
+                imported_den: true,
+                imported_den_sounds: true,
+                imported_den_buttons: true,
+                imported_den_icons: true,
+                imported_den_browsers: true,
+                ..Settings::default()
+            }
+        }
+    }
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(name: &str) -> Option<T> {
@@ -674,8 +697,31 @@ fn import_den(settings: &mut Settings, den: &serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{unique_names, write_text};
-    use std::path::PathBuf;
+    use super::{read_settings, session_key, unique_names, write_text};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_broken_settings_file_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("den-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        assert_eq!(read_settings(&path).editor_font_size, 14.);
+        std::fs::write(&path, "{ \"editor_font_size\": 20 }").unwrap();
+        assert_eq!(read_settings(&path).editor_font_size, 20.);
+        std::fs::write(&path, "{ not json").unwrap();
+        let settings = read_settings(&path);
+        assert_eq!(settings.editor_font_size, 14.);
+        assert!(settings.imported_den && settings.imported_den_browsers, "nothing is imported over a broken file");
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), "{ not json");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn session_keys_are_stable() {
+        // The keys are in state.json: a change would orphan every saved session.
+        assert_eq!(session_key(Path::new(r"C:\Users\me\project")), "d6959baf11742046");
+        assert_eq!(session_key(Path::new(r"c:\users\ME\project")), session_key(Path::new(r"C:\Users\me\project")));
+    }
 
     #[test]
     fn writes_through_a_temporary_file() {

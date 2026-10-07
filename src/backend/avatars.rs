@@ -91,29 +91,37 @@ fn remember(key: &str, found: Option<PathBuf>) {
 }
 
 /// Look the avatar up and keep it: by the email alone, else through the
-/// commit `hash` in the GitHub repository `(owner, repo)`. A miss on the
-/// API's rate limit is kept for the session only; any other miss, for a
-/// week.
+/// commit `hash` in the GitHub repository `(owner, repo)`. A miss is kept
+/// for the session; one GitHub is sure of, for a week.
 pub fn fetch(email: &str, github: Option<(String, String, String)>) -> Option<PathBuf> {
     if let Some(known) = cached(email) {
         return known;
     }
     let key = key(email);
-    let (url, definitive) = match github_avatar_url(email) {
+    // A miss goes on disk only when it is sure: GitHub said the address has
+    // no account. Not when GitHub could not be asked (no repository there,
+    // the rate limit, no network) or the image could not be fetched.
+    let (url, conclusive) = match github_avatar_url(email) {
         Some(url) => (Some(url), true),
         None => match github {
             Some((owner, repo, hash)) => match api_avatar_url(&owner, &repo, &hash) {
                 Ok(url) => (url, true),
                 Err(()) => (None, false),
             },
-            None => (None, true),
+            None => (None, false),
         },
     };
-    let found = url.and_then(|url| {
-        let path = dir().join(format!("{key}.img"));
-        http::fetch_to_file(&url, &path, MAX_BYTES).ok().map(|()| path)
-    });
-    if found.is_none() && definitive {
+    let (found, conclusive) = match url {
+        Some(url) => {
+            let path = dir().join(format!("{key}.img"));
+            match http::fetch_to_file(&url, &path, MAX_BYTES) {
+                Ok(()) => (Some(path), conclusive),
+                Err(_) => (None, false),
+            }
+        }
+        None => (None, conclusive),
+    };
+    if found.is_none() && conclusive {
         let _ = std::fs::create_dir_all(dir());
         let _ = std::fs::write(dir().join(format!("{key}.none")), "");
     }

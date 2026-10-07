@@ -346,26 +346,7 @@ impl Workspace {
         sync_jump_list(cx);
         // Closing the window saves the session, asking first about unsaved changes.
         let weak = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            let Some(this) = weak.upgrade() else { return true };
-            let dirty = this.read(cx).dirty_panes(cx);
-            if dirty.is_empty() {
-                this.update(cx, |this, cx| this.save_session(cx));
-                return true;
-            }
-            this.update(cx, |this, cx| {
-                this.confirm_discard(
-                    dirty,
-                    |this, window, cx| {
-                        this.save_session(cx);
-                        window.remove_window();
-                    },
-                    window,
-                    cx,
-                )
-            });
-            false
-        });
+        window.on_window_should_close(cx, move |window, cx| weak.upgrade().is_none_or(|this| this.update(cx, |this, cx| this.request_close_window(window, cx))));
         let session = AppState::get(cx).session(&root);
         let repo = cx.new(|cx| Repo::new(root.clone(), cx));
         let explorer = cx.new(|cx| Explorer::new(root.clone(), session.expanded.clone(), repo.clone(), cx));
@@ -1496,6 +1477,26 @@ impl Workspace {
     // -- Sessions and windows ---------------------------------------------
 
     /// Files with unsaved changes in this window.
+    /// Close this window: at once, saving the session, when nothing is
+    /// unsaved; else after asking (false then: the window stays for now).
+    pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let dirty = self.dirty_panes(cx);
+        if dirty.is_empty() {
+            self.save_session(cx);
+            return true;
+        }
+        self.confirm_discard(
+            dirty,
+            |this, window, cx| {
+                this.save_session(cx);
+                window.remove_window();
+            },
+            window,
+            cx,
+        );
+        false
+    }
+
     fn dirty_panes(&self, cx: &App) -> Vec<PaneId> {
         self.tree.panes().into_iter().filter(|id| self.panes.get(id).is_some_and(|p| p.is_dirty(cx))).collect()
     }
@@ -1975,7 +1976,11 @@ impl Workspace {
                         menu
                     })
                     .separator()
-                    .item(item("Exit", "Alt+F4", |_, window, _| window.remove_window()))
+                    .item(item("Exit", "Alt+F4", |this, window, cx| {
+                        if this.request_close_window(window, cx) {
+                            window.remove_window();
+                        }
+                    }))
             })
     }
 
