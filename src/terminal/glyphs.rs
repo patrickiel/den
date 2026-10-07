@@ -6,6 +6,8 @@
 //! come out with gaps. Each shape here is a list of rectangles in fractions of
 //! the cell, or arms from its centre for lines.
 
+use smallvec::{SmallVec, smallvec};
+
 /// A rectangle in fractions of the cell, and how opaque (shades).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -26,38 +28,38 @@ const LOWER_LEFT: Rect = rect(0.0, 0.5, 0.5, 0.5);
 const LOWER_RIGHT: Rect = rect(0.5, 0.5, 0.5, 0.5);
 
 /// The rectangles of a block element (U+2580–U+259F).
-pub fn block(c: char) -> Option<Vec<Rect>> {
+pub fn block(c: char) -> Option<SmallVec<[Rect; 3]>> {
     let code = c as u32;
     let shape = match code {
-        0x2580 => vec![rect(0.0, 0.0, 1.0, 0.5)],
+        0x2580 => smallvec![rect(0.0, 0.0, 1.0, 0.5)],
         // Lower one eighth … lower seven eighths.
         0x2581..=0x2587 => {
             let n = (code - 0x2580) as f32 / 8.0;
-            vec![rect(0.0, 1.0 - n, 1.0, n)]
+            smallvec![rect(0.0, 1.0 - n, 1.0, n)]
         }
-        0x2588 => vec![rect(0.0, 0.0, 1.0, 1.0)],
+        0x2588 => smallvec![rect(0.0, 0.0, 1.0, 1.0)],
         // Left seven eighths … left one eighth.
         0x2589..=0x258F => {
             let n = (0x2590 - code) as f32 / 8.0;
-            vec![rect(0.0, 0.0, n, 1.0)]
+            smallvec![rect(0.0, 0.0, n, 1.0)]
         }
-        0x2590 => vec![rect(0.5, 0.0, 0.5, 1.0)],
+        0x2590 => smallvec![rect(0.5, 0.0, 0.5, 1.0)],
         0x2591..=0x2593 => {
             let alpha = (code - 0x2590) as f32 * 0.25;
-            vec![Rect { alpha, ..rect(0.0, 0.0, 1.0, 1.0) }]
+            smallvec![Rect { alpha, ..rect(0.0, 0.0, 1.0, 1.0) }]
         }
-        0x2594 => vec![rect(0.0, 0.0, 1.0, 0.125)],
-        0x2595 => vec![rect(0.875, 0.0, 0.125, 1.0)],
-        0x2596 => vec![LOWER_LEFT],
-        0x2597 => vec![LOWER_RIGHT],
-        0x2598 => vec![UPPER_LEFT],
-        0x2599 => vec![UPPER_LEFT, LOWER_LEFT, LOWER_RIGHT],
-        0x259A => vec![UPPER_LEFT, LOWER_RIGHT],
-        0x259B => vec![UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT],
-        0x259C => vec![UPPER_LEFT, UPPER_RIGHT, LOWER_RIGHT],
-        0x259D => vec![UPPER_RIGHT],
-        0x259E => vec![UPPER_RIGHT, LOWER_LEFT],
-        0x259F => vec![UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT],
+        0x2594 => smallvec![rect(0.0, 0.0, 1.0, 0.125)],
+        0x2595 => smallvec![rect(0.875, 0.0, 0.125, 1.0)],
+        0x2596 => smallvec![LOWER_LEFT],
+        0x2597 => smallvec![LOWER_RIGHT],
+        0x2598 => smallvec![UPPER_LEFT],
+        0x2599 => smallvec![UPPER_LEFT, LOWER_LEFT, LOWER_RIGHT],
+        0x259A => smallvec![UPPER_LEFT, LOWER_RIGHT],
+        0x259B => smallvec![UPPER_LEFT, UPPER_RIGHT, LOWER_LEFT],
+        0x259C => smallvec![UPPER_LEFT, UPPER_RIGHT, LOWER_RIGHT],
+        0x259D => smallvec![UPPER_RIGHT],
+        0x259E => smallvec![UPPER_RIGHT, LOWER_LEFT],
+        0x259F => smallvec![UPPER_RIGHT, LOWER_LEFT, LOWER_RIGHT],
         _ => return None,
     };
     Some(shape)
@@ -116,18 +118,18 @@ mod tests {
 
     #[test]
     fn eighths_grow_from_their_edge() {
-        assert_eq!(block('▁'), Some(vec![rect(0.0, 0.875, 1.0, 0.125)]));
-        assert_eq!(block('▇'), Some(vec![rect(0.0, 0.125, 1.0, 0.875)]));
-        assert_eq!(block('▉'), Some(vec![rect(0.0, 0.0, 0.875, 1.0)]));
-        assert_eq!(block('▏'), Some(vec![rect(0.0, 0.0, 0.125, 1.0)]));
+        assert_eq!(block('▁').as_deref(), Some([rect(0.0, 0.875, 1.0, 0.125)].as_slice()));
+        assert_eq!(block('▇').as_deref(), Some([rect(0.0, 0.125, 1.0, 0.875)].as_slice()));
+        assert_eq!(block('▉').as_deref(), Some([rect(0.0, 0.0, 0.875, 1.0)].as_slice()));
+        assert_eq!(block('▏').as_deref(), Some([rect(0.0, 0.0, 0.125, 1.0)].as_slice()));
     }
 
     #[test]
     fn halves_and_quadrants() {
-        assert_eq!(block('▀'), Some(vec![rect(0.0, 0.0, 1.0, 0.5)]));
-        assert_eq!(block('▄'), Some(vec![rect(0.0, 0.5, 1.0, 0.5)]));
-        assert_eq!(block('▐'), Some(vec![rect(0.5, 0.0, 0.5, 1.0)]));
-        assert_eq!(block('▚'), Some(vec![UPPER_LEFT, LOWER_RIGHT]));
+        assert_eq!(block('▀').as_deref(), Some([rect(0.0, 0.0, 1.0, 0.5)].as_slice()));
+        assert_eq!(block('▄').as_deref(), Some([rect(0.0, 0.5, 1.0, 0.5)].as_slice()));
+        assert_eq!(block('▐').as_deref(), Some([rect(0.5, 0.0, 0.5, 1.0)].as_slice()));
+        assert_eq!(block('▚').as_deref(), Some([UPPER_LEFT, LOWER_RIGHT].as_slice()));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use alacritty_terminal::{
     index::Point as GridPoint,
     term::cell::Flags,
-    vte::ansi::CursorShape,
+    vte::ansi::{Color, CursorShape},
 };
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
@@ -32,7 +32,7 @@ impl TerminalElement {
 #[derive(Default)]
 pub struct Plan {
     backgrounds: Vec<(Bounds<Pixels>, Hsla)>,
-    selection: Vec<Bounds<Pixels>>,
+    selection: Vec<(Bounds<Pixels>, Hsla)>,
     /// Block elements and box-drawing lines, drawn rather than shaped.
     shapes: Vec<(Bounds<Pixels>, Hsla)>,
     text: Vec<(Point<Pixels>, ShapedLine)>,
@@ -83,9 +83,11 @@ fn snapped(origin: Point<Pixels>, cell: Size<Pixels>, x: f32, y: f32, w: f32, h:
     Bounds::from_corners(point(x0, y0), point(x1, y1))
 }
 
-/// A box-drawing character's arms: bars from the cell's centre to its edges,
-/// one device pixel thick (light) or two (heavy), meeting in the middle.
-fn arm_rects(origin: Point<Pixels>, cell: Size<Pixels>, arms: glyphs::Arms, scale: f32) -> Vec<Bounds<Pixels>> {
+/// A box-drawing character's arms into `shapes`: bars from the cell's centre
+/// to its edges (one bar across when both sides have an arm), one device
+/// pixel thick (light) or two (heavy), meeting in the middle. A bar continues
+/// the one before it, so a line is one rect.
+fn push_arms(shapes: &mut Vec<(Bounds<Pixels>, Hsla)>, origin: Point<Pixels>, cell: Size<Pixels>, arms: glyphs::Arms, scale: f32, color: Hsla) {
     let device = scale.round().max(1.) / scale;
     let t = px(if arms.heavy { device * 2. } else { device });
     let left = snap(origin.x, scale);
@@ -94,27 +96,23 @@ fn arm_rects(origin: Point<Pixels>, cell: Size<Pixels>, arms: glyphs::Arms, scal
     let bottom = snap(origin.y + cell.height, scale);
     let cx = snap(origin.x + cell.width / 2. - t / 2., scale);
     let cy = snap(origin.y + cell.height / 2. - t / 2., scale);
-    let mut out = Vec::new();
-    if arms.left {
-        out.push(Bounds::from_corners(point(left, cy), point(cx + t, cy + t)));
+    if arms.left || arms.right {
+        let (x0, x1) = (if arms.left { left } else { cx }, if arms.right { right } else { cx + t });
+        push_rect(shapes, Bounds::from_corners(point(x0, cy), point(x1, cy + t)), color);
     }
-    if arms.right {
-        out.push(Bounds::from_corners(point(cx, cy), point(right, cy + t)));
+    if arms.up || arms.down {
+        let (y0, y1) = (if arms.up { top } else { cy }, if arms.down { bottom } else { cy + t });
+        push_rect(shapes, Bounds::from_corners(point(cx, y0), point(cx + t, y1)), color);
     }
-    if arms.up {
-        out.push(Bounds::from_corners(point(cx, top), point(cx + t, cy + t)));
-    }
-    if arms.down {
-        out.push(Bounds::from_corners(point(cx, cy), point(cx + t, bottom)));
-    }
-    out
 }
 
-/// Push a rect, or widen the last one when it continues it in the same colour.
+/// Push a rect, or widen the last one when it continues it in the same
+/// colour and height.
 fn push_rect(rects: &mut Vec<(Bounds<Pixels>, Hsla)>, bounds: Bounds<Pixels>, color: Hsla) {
     if let Some((last, last_color)) = rects.last_mut()
         && *last_color == color
         && last.origin.y == bounds.origin.y
+        && last.size.height == bounds.size.height
         && (last.origin.x + last.size.width - bounds.origin.x).abs() < px(0.5)
     {
         last.size.width += bounds.size.width;
@@ -144,7 +142,20 @@ impl TerminalPanel {
         };
         let mut selection_rects = Vec::new();
         let mut segments: Vec<Segment> = Vec::new();
-        let mut cursor_cell: Option<(char, Style, usize)> = None;
+        // The cell under the cursor: its character, style, width, and
+        // whether it is drawn as a shape rather than text.
+        let mut cursor_cell: Option<(char, Style, usize, bool)> = None;
+        // Runs of one colour are the norm: a colour is converted once per run.
+        type Memo = Option<(Color, Hsla)>;
+        let (mut last_fg, mut last_bg): (Memo, Memo) = (None, None);
+        let hsla = |memo: &mut Memo, color: Color, foreground: bool| match memo {
+            Some((known, hsla)) if *known == color => *hsla,
+            _ => {
+                let hsla = palette.color(color, foreground);
+                *memo = Some((color, hsla));
+                hsla
+            }
+        };
 
         for item in content.display_iter {
             let row = item.point.line.0 + offset;
@@ -153,8 +164,8 @@ impl TerminalPanel {
             }
             let (row, col) = (row as usize, item.point.column.0);
             let flags = item.cell.flags;
-            let mut fg = palette.color(item.cell.fg, true);
-            let mut bg = palette.color(item.cell.bg, false);
+            let mut fg = hsla(&mut last_fg, item.cell.fg, true);
+            let mut bg = hsla(&mut last_bg, item.cell.bg, false);
             if flags.contains(Flags::DIM) {
                 fg = fg.opacity(0.66);
             }
@@ -180,20 +191,20 @@ impl TerminalPanel {
                 underline: flags.intersects(Flags::ALL_UNDERLINES),
                 strike: flags.contains(Flags::STRIKEOUT),
             };
+            let block = glyphs::block(ch);
+            let arms = if block.is_none() { glyphs::arms(ch) } else { None };
             if item.point == cursor.point {
-                cursor_cell = Some((ch, style.clone(), cells));
+                cursor_cell = Some((ch, style.clone(), cells, block.is_some() || arms.is_some()));
             }
-            if let Some(rects) = glyphs::block(ch) {
+            if let Some(rects) = block {
                 for r in rects {
                     let bounds = snapped(bounds.origin, cell, r.x, r.y, r.w, r.h, scale);
-                    plan.shapes.push((bounds, fg.opacity(fg.a * r.alpha)));
+                    push_rect(&mut plan.shapes, bounds, fg.opacity(fg.a * r.alpha));
                 }
                 continue;
             }
-            if let Some(arms) = glyphs::arms(ch) {
-                for bounds in arm_rects(bounds.origin, cell, arms, scale) {
-                    plan.shapes.push((bounds, fg));
-                }
+            if let Some(arms) = arms {
+                push_arms(&mut plan.shapes, bounds.origin, cell, arms, scale, fg);
                 continue;
             }
             if ch == ' ' && !style.underline && !style.strike {
@@ -215,7 +226,7 @@ impl TerminalPanel {
                 }),
             }
         }
-        plan.selection = selection_rects.into_iter().map(|(bounds, _)| bounds).collect();
+        plan.selection = selection_rects;
 
         let shape = |text: String, style: &Style, color: Hsla, window: &mut Window| {
             let mut font = base.clone();
@@ -250,7 +261,7 @@ impl TerminalPanel {
         if cursor.shape != CursorShape::Hidden && offset == 0 {
             let row = cursor.point.line.0.max(0) as usize;
             let col = cursor.point.column.0;
-            let cells = cursor_cell.as_ref().map_or(1, |(_, _, cells)| *cells);
+            let cells = cursor_cell.as_ref().map_or(1, |(_, _, cells, _)| *cells);
             let origin = at(row, col);
             let width = cell.width * cells as f32;
             let color = palette.cursor;
@@ -265,10 +276,9 @@ impl TerminalPanel {
             // Under a block cursor the character shows in the background colour.
             if focused
                 && matches!(cursor.shape, CursorShape::Block | CursorShape::HollowBlock)
-                && let Some((ch, style, _)) = cursor_cell
+                && let Some((ch, style, _, drawn)) = cursor_cell
                 && ch != ' '
-                && glyphs::block(ch).is_none()
-                && glyphs::arms(ch).is_none()
+                && !drawn
             {
                 plan.cursor_text = Some((origin, shape(ch.to_string(), &style, palette.background, window)));
             }
@@ -352,8 +362,8 @@ impl Element for TerminalElement {
         for (bounds, color) in plan.backgrounds.drain(..) {
             window.paint_quad(fill(bounds, color));
         }
-        for bounds in plan.selection.drain(..) {
-            window.paint_quad(fill(bounds, cx.theme().selection));
+        for (bounds, color) in plan.selection.drain(..) {
+            window.paint_quad(fill(bounds, color));
         }
         for (bounds, color) in plan.shapes.drain(..) {
             window.paint_quad(fill(bounds, color));
@@ -370,5 +380,45 @@ impl Element for TerminalElement {
         for (bounds, color) in plan.underlines.drain(..) {
             window.paint_quad(fill(bounds, color));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{glyphs, push_arms, push_rect};
+    use gpui_kit::{Bounds, Hsla, Pixels, point, px, size};
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn neighbouring_rects_merge_only_at_the_same_height() {
+        let color = Hsla::default();
+        let mut rects = Vec::new();
+        push_rect(&mut rects, rect(0., 0., 8., 16.), color);
+        push_rect(&mut rects, rect(8., 0., 8., 16.), color);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].0.size.width, px(16.));
+        // A half block beside a full one keeps its own height.
+        push_rect(&mut rects, rect(16., 0., 8., 8.), color);
+        assert_eq!(rects.len(), 2);
+    }
+
+    #[test]
+    fn a_line_through_the_cell_is_one_bar() {
+        let color = Hsla::default();
+        let cell = size(px(8.), px(16.));
+        let mut shapes = Vec::new();
+        push_arms(&mut shapes, point(px(0.), px(0.)), cell, glyphs::arms('─').unwrap(), 1., color);
+        assert_eq!(shapes.len(), 1);
+        assert_eq!((shapes[0].0.origin.x, shapes[0].0.size.width), (px(0.), px(8.)));
+        // The next cell's bar continues it.
+        push_arms(&mut shapes, point(px(8.), px(0.)), cell, glyphs::arms('─').unwrap(), 1., color);
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].0.size.width, px(16.));
+        let mut corner = Vec::new();
+        push_arms(&mut corner, point(px(0.), px(0.)), cell, glyphs::arms('┌').unwrap(), 1., color);
+        assert_eq!(corner.len(), 2);
     }
 }

@@ -7,98 +7,87 @@
 
 use std::path::PathBuf;
 
-/// Finds the OSC sequences that start with `start` in shell output, across
-/// reads that split them.
+/// Finds the numbered OSC sequences (`ESC ] <number> ; <body> BEL`, or
+/// `ESC \` for BEL) in shell output, across reads that split them.
+#[derive(Default)]
 pub struct OscScanner {
-    start: &'static [u8],
     /// The tail of the last read when it ended inside a sequence.
     carry: Vec<u8>,
 }
 
 impl OscScanner {
-    pub fn new(start: &'static [u8]) -> Self {
-        Self { start, carry: Vec::new() }
-    }
-
-    /// The bodies of the complete sequences in `bytes`.
-    pub fn scan(&mut self, bytes: &[u8]) -> Vec<String> {
-        let start_seq = self.start;
-        let mut data = std::mem::take(&mut self.carry);
-        data.extend_from_slice(bytes);
+    /// The complete sequences in `bytes`, as `(number, body)`.
+    pub fn scan(&mut self, bytes: &[u8]) -> Vec<(u32, String)> {
+        let joined;
+        let data: &[u8] = if self.carry.is_empty() {
+            bytes
+        } else {
+            joined = [self.carry.as_slice(), bytes].concat();
+            &joined
+        };
+        self.carry.clear();
         let mut found = Vec::new();
         let mut at = 0;
-        while let Some(start) = find(&data[at..], start_seq).map(|i| i + at) {
-            let body = start + start_seq.len();
-            let end = data[body..].iter().position(|&b| b == 0x07 || b == 0x1b).map(|i| i + body);
-            match end {
-                Some(end) => {
-                    found.push(String::from_utf8_lossy(&data[body..end]).into_owned());
-                    at = end + 1;
-                }
-                None => {
-                    // The sequence goes on in the next read; keep it, unless
-                    // it is too long to be one.
-                    if data.len() - start < 4096 {
-                        self.carry = data[start..].to_vec();
-                    }
-                    return found;
+        while let Some(start) = find(&data[at..], b"\x1b]").map(|i| i + at) {
+            let head = start + 2;
+            let digits = data[head..].iter().take_while(|b| b.is_ascii_digit()).count();
+            match data.get(head + digits) {
+                // The read ends inside the number: the rest comes later.
+                None => return self.keep(data, start, found),
+                Some(b';') if digits > 0 => {}
+                // Not a numbered sequence (a title set by name, say).
+                _ => {
+                    at = head;
+                    continue;
                 }
             }
+            let body = head + digits + 1;
+            let Some(end) = data[body..].iter().position(|&b| b == 0x07 || b == 0x1b).map(|i| i + body) else {
+                return self.keep(data, start, found);
+            };
+            let number = std::str::from_utf8(&data[head..head + digits]).ok().and_then(|n| n.parse().ok()).unwrap_or(u32::MAX);
+            found.push((number, String::from_utf8_lossy(&data[body..end]).into_owned()));
+            at = end + 1;
         }
-        // A read can end on the first bytes of the next sequence.
-        let tail = data.len().saturating_sub(start_seq.len() - 1);
-        if let Some(i) = data[tail..].iter().position(|&b| b == 0x1b) {
-            let partial = &data[tail + i..];
-            if start_seq.starts_with(partial) {
-                self.carry = partial.to_vec();
-            }
+        // A read can end on the first byte of the next sequence.
+        if data.last() == Some(&0x1b) {
+            self.carry.push(0x1b);
+        }
+        found
+    }
+
+    /// Keep the data from `start` on for the next read, unless it is too long
+    /// to be a sequence; what was found before it.
+    fn keep(&mut self, data: &[u8], start: usize, found: Vec<(u32, String)>) -> Vec<(u32, String)> {
+        if data.len() - start < 4096 {
+            self.carry = data[start..].to_vec();
         }
         found
     }
 }
 
-/// Finds OSC 7 reports in shell output.
-pub struct CwdScanner(OscScanner);
-
-impl Default for CwdScanner {
-    fn default() -> Self {
-        Self(OscScanner::new(b"\x1b]7;"))
-    }
+/// OSC 7: the folder the shell is in.
+pub fn cwd_of(number: u32, body: &str) -> Option<PathBuf> {
+    (number == 7).then(|| parse_uri(body)).flatten()
 }
 
-impl CwdScanner {
-    /// The folder of the last complete report in `bytes`, if any.
-    pub fn scan(&mut self, bytes: &[u8]) -> Option<PathBuf> {
-        self.0.scan(bytes).iter().filter_map(|uri| parse_uri(uri)).last()
-    }
-}
-
-/// Notifications a program sends: OSC 9 (iTerm2 style, as Codex sends) and
+/// A notification a program sent: OSC 9 (iTerm2 style, as Codex sends) and
 /// OSC 777 `notify;title;body`. ConEmu's numbered OSC 9 commands are not
 /// messages.
-pub struct NotifyScanner {
-    nine: OscScanner,
-    seven: OscScanner,
-}
-
-impl Default for NotifyScanner {
-    fn default() -> Self {
-        Self { nine: OscScanner::new(b"\x1b]9;"), seven: OscScanner::new(b"\x1b]777;") }
-    }
-}
-
-impl NotifyScanner {
-    pub fn scan(&mut self, bytes: &[u8]) -> Vec<String> {
-        let numbered = |text: &String| text.split(';').next().is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        let mut found: Vec<String> = self.nine.scan(bytes).into_iter().filter(|text| !numbered(text)).collect();
-        for text in self.seven.scan(bytes) {
-            let mut parts = text.splitn(3, ';');
-            if parts.next() == Some("notify") {
-                let (title, body) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-                found.push(if body.is_empty() { title } else { body }.to_string());
-            }
+pub fn notification_of(number: u32, body: &str) -> Option<String> {
+    match number {
+        9 => {
+            let numbered = body.split(';').next().is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            (!numbered).then(|| body.to_string())
         }
-        found
+        777 => {
+            let mut parts = body.splitn(3, ';');
+            (parts.next() == Some("notify")).then(|| {
+                let (title, body) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                if body.is_empty() { title } else { body }.to_string()
+            })
+        }
+        _ => None,
     }
 }
 
@@ -177,8 +166,12 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CwdScanner, NotifyScanner, base64, encode_powershell, parse_uri};
+    use super::{OscScanner, base64, cwd_of, encode_powershell, notification_of, parse_uri};
     use std::path::PathBuf;
+
+    fn last_cwd(scanner: &mut OscScanner, bytes: &[u8]) -> Option<PathBuf> {
+        scanner.scan(bytes).into_iter().filter_map(|(number, body)| cwd_of(number, &body)).next_back()
+    }
 
     #[test]
     fn windows_and_unix_uris() {
@@ -189,25 +182,28 @@ mod tests {
 
     #[test]
     fn finds_the_last_report_in_a_read() {
-        let mut scanner = CwdScanner::default();
+        let mut scanner = OscScanner::default();
         let out = b"text\x1b]7;file://PC/C:/a\x07more\x1b]7;file://PC/C:/b\x1b\\prompt> ";
-        assert_eq!(scanner.scan(out), Some(PathBuf::from(r"C:\b")));
+        assert_eq!(last_cwd(&mut scanner, out), Some(PathBuf::from(r"C:\b")));
     }
 
     #[test]
     fn a_report_split_across_reads() {
-        let mut scanner = CwdScanner::default();
-        assert_eq!(scanner.scan(b"output\x1b]7;file://PC/C:/pro"), None);
-        assert_eq!(scanner.scan(b"jects\x07PS> "), Some(PathBuf::from(r"C:\projects")));
-        assert_eq!(scanner.scan(b"x\x1b]"), None);
-        assert_eq!(scanner.scan(b"7;file://PC/D:/\x07"), Some(PathBuf::from(r"D:\")));
+        let mut scanner = OscScanner::default();
+        assert_eq!(last_cwd(&mut scanner, b"output\x1b]7;file://PC/C:/pro"), None);
+        assert_eq!(last_cwd(&mut scanner, b"jects\x07PS> "), Some(PathBuf::from(r"C:\projects")));
+        assert_eq!(last_cwd(&mut scanner, b"x\x1b]"), None);
+        assert_eq!(last_cwd(&mut scanner, b"7;file://PC/D:/\x07"), Some(PathBuf::from(r"D:\")));
+        assert_eq!(last_cwd(&mut scanner, b"y\x1b"), None);
+        assert_eq!(last_cwd(&mut scanner, b"]7;file://PC/E:/\x07"), Some(PathBuf::from(r"E:\")));
     }
 
     #[test]
-    fn notifications_but_not_conemu_commands() {
-        let mut scanner = NotifyScanner::default();
-        let out = b"\x1b]9;4;1;50\x07\x1b]9;Agent turn complete\x07\x1b]777;notify;Title;Body\x07";
-        assert_eq!(scanner.scan(out), vec!["Agent turn complete".to_string(), "Body".to_string()]);
+    fn notifications_but_not_conemu_commands_or_titles() {
+        let mut scanner = OscScanner::default();
+        let out = b"\x1b]9;4;1;50\x07\x1b]0;a title\x07\x1b]9;Agent turn complete\x07\x1b]777;notify;Title;Body\x07\x1b]P1\x07";
+        let found: Vec<String> = scanner.scan(out).into_iter().filter_map(|(number, body)| notification_of(number, &body)).collect();
+        assert_eq!(found, vec!["Agent turn complete".to_string(), "Body".to_string()]);
     }
 
     #[test]

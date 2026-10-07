@@ -27,7 +27,7 @@ use alacritty_terminal::{
     Term,
     event::{Event as TermEvent, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
-    index::{Column, Line},
+    index::{Column, Line, Point as GridPoint, Side as GridSide},
     selection::{Selection, SelectionType},
     term::{Config, TermMode, cell::Flags},
     vte::ansi::Processor,
@@ -239,8 +239,14 @@ pub struct TerminalPanel {
     selecting: bool,
     /// The link under the pointer while Ctrl is held: its screen row and columns.
     hover_link: Option<(usize, Range<usize>)>,
-    cwd_scanner: osc::CwdScanner,
-    notify_scanner: osc::NotifyScanner,
+    /// The last link found under the pointer, and the last cell with none,
+    /// for the pointer moving within them; forgotten as the screen changes.
+    link_cache: Option<(usize, Range<usize>, Link)>,
+    no_link_at: Option<(usize, usize)>,
+    /// Where the selection was last dragged to; a move within that cell
+    /// changes nothing.
+    drag_at: Option<(GridPoint, GridSide)>,
+    osc: osc::OscScanner,
     /// Names this terminal to the agent hooks.
     hook_id: u64,
     /// The program it was started with still runs (until the shell's prompt
@@ -297,8 +303,10 @@ impl TerminalPanel {
             origin: Point::default(),
             selecting: false,
             hover_link: None,
-            cwd_scanner: osc::CwdScanner::default(),
-            notify_scanner: osc::NotifyScanner::default(),
+            link_cache: None,
+            no_link_at: None,
+            drag_at: None,
+            osc: osc::OscScanner::default(),
             hook_id: NEXT_HOOK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             last_alert: None,
             claude_session: None,
@@ -420,7 +428,16 @@ impl TerminalPanel {
     }
 
     fn feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        if let Some(cwd) = self.cwd_scanner.scan(bytes) {
+        self.forget_links();
+        let (mut cwd, mut messages) = (None, Vec::new());
+        for (number, body) in self.osc.scan(bytes) {
+            if let Some(dir) = osc::cwd_of(number, &body) {
+                cwd = Some(dir);
+            } else if let Some(message) = osc::notification_of(number, &body) {
+                messages.push(message);
+            }
+        }
+        if let Some(cwd) = cwd {
             self.cwd = cwd;
             // The shell's prompt is back: whatever program or Claude Code ran
             // has ended.
@@ -430,7 +447,7 @@ impl TerminalPanel {
                 cx.emit(PaneEvent::Changed);
             }
         }
-        for message in self.notify_scanner.scan(bytes) {
+        for message in messages {
             let codex = self.program.as_deref().map(|p| agent::program_of(p.split_whitespace().next().unwrap_or(p))).as_deref() == Some("codex");
             let kind = match message.to_lowercase() {
                 _ if !codex => AlertKind::Attention,
@@ -609,6 +626,7 @@ impl TerminalPanel {
             }
         } else {
             self.term.scroll_display(Scroll::Delta(lines));
+            self.forget_links();
             cx.notify();
         }
     }
@@ -631,16 +649,20 @@ impl TerminalPanel {
         };
         self.term.selection = Some(Selection::new(kind, point, side));
         self.selecting = true;
+        self.drag_at = Some((point, side));
         cx.notify();
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
             let (point, side, _, _) = self.cell_at(event.position);
-            if let Some(selection) = &mut self.term.selection {
-                selection.update(point, side);
+            if self.drag_at != Some((point, side)) {
+                self.drag_at = Some((point, side));
+                if let Some(selection) = &mut self.term.selection {
+                    selection.update(point, side);
+                }
+                cx.notify();
             }
-            cx.notify();
         }
         let hover = event
             .modifiers
@@ -657,7 +679,7 @@ impl TerminalPanel {
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
         // A click without a drag selects nothing.
-        if self.term.selection_to_string().is_none_or(|text| text.is_empty()) {
+        if self.term.selection.as_ref().is_none_or(Selection::is_empty) {
             self.term.selection = None;
             cx.notify();
         }
@@ -679,10 +701,33 @@ impl TerminalPanel {
             .collect()
     }
 
-    fn link_at(&self, position: Point<Pixels>) -> Option<(usize, Range<usize>, Link)> {
+    /// The link under `position`, remembered (with the cells that have none)
+    /// while the pointer moves over the same screen: finding one reads the
+    /// row and asks the disk.
+    fn link_at(&mut self, position: Point<Pixels>) -> Option<(usize, Range<usize>, Link)> {
         let (_, _, row, col) = self.cell_at(position);
+        if let Some((known_row, range, link)) = &self.link_cache
+            && *known_row == row
+            && range.contains(&col)
+        {
+            return Some((row, range.clone(), link.clone()));
+        }
+        if self.no_link_at == Some((row, col)) {
+            return None;
+        }
         let text = self.row_text(row);
-        links::find(&text, col, &self.cwd, |path| path.is_file()).map(|(range, link)| (row, range, link))
+        let found = links::find(&text, col, &self.cwd, |path| path.is_file()).map(|(range, link)| (row, range, link));
+        match &found {
+            Some(hit) => self.link_cache = Some(hit.clone()),
+            None => self.no_link_at = Some((row, col)),
+        }
+        found
+    }
+
+    /// The screen changed: what was under the pointer may not be any more.
+    fn forget_links(&mut self) {
+        self.link_cache = None;
+        self.no_link_at = None;
     }
 
     fn open_link(&mut self, link: Link, cx: &mut Context<Self>) {
@@ -709,6 +754,7 @@ impl TerminalPanel {
         self.columns = columns;
         self.lines = lines;
         self.term.resize(GridSize { columns, lines });
+        self.forget_links();
         if let Some(pty) = &self.pty {
             _ = pty.master.resize(PtySize {
                 rows: lines as u16,
