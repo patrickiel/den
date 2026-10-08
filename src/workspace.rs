@@ -454,8 +454,8 @@ impl Workspace {
             .detach();
         }
         // The folder's own file first; the session file's tab state merges in.
-        // When the folder's file does not load (the Tauri den wrote another
-        // format under the same name), the session file's layout is used.
+        // When the folder's file does not load, the session file's layout is
+        // used.
         let from_folder = crate::layout_file::read(&this.root);
         this.layout_file_text = from_folder.as_ref().map(crate::layout_file::text);
         let restored = from_folder.map(|shared| crate::layout_file::restore(shared, &this.root, session.layout.as_ref()));

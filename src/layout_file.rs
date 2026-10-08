@@ -1,8 +1,8 @@
 //! The arrangement kept in the session folder itself, as den does: groups,
 //! containers, sizes, default groups and tabs go to `.den/layout.json`
 //! whenever they change, and come back from there first, so the layout goes
-//! with the folder. (The Tauri den wrote another format to the same file; it
-//! does not load, and is replaced on the next change.)
+//! with the folder. A file that does not load is replaced on the next
+//! change.
 //!
 //! Paths inside the folder are stored relative to it. Each tab's machine
 //! state (a terminal's scrollback) stays in den's session file and is merged

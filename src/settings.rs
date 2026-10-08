@@ -125,10 +125,6 @@ pub struct Settings {
     pub diff_layout: DiffLayout,
     pub smart_commit: SmartCommit,
     pub group_buttons: GroupButtons,
-    /// den's tab-strip buttons were taken over once.
-    pub imported_den_buttons: bool,
-    /// den's notification sounds were taken over once.
-    pub imported_den_sounds: bool,
     /// Generate Commit Message: empty for the default model, a download URL
     /// (a preset's or a custom one) or a local .gguf file.
     pub ai_model: String,
@@ -156,14 +152,8 @@ pub struct Settings {
     /// 0..100.
     pub notify_volume: u32,
     pub notify_taskbar: bool,
-    /// den's presets and font were taken over once, on first start.
-    pub imported_den: bool,
     /// The page a new browser tab opens.
     pub browser_home: String,
-    /// den's browser presets were taken over once.
-    pub imported_den_browsers: bool,
-    /// The icons of den's presets were taken over once (they came later).
-    pub imported_den_icons: bool,
     /// Installed extensions that den does not load, by id.
     pub disabled_extensions: Vec<String>,
     /// What the user set of each extension's settings, by id and key.
@@ -206,8 +196,6 @@ impl Default for Settings {
             diff_layout: DiffLayout::Automatic,
             smart_commit: SmartCommit::Ask,
             group_buttons: GroupButtons::default(),
-            imported_den_buttons: false,
-            imported_den_sounds: false,
             ai_model: String::new(),
             ai_custom_models: Vec::new(),
             ai_context_size: 8192,
@@ -224,10 +212,7 @@ impl Default for Settings {
             notify_sound_input: "ping".into(),
             notify_volume: 60,
             notify_taskbar: true,
-            imported_den: false,
             browser_home: "https://www.google.com".into(),
-            imported_den_browsers: false,
-            imported_den_icons: false,
             disabled_extensions: Vec::new(),
             extension_settings: Default::default(),
         }
@@ -358,8 +343,7 @@ impl AppState {
 }
 
 pub fn init(cx: &mut App) {
-    let mut settings = read_settings(&data_dir().join("settings.json"));
-    import_old_den(&mut settings);
+    let settings = read_settings(&data_dir().join("settings.json"));
     cx.set_global::<Settings>(settings);
     cx.set_global::<AppState>(read_json("state.json").unwrap_or_default());
     cx.set_global(Pending::default());
@@ -436,10 +420,9 @@ pub fn last_folder() -> Option<PathBuf> {
     read_json::<AppState>("state.json")?.recent.into_iter().find(|p| p.is_dir())
 }
 
-/// The settings file: the defaults when there is none (the Tauri den's are
-/// taken over then). One that cannot be read is kept beside as
-/// `settings.json.bad`, and den starts with the defaults, importing nothing,
-/// so the file stays as it is until a setting changes.
+/// The settings file: the defaults when there is none. One that cannot be
+/// read is kept beside as `settings.json.bad`, and den starts with the
+/// defaults, so the file stays as it is until a setting changes.
 fn read_settings(path: &Path) -> Settings {
     let Ok(text) = std::fs::read_to_string(path) else { return Settings::default() };
     match serde_json::from_str(&text) {
@@ -447,14 +430,7 @@ fn read_settings(path: &Path) -> Settings {
         Err(err) => {
             eprintln!("den: {} cannot be read ({err}); starting with the defaults", path.display());
             let _ = std::fs::copy(path, path.with_extension("json.bad"));
-            Settings {
-                imported_den: true,
-                imported_den_sounds: true,
-                imported_den_buttons: true,
-                imported_den_icons: true,
-                imported_den_browsers: true,
-                ..Settings::default()
-            }
+            Settings::default()
         }
     }
 }
@@ -524,10 +500,6 @@ pub fn flush(cx: &mut App) {
     }
 }
 
-fn write_json<T: Serialize>(file: File, value: &T) {
-    write_file(file, &pretty(value));
-}
-
 /// Write `text` to `file` unless that is what it holds already. The first
 /// failure is reported; den runs on without the file.
 fn write_file(file: File, text: &str) {
@@ -571,143 +543,6 @@ pub fn mono_font(cx: &App) -> SharedString {
     }
 }
 
-/// Take over what the Tauri den (`%APPDATA%\den.workspace`) had, each part
-/// once: its presets and font, sounds, tab-strip buttons, preset icons and
-/// browser presets, in that order, as earlier builds did one by one.
-fn import_old_den(settings: &mut Settings) {
-    if settings.imported_den && settings.imported_den_sounds && settings.imported_den_buttons && settings.imported_den_icons && settings.imported_den_browsers {
-        return;
-    }
-    if let Some(den) = old_den_settings() {
-        if !settings.imported_den {
-            import_den(settings, &den);
-        }
-        if !settings.imported_den_sounds {
-            import_den_sounds(settings, &den);
-        }
-        if !settings.imported_den_buttons {
-            import_den_buttons(settings, &den);
-        }
-        if !settings.imported_den_icons {
-            import_den_icons(settings, &den);
-        }
-        if !settings.imported_den_browsers {
-            import_den_browsers(settings, &den);
-        }
-    }
-    settings.imported_den = true;
-    settings.imported_den_sounds = true;
-    settings.imported_den_buttons = true;
-    settings.imported_den_icons = true;
-    settings.imported_den_browsers = true;
-    write_json(File::Settings, settings);
-}
-
-/// The Tauri den's settings file, if it is there.
-fn old_den_settings() -> Option<serde_json::Value> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let text = std::fs::read_to_string(PathBuf::from(appdata).join("den.workspace").join("settings.json")).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// den's notification sounds and volume.
-fn import_den_sounds(settings: &mut Settings, den: &serde_json::Value) {
-    if let Some(done) = den["notifySoundDone"].as_str() {
-        settings.notify_sound_done = done.to_string();
-    }
-    if let Some(input) = den["notifySoundInput"].as_str() {
-        settings.notify_sound_input = input.to_string();
-    }
-    if let Some(volume) = den["notifyVolume"].as_u64() {
-        settings.notify_volume = volume.min(100) as u32;
-    }
-}
-
-/// den's choice of tab-strip buttons (its plain shell is a preset there).
-fn import_den_buttons(settings: &mut Settings, den: &serde_json::Value) {
-    let buttons = &den["groupButtons"];
-    if let Some(browser) = buttons["browser"].as_bool() {
-        settings.group_buttons.browser = browser;
-    }
-    if let Some(split) = buttons["split"].as_bool() {
-        settings.group_buttons.split = split;
-    }
-    let shell = den["terminalPresets"].as_array().into_iter().flatten().find(|p| p["command"].as_str().is_some_and(|c| c.trim().is_empty()));
-    if let Some(pinned) = shell.and_then(|p| p["pinned"].as_bool()) {
-        settings.group_buttons.shell = pinned;
-    }
-}
-
-/// Give presets taken over from den before icons came their den icon.
-fn import_den_icons(settings: &mut Settings, den: &serde_json::Value) {
-    for key in ["terminalPresets", "agentPresets", "browserPresets"] {
-        for preset in den[key].as_array().into_iter().flatten() {
-            let Some(icon) = preset["icon"].as_str() else { continue };
-            let name = preset["name"].as_str().unwrap_or_default();
-            if let Some(own) = settings.presets.iter_mut().find(|p| p.name == name && p.icon.is_none()) {
-                own.icon = Some(icon.to_string());
-            }
-        }
-    }
-}
-
-/// Take den's browser presets and home page over, once.
-fn import_den_browsers(settings: &mut Settings, den: &serde_json::Value) {
-    if let Some(home) = den["browserHome"].as_str().map(str::trim).filter(|h| !h.is_empty()) {
-        settings.browser_home = home.to_string();
-    }
-    for preset in den["browserPresets"].as_array().into_iter().flatten() {
-        let url = preset["url"].as_str().unwrap_or_default().trim().to_string();
-        if url.is_empty() {
-            continue;
-        }
-        let name = preset["name"].as_str().unwrap_or(&url).to_string();
-        settings.presets.push(Preset {
-            browser: true,
-            pinned: preset["pinned"].as_bool().unwrap_or(true),
-            color: preset["color"].as_str().map(str::to_string),
-            icon: preset["icon"].as_str().map(str::to_string),
-            ..Preset::new(name, url)
-        });
-    }
-}
-
-/// Take the Tauri den's terminal and agent presets and its font over, once:
-/// den then starts with the buttons it had.
-fn import_den(settings: &mut Settings, den: &serde_json::Value) {
-    let mut presets = Vec::new();
-    for (key, agent) in [("terminalPresets", false), ("agentPresets", true)] {
-        for preset in den[key].as_array().into_iter().flatten() {
-            let command = preset["command"].as_str().unwrap_or_default().trim().to_string();
-            // The plain shell is the strip's own shell button.
-            if command.is_empty() {
-                continue;
-            }
-            let name = preset["name"].as_str().unwrap_or(&command).to_string();
-            presets.push(Preset {
-                agent,
-                pinned: preset["pinned"].as_bool().unwrap_or(true),
-                color: preset["color"].as_str().map(str::to_string),
-                icon: preset["icon"].as_str().map(str::to_string),
-                ..Preset::new(name, command)
-            });
-        }
-    }
-    if !presets.is_empty() {
-        settings.presets = presets;
-    }
-    // den's font list is CSS; the first family is the one it uses.
-    if let Some(family) = den["fontFamily"].as_str().and_then(|list| list.split(',').next()) {
-        let family = family.trim().trim_matches('"').trim_matches('\'');
-        if !family.is_empty() && family != "monospace" {
-            settings.font_family = family.to_string();
-        }
-    }
-    if let Some(size) = den["fontSize"].as_f64() {
-        settings.editor_font_size = size as f32;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{read_settings, session_key, unique_names, write_text};
@@ -724,7 +559,6 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         let settings = read_settings(&path);
         assert_eq!(settings.editor_font_size, 14.);
-        assert!(settings.imported_den && settings.imported_den_browsers, "nothing is imported over a broken file");
         assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), "{ not json");
         std::fs::remove_dir_all(&dir).unwrap();
     }
