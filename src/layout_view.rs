@@ -486,31 +486,29 @@ impl Workspace {
                             this.zone_hint(id, Drop::Side(nearest_side(tray, event.event.position)), cx);
                         }
                     }))
+                    // The default button leads: its kind badge is state, so it
+                    // stays; with no kind it hides until the header is hovered.
                     .child(
-                        h_flex()
+                        div()
+                            .flex_none()
+                            .when(current.is_none(), |this| this.invisible().group_hover(hover_group.clone(), |this| this.visible()))
+                            .child(self.default_button(id, true, current, false, cx)),
+                    )
+                    // The rest of the header is the grip.
+                    .child(
+                        div()
                             .id(("container-grip", id))
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .gap_1()
-                            .pl_1()
                             .cursor_grab()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into())))
-                            .child(Icon::new(IconName::GripHorizontal).xsmall())
-                            .when_some(current, |this, kind| this.child(div().truncate().child(kind.label()))),
+                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into()))),
                     )
-                    // The kind badge is state, so it stays; with no kind the
-                    // default button is just another action and hides with
-                    // the rest until the header is hovered.
-                    .when(current.is_some(), |this| this.child(self.default_button(id, true, current, false, cx)))
                     .child(
                         h_flex()
                             .gap_0p5()
                             .invisible()
                             .group_hover(hover_group, |this| this.visible())
-                            .when(current.is_none(), |this| this.child(self.default_button(id, true, current, false, cx)))
                             .children(self.container_actions(id, "container", true, cx))
                             .child(self.container_menu(id, cx)),
                     )
@@ -570,7 +568,7 @@ impl Workspace {
     }
 
     /// The button that opens the default menu of a group or container. With a
-    /// kind set it shows that kind's icon on a tint.
+    /// kind set it shows that kind's icon, highlighted.
     fn default_button(&self, node: NodeId, container: bool, current: Option<Kind>, small: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = if container { "container" } else { "group" };
         let tooltip = match current {
@@ -581,7 +579,9 @@ impl Workspace {
         Button::new((if container { "container-default" } else { "group-default" }, node))
             .map(|button| if small { button.small() } else { button.xsmall() })
             .icon(Icon::new(current.map_or(IconName::SquareArrowDownRight, Kind::icon)))
-            .map(|button| if current.is_some() { button.primary() } else { button.ghost() })
+            // Highlighted, not filled, as the sidebar's view buttons.
+            .ghost()
+            .selected(current.is_some())
             .tooltip(tooltip)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu
@@ -757,7 +757,6 @@ impl Workspace {
             .px_1()
             .gap_0p5()
             .bg(theme.tab_bar)
-            .child(self.default_button(group, false, current, true, cx))
             // The terminal presets, as den's preset buttons; a group that is the
             // default of another kind does not get the buttons for this one.
             .when(buttons.shell && self.defaults.allows(&self.tree, group, Kind::Terminals), |this| this.child(
@@ -831,6 +830,8 @@ impl Workspace {
             // strip does not grow when its first tab opens.
             .min_h(px(32.))
             .track_scroll(&handle)
+            // The group's default leads the strip, as the container's does its header.
+            .prefix(h_flex().h_full().flex_none().px_1().bg(cx.theme().tab_bar).child(self.default_button(group, false, current, true, cx)))
             .children(tab_elements)
             .last_empty_space(
                 div()

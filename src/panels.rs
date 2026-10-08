@@ -385,7 +385,7 @@ const LANGUAGES: &[(&str, &str)] = &[
 
 /// The extension doubles as the highlighter's language name; unknown ones
 /// fall back to plain text inside the editor.
-fn language_of(path: &Path) -> String {
+pub(crate) fn language_of(path: &Path) -> String {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_lowercase())

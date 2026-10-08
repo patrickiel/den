@@ -13,9 +13,11 @@ use std::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _,
+    ActiveTheme as _, Icon, Rope, Sizable as _, Theme,
     button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
+    h_flex,
+    highlighter::{HighlightTheme, SyntaxHighlighter},
+    v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use serde_json::{Value, json};
@@ -116,6 +118,37 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
     out
 }
 
+/// One line's syntax colours: byte ranges within the line.
+type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
+
+/// Syntax colours for each line of `text` (LF endings), by line index, so a
+/// row's colours come from its whole file rather than the line alone.
+fn highlight_lines(text: &str, language: &str, theme: &HighlightTheme) -> Vec<LineStyles> {
+    let mut highlighter = SyntaxHighlighter::new(language);
+    highlighter.update(None, &Rope::from_str(text), None);
+    let styles = highlighter.styles(&(0..text.len()), theme);
+    let mut first = 0;
+    let mut start = 0;
+    text.split('\n')
+        .map(|line| {
+            let len = line.trim_end_matches('\r').len();
+            let end = start + len;
+            while styles.get(first).is_some_and(|(range, _)| range.end <= start) {
+                first += 1;
+            }
+            let line_styles = styles[first..]
+                .iter()
+                .take_while(|(range, _)| range.start < end)
+                .filter(|(_, style)| *style != HighlightStyle::default())
+                .map(|(range, style)| (range.start.max(start) - start..range.end.min(end) - start, *style))
+                .filter(|(range, _)| !range.is_empty())
+                .collect();
+            start += line.len() + 1;
+            line_styles
+        })
+        .collect()
+}
+
 /// Both sides' text: a commit's parent and the commit, HEAD and the index
 /// (staged), or the index and the file. A side with no such file is empty
 /// (added, deleted); one git cannot read is the error shown instead.
@@ -158,6 +191,8 @@ pub struct DiffPanel {
     /// A commit's change instead: the commit, its parent, the path before.
     commit: Option<CommitRevs>,
     rows: Vec<Row>,
+    /// Each side's syntax colours, by line number - 1.
+    styles: [Vec<LineStyles>; 2],
     error: Option<SharedString>,
     focus_handle: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -199,6 +234,7 @@ impl DiffPanel {
             staged,
             commit,
             rows: Vec::new(),
+            styles: Default::default(),
             error: None,
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
@@ -210,7 +246,11 @@ impl DiffPanel {
             h_grab: None,
             generation: 0,
             _reload: None,
-            _subscriptions: vec![cx.observe_global::<Settings>(|_, cx| cx.notify())],
+            _subscriptions: vec![
+                cx.observe_global::<Settings>(|_, cx| cx.notify()),
+                // The colours are worked out with the theme's.
+                cx.observe_global::<Theme>(|this, cx| this.reload(cx)),
+            ],
         };
         this.reload(cx);
         this
@@ -234,14 +274,17 @@ impl DiffPanel {
         self.generation += 1;
         let generation = self.generation;
         let (top, rel, path, staged, commit) = (self.top.clone(), self.rel.clone(), self.path.clone(), self.staged, self.commit.clone());
+        let theme = cx.theme().highlight_theme.clone();
         self._reload = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_spawn(async move {
                     let (old, new) = load_sides(&top, &rel, &path, staged, commit.as_ref())?;
                     let rows = rows(&old, &new);
+                    let language = crate::panels::language_of(&path);
+                    let styles = [&old, &new].map(|text| highlight_lines(&text.replace("\r\n", "\n"), &language, &theme));
                     let width = |line: &Option<(usize, String)>| line.as_ref().map_or(0, |(_, t)| t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum());
                     let widest = [rows.iter().map(|r| width(&r.left)).max().unwrap_or(0), rows.iter().map(|r| width(&r.right)).max().unwrap_or(0)];
-                    Ok::<_, String>((rows, widest))
+                    Ok::<_, String>((rows, styles, widest))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
@@ -249,14 +292,16 @@ impl DiffPanel {
                     return;
                 }
                 match loaded {
-                    Ok((rows, widest)) => {
+                    Ok((rows, styles, widest)) => {
                         this.error = None;
                         this.rows = rows;
+                        this.styles = styles;
                         this.widest = widest;
                     }
                     Err(err) => {
                         this.error = Some(err.into());
                         this.rows = Vec::new();
+                        this.styles = Default::default();
                         this.widest = [0; 2];
                     }
                 }
@@ -359,6 +404,7 @@ impl DiffPanel {
         let theme = cx.theme().clone();
         let line_height = px(Settings::get(cx).editor_font_size * 1.4);
         let h_scroll = self.h_scroll;
+        let styles = &self.styles;
         let half = |line: &Option<(usize, String)>, kind: Side, side: usize| {
             let bg = match kind {
                 Side::Removed => theme.red.opacity(0.18),
@@ -395,7 +441,10 @@ impl DiffPanel {
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
-                        .child(div().ml(-h_scroll[side]).child(line.as_ref().map(|(_, t)| t.clone()).unwrap_or_default())),
+                        .child(div().ml(-h_scroll[side]).when_some(line.as_ref(), |el, (n, text)| {
+                            let highlights = styles[side].get(n - 1).cloned().unwrap_or_default();
+                            el.child(StyledText::new(text.clone()).with_highlights(highlights))
+                        })),
                 )
         };
         range
@@ -706,7 +755,7 @@ impl DiffPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Side, rows};
+    use super::{HighlightTheme, Side, highlight_lines, rows};
 
     #[test]
     fn replaced_lines_sit_side_by_side_with_gaps() {
@@ -730,5 +779,16 @@ mod tests {
     fn a_new_file_is_all_added() {
         let rows = rows("", "x\ny\n");
         assert!(rows.iter().all(|r| r.left_kind == Side::Gap && r.right_kind == Side::Added));
+    }
+
+    #[test]
+    fn colours_fall_within_their_lines() {
+        let text = "fn main() {\n    let x = \"multi\nline\";\n}\n";
+        let lines = highlight_lines(text, "rust", &HighlightTheme::default_dark());
+        assert!(!lines[0].is_empty(), "`fn` is coloured");
+        for (line, styles) in text.split('\n').zip(&lines) {
+            assert!(styles.iter().all(|(range, _)| range.end <= line.len()));
+        }
+        assert!(!lines[2].is_empty(), "a string carries on across lines");
     }
 }
