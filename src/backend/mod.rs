@@ -12,6 +12,7 @@ pub mod http;
 pub mod process;
 pub mod search;
 pub mod watch;
+pub mod wsl;
 
 use std::path::{Path, PathBuf};
 

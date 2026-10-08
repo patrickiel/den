@@ -43,7 +43,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    backend::agent,
+    backend::{agent, wsl},
     pane::{AlertKind, Pane, PaneEvent},
     settings::Settings,
 };
@@ -165,6 +165,19 @@ fn shell(setting: &str) -> String {
     }
 }
 
+/// Whether a terminal in `cwd` runs in WSL, and in which distribution
+/// (`Some(None)`: the default one, unknown). The shell setting `wsl`
+/// (`wsl -d Ubuntu`) asks for it; with no shell chosen, a folder inside a
+/// distribution opens in it.
+fn wsl_target(setting: &str, shell: &str, cwd: &Path) -> Option<Option<String>> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let automatic = setting.trim().is_empty() && std::env::var_os("TERM_SHELL").is_none();
+    let target = wsl::shell(shell).or_else(|| automatic.then(|| wsl::split(cwd).map(|(distro, _)| Some(distro))).flatten())?;
+    Some(target.or_else(wsl::default_distro))
+}
+
 /// `pwsh` for `C:\…\pwsh.exe`.
 fn exe_name(path: &str) -> String {
     Path::new(path)
@@ -230,6 +243,8 @@ pub struct TerminalPanel {
     program: Option<String>,
     agent: bool,
     shell_name: String,
+    /// Runs in WSL: `Some` with the distribution, when known.
+    wsl: Option<Option<String>>,
     term: Term<Listener>,
     parser: Processor,
     events: Listener,
@@ -289,13 +304,19 @@ impl TerminalPanel {
         let term = Term::new(config, &GridSize { columns, lines }, events.clone());
         let focus_handle = cx.focus_handle();
         let shell = shell(&settings.shell);
+        let wsl = wsl_target(&settings.shell, &shell, &cwd);
+        let shell_name = match &wsl {
+            Some(distro) => distro.clone().unwrap_or_else(|| "wsl".into()),
+            None => exe_name(&shell),
+        };
         let program_is_set = program.is_some();
         let mut this = Self {
             focus_handle,
             cwd,
             program,
             agent,
-            shell_name: exe_name(&shell),
+            shell_name,
+            wsl,
             term,
             parser: Processor::new(),
             events,
@@ -359,10 +380,23 @@ impl TerminalPanel {
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut cmd = CommandBuilder::new(shell);
         let lower = shell.to_lowercase();
         let powershell = lower.contains("powershell") || lower.contains("pwsh");
-        if powershell {
+        let mut cmd = CommandBuilder::new(if self.wsl.is_some() { "wsl.exe" } else { shell });
+        if let Some(distro) = &self.wsl {
+            // A folder in this distribution by its Linux path; one in another
+            // distribution would not translate, so home instead.
+            let start = match (wsl::split(&self.cwd), distro) {
+                (Some((cwd_distro, linux)), Some(distro)) if cwd_distro.eq_ignore_ascii_case(distro) => linux,
+                (Some(_), _) => "~".into(),
+                (None, _) => self.cwd.to_string_lossy().into(),
+            };
+            if let Some(distro) = distro {
+                cmd.args(["-d", distro]);
+            }
+            cmd.args(["--cd", &start, "--exec", "/bin/sh", "-c", unix::WSL_BOOT]);
+            unix::configure_wsl(&mut cmd, self.hook_id, command.as_deref());
+        } else if powershell {
             // The prompt hook, the `claude` wrapper that adds the agent hooks,
             // and the program, if any, after the profile loads.
             let mut script = osc::POWERSHELL_HOOK.to_string();
@@ -381,7 +415,11 @@ impl TerminalPanel {
                 cmd.args(["-c", &format!("{command}; exec {shell}")]);
             }
         }
-        cmd.cwd(&self.cwd);
+        // wsl.exe starts in the folder `--cd` names; its own must be a local one.
+        match std::env::var_os("USERPROFILE").filter(|_| self.wsl.is_some()) {
+            Some(home) => cmd.cwd(home),
+            None => cmd.cwd(&self.cwd),
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // A den started from a Claude Code session must not hand that session's
@@ -440,7 +478,11 @@ impl TerminalPanel {
         let (mut cwd, mut messages) = (None, Vec::new());
         for (number, body) in self.osc.scan(bytes) {
             if let Some(dir) = osc::cwd_of(number, &body) {
-                cwd = Some(dir);
+                // A shell in WSL names a Linux folder; den keeps the Windows one.
+                cwd = match &self.wsl {
+                    Some(distro) if dir.to_string_lossy().starts_with('/') => wsl::to_windows(distro.as_deref(), &dir.to_string_lossy()).or(cwd),
+                    _ => Some(dir),
+                };
             } else if let Some(message) = osc::notification_of(number, &body) {
                 messages.push(message);
             }

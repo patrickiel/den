@@ -9,6 +9,10 @@
 //! nothing of it (zsh reads the user's own `.zlogin` next). bash takes den's
 //! file with `--rcfile`; it loads the profile files a login shell would, as
 //! macOS's Terminal starts one.
+//!
+//! A WSL shell gets the same files: they go over as Windows paths in
+//! `WSLENV` (arriving as `/mnt/c/…`), and `WSL_BOOT` hands them to the
+//! user's shell in the distribution.
 
 use std::path::{Path, PathBuf};
 
@@ -101,6 +105,8 @@ if [ -n "$DEN_INIT_COMMAND" ]; then
 fi
 "#;
 
+const ZSH_FILES: &[(&str, &str)] = &[(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC)];
+
 /// Set `cmd` (the shell `shell`) up with den's rc files for terminal `pane`,
 /// `command` run first; `false` for a shell den has no files for (or when
 /// they cannot be written), which the caller starts plainly.
@@ -113,7 +119,7 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
     let dir = crate::settings::data_dir().join("shell").join(name);
     match name {
         "zsh" => {
-            if !write(&dir, &[(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC)]) {
+            if !write(&dir, ZSH_FILES) {
                 return false;
             }
             let user = std::env::var_os("ZDOTDIR").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
@@ -137,6 +143,46 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
         cmd.env("DEN_INIT_COMMAND", agent::inject(pane, command, true));
     }
     true
+}
+
+/// Run in the distribution by `wsl.exe --exec /bin/sh -c`: the user's shell,
+/// with den's files for zsh and bash, else plainly (the first command run
+/// through `-c`, as for any other shell).
+pub const WSL_BOOT: &str = r#"s=${SHELL:-$(getent passwd "$(id -un)" | cut -d: -f7)}
+s=${s:-/bin/sh}
+case "${s##*/}" in
+  zsh) if [ -n "$DEN_ZSH" ]; then export DEN_USER_ZDOTDIR="${ZDOTDIR:-$HOME}" ZDOTDIR="$DEN_ZSH"; exec "$s" -l; fi ;;
+  bash) if [ -n "$DEN_BASH" ]; then exec "$s" --rcfile "$DEN_BASH/bashrc"; fi ;;
+esac
+if [ -n "$DEN_INIT_COMMAND" ]; then
+  c=$DEN_INIT_COMMAND
+  unset DEN_INIT_COMMAND
+  exec "$s" -c "$c; exec \"$s\" -l"
+fi
+exec "$s" -l
+"#;
+
+/// Set `cmd` (`wsl.exe … /bin/sh -c WSL_BOOT`) up for terminal `pane`, as
+/// `configure` does a local zsh or bash: the rc files, the Claude Code hooks
+/// file and the first command, carried over by `WSLENV`.
+pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>) {
+    let dir = crate::settings::data_dir().join("shell");
+    let (zsh, bash) = (dir.join("zsh"), dir.join("bash"));
+    if write(&zsh, ZSH_FILES) {
+        cmd.env("DEN_ZSH", &zsh);
+    }
+    if write(&bash, &[("bashrc", BASHRC)]) {
+        cmd.env("DEN_BASH", &bash);
+    }
+    if let Some(hooks) = agent::claude_hooks(pane) {
+        // `/p` takes a Windows path with backslashes.
+        cmd.env("DEN_CLAUDE_HOOKS", hooks.replace('/', "\\"));
+    }
+    if let Some(command) = command {
+        cmd.env("DEN_INIT_COMMAND", agent::inject(pane, command, true));
+    }
+    let names = ["DEN_ZSH/p", "DEN_BASH/p", "DEN_CLAUDE_HOOKS/p", "DEN_INIT_COMMAND", "TERM", "COLORTERM"];
+    cmd.env("WSLENV", crate::backend::wsl::wslenv(&names));
 }
 
 /// Write `files` into `dir`, each only when it differs.

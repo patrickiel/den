@@ -18,7 +18,7 @@ Most days now go like this: a couple of coding agents running in terminals, a de
 
 ## Features
 
-- **Terminals.** Each one runs on ConPTY (a pty on macOS) with alacritty's parser and follows your PowerShell, zsh or bash prompt from folder to folder. URLs and `path:line:col` references open with Ctrl+click (Cmd+click on a Mac).
+- **Terminals.** Each one runs on ConPTY (a pty on macOS) with alacritty's parser and follows your PowerShell, zsh or bash prompt from folder to folder, in WSL as well. URLs and `path:line:col` references open with Ctrl+click (Cmd+click on a Mac).
 - **Agents as first-class tabs.** Claude Code, Codex, a dev server or any other command can become a one-click button on every tab strip. When an agent finishes or needs input in a tab you aren't looking at, den marks the tab, plays a sound and flashes the taskbar (bounces the Dock icon on a Mac). Claude Code sessions resume when den restarts.
 - **Flexible layout.** Groups of tabs sit in nested splits, and whole containers can be dragged around or moved into floating windows. Per tab kind, you can pick a group where new tabs of that kind open ("agents go on the right"), and you can save named layout presets.
 - **Editor.** Tree-sitter highlighting for Rust, TypeScript/TSX, JavaScript, Python, Svelte, HTML, CSS, Markdown, TOML, YAML and Bash. Changed lines are marked in the gutter against git. Encodings and indentation are detected. Format Document runs whatever formatter the project already uses (Prettier, rustfmt, Ruff, gofmt, and others).
@@ -42,6 +42,10 @@ You'll also need:
 - **WebView2** for browser tabs. It ships with Windows 11 and is a [free download](https://developer.microsoft.com/microsoft-edge/webview2/) for Windows 10.
 
 Settings and app state are kept in `%APPDATA%\den\`. Each project's layout is kept in its own `.den\` folder.
+
+#### WSL
+
+Set the shell (Settings) to `wsl`, or `wsl -d Ubuntu` for a particular distribution, and terminals open in WSL with your own bash or zsh setup. Leave it empty and a folder inside WSL (`\\wsl.localhost\Ubuntu\home\you\project`) opens its terminals there by itself. Either way the tab follows your prompt from folder to folder, and Claude Code running in WSL marks its tab when it finishes or needs input, as it does on Windows.
 
 ### macOS (Apple Silicon)
 

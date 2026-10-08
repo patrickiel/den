@@ -1774,7 +1774,7 @@ impl Render for SettingsPanel {
                         cx,
                     ))
                     .child(section_title("Terminal", cx))
-                    .child(setting_row("Shell", "For new terminals. TERM_SHELL in the environment overrides the automatic choice.", div().w(px(260.)).child(Input::new(&self.shell).small()), cx))
+                    .child(setting_row("Shell", "For new terminals; wsl or wsl -d Ubuntu for a WSL shell. Left empty, a folder inside WSL opens its terminals there. TERM_SHELL in the environment overrides the automatic choice.", div().w(px(260.)).child(Input::new(&self.shell).small()), cx))
                     .child(setting_row(
                         "Scrollback",
                         "Lines a terminal keeps above the screen, for new terminals.",
