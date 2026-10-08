@@ -4,8 +4,8 @@
 //! the model's context one request writes the message; when it does not, the
 //! diffs are summarized in chunks first and the message is written from the
 //! notes. The style is the repository's `.den/commit-style.md`, else one
-//! derived from its history (and saved there), else the global one, with a
-//! handful of recent messages as examples.
+//! derived from its history (and saved there), else the global one. Past
+//! messages are not shown to the model: small models copy them verbatim.
 
 use std::{collections::HashSet, path::Path, sync::LazyLock};
 
@@ -27,8 +27,6 @@ const MAX_FILE_CHARS: usize = 12_000;
 const UNTRACKED_PREVIEW: usize = 60;
 const MAX_UNTRACKED_PREVIEWS: usize = 150;
 const STAT_LINES: usize = 150;
-const EXAMPLES: usize = 15;
-const EXAMPLE_BODY_LINES: usize = 4;
 const HUGE_FILE_LINES: usize = 2000;
 pub const STYLE_FILE: &str = ".den/commit-style.md";
 const DIFF_SLOT: &str = "{{diff}}";
@@ -324,7 +322,9 @@ fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cance
     let mut omitted = HashSet::new();
     let mut wanted: Vec<Entry> = Vec::new();
     for entry in &entries {
-        if entry.binary || NOISE.iter().any(|r| r.is_match(&entry.path)) || entry.add + entry.del > HUGE_FILE_LINES {
+        // The style file's text is instructions; in the diff the model obeys
+        // or describes it instead of the change.
+        if entry.binary || entry.path == STYLE_FILE || NOISE.iter().any(|r| r.is_match(&entry.path)) || entry.add + entry.del > HUGE_FILE_LINES {
             omitted.insert(entry.path.clone());
         } else {
             wanted.push(entry.clone());
@@ -429,27 +429,13 @@ fn stat_block(changes: &Changes) -> String {
 
 // -- Prompting ---------------------------------------------------------------
 
-fn example_text(message: &Message) -> String {
-    let body: Vec<&str> = message.body.lines().take(EXAMPLE_BODY_LINES).collect();
-    let body = body.join("\n");
-    if body.trim().is_empty() { message.subject.clone() } else { format!("{}\n\n{}", message.subject, body.trim()) }
-}
-
-fn final_messages(style: &str, examples: &[String], changes: &str) -> Vec<Value> {
-    let mut messages = Vec::new();
-    if !examples.is_empty() {
-        messages.push(json!({
-            "role": "system",
-            "content": format!("Recent commit messages in this repository, separated by \"---\". Match their format and tone, not their content:\n\n{}", examples.join("\n---\n")),
-        }));
-    }
+fn final_messages(style: &str, changes: &str) -> Vec<Value> {
     let prompt = style.trim();
     let content = if prompt.contains(DIFF_SLOT) { prompt.replace(DIFF_SLOT, changes) } else { format!("{prompt}\n\n{changes}") };
-    messages.push(json!({
+    vec![json!({
         "role": "user",
         "content": format!("{content}\n\nReply with the commit message only. No quotes, no code fences, no explanations."),
-    }));
-    messages
+    })]
 }
 
 fn body(messages: Vec<Value>, max_tokens: usize, temperature: f32) -> Value {
@@ -533,13 +519,12 @@ pub fn generate(top: &Path, config: &AiConfig, cancel: &Cancel, status: &mut dyn
         created = true;
     }
     let style = style.unwrap_or_else(|| if config.style.trim().is_empty() { ai::DEFAULT_COMMIT_STYLE.to_string() } else { config.style.clone() });
-    let examples: Vec<String> = history.iter().take(EXAMPLES).map(example_text).collect();
     let exclude = created.then_some(STYLE_FILE);
     // The size estimate can be off for dense content (minified code, data):
     // on a context error, again with half the budget, then a quarter.
     let mut result = Err(String::new());
     for scale in [1.0, 0.5, 0.25] {
-        result = attempt(top, config, &style, &examples, exclude, scale, cancel, status, text);
+        result = attempt(top, config, &style, exclude, scale, cancel, status, text);
         match &result {
             Err(err) if *err != CANCELLED && is_context_error(err) => status("Too big for the model's context; trying smaller…".into()),
             _ => break,
@@ -553,7 +538,6 @@ fn attempt(
     top: &Path,
     config: &AiConfig,
     style: &str,
-    examples: &[String],
     exclude: Option<&str>,
     scale: f32,
     cancel: &Cancel,
@@ -561,7 +545,7 @@ fn attempt(
     text: &mut dyn FnMut(String),
 ) -> Result<String, String> {
     let ctx = config.context as usize;
-    let overhead: usize = final_messages(style, examples, "").iter().map(|m| m["content"].as_str().unwrap_or("").len()).sum();
+    let overhead: usize = final_messages(style, "").iter().map(|m| m["content"].as_str().unwrap_or("").len()).sum();
     let system_tokens = overhead.div_ceil(CHARS_PER_TOKEN);
     let scaled = |tokens: usize| ((tokens * CHARS_PER_TOKEN) as f32 * scale) as usize;
     let budget = scaled(ctx.saturating_sub(system_tokens + OUTPUT_TOKENS + 200)).max(2000);
@@ -619,7 +603,7 @@ fn attempt(
     };
     status("Writing…".into());
     let mut raw = String::new();
-    let result = ai::chat(config, body(final_messages(style, examples, &user), OUTPUT_TOKENS, 0.2), cancel, |piece| {
+    let result = ai::chat(config, body(final_messages(style, &user), OUTPUT_TOKENS, 0.2), cancel, |piece| {
         raw.push_str(piece);
         text(clean_message(&raw));
     })?;

@@ -836,10 +836,13 @@ impl Workspace {
                 div()
                     .id("tab-bar-empty-space")
                     .h_full()
+                    // With no tab beside it, `h_full` alone leaves it no height
+                    // (the strip's scroller sizes to its content).
+                    .min_h(px(32.))
                     .flex_grow_1()
                     .min_w_16()
                     // Double-clicking the empty strip opens another tab of the kind
-                    // the group shows, as in den.
+                    // the group is the default for, else of the kind it shows.
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if event.click_count() == 2 {
                             this.open_more(group, window, cx);
@@ -1035,6 +1038,8 @@ impl Workspace {
                     .separator()
                     .item(item("Close Group", |this, group, window, cx| this.request_close_group(group, window, cx)));
                 group_buttons_menu(menu, cx)
+                    .separator()
+                    .item(item("Edit Presets…", |this, _, window, cx| this.open_settings(true, window, cx)).icon(Icon::new(IconName::Settings)))
             })
     }
 }

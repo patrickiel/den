@@ -945,6 +945,8 @@ pub struct SettingsPanel {
     themes: Vec<crate::theme::Imported>,
     /// One name and one command field per preset, in the order of the list.
     preset_rows: Vec<(Entity<InputState>, Entity<InputState>, Vec<Subscription>)>,
+    /// The page: the general settings, then the presets.
+    scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -998,12 +1000,18 @@ impl SettingsPanel {
             browser_home,
             themes: crate::theme::imported(),
             preset_rows: Vec::new(),
+            scroll: ScrollHandle::new(),
             _subscriptions,
         }
     }
 
     pub fn search_input(&self) -> Entity<InputState> {
         self.search.clone()
+    }
+
+    /// Scroll the presets to the top of the page.
+    pub fn show_presets(&self) {
+        self.scroll.scroll_to_top_of_item(1);
     }
 
     /// Ask for a VS Code theme file, import it and switch to it.
@@ -1644,11 +1652,11 @@ impl Render for SettingsPanel {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .child(
                 v_flex()
                     .w_full()
                     .px_2()
-                    .pb_4()
                     .child(section_title("Appearance", cx))
                     .child(setting_row("Theme", "Colours of the whole window.", self.render_theme_menu(&settings, cx), cx))
                     .child(setting_row(
@@ -1778,7 +1786,14 @@ impl Render for SettingsPanel {
                             |_| {},
                         ),
                         cx,
-                    ))
+                    )),
+            )
+            // Second, so the group menu's Edit Presets can scroll to them.
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_2()
+                    .pb_4()
                     .child(preset_section(
                         "Terminal Presets",
                         "Programs a tab-strip button starts in a new terminal: a dev server, a script. The plain shell has its own button.",

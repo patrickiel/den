@@ -1,5 +1,5 @@
 //! The icon on a preset's button, as in den: its own pick from a small set
-//! (vendor logos, levels, glyphs, its letter), else the automatic one (the
+//! (vendor logos, levels, glyphs, its letter boxed, ringed or bare), else the automatic one (the
 //! logo of the program its command runs, a local server's port, the plain
 //! shell's terminal, else its first letter), in its own colour or the
 //! theme's. Picked in Settings from a panel of the same choices.
@@ -113,7 +113,16 @@ enum Look {
     /// A logo: its one-colour mark, and its brand-colour version if any.
     Logo(String, Option<String>),
     Port(String),
-    Letter(String),
+    Letter(String, Frame),
+}
+
+/// What surrounds a letter icon.
+#[derive(Clone, Copy)]
+enum Frame {
+    Square,
+    Circle,
+    /// None: the letter fills the icon.
+    Bare,
 }
 
 /// A local dev server's port (":5173").
@@ -132,9 +141,11 @@ fn logo_look(key: &str) -> Option<Look> {
 
 /// How `preset` looks with `icon` (`None`: the automatic icon).
 fn look(preset: &Preset, icon: Option<&str>) -> Look {
-    let letter = || Look::Letter(preset.letter());
+    let letter = || Look::Letter(preset.letter(), Frame::Square);
     match icon {
         Some("letter") => return letter(),
+        Some("letterCircle") => return Look::Letter(preset.letter(), Frame::Circle),
+        Some("letterBare") => return Look::Letter(preset.letter(), Frame::Bare),
         Some(choice) if choice.starts_with("logo:") => {
             if let Some(look) = logo_look(&choice[5..]) {
                 return look;
@@ -192,18 +203,19 @@ pub fn render(preset: &Preset, icon: Option<&str>, size: f32, cx: &App) -> AnyEl
             _ => svg().path(mark).size(px(size)).flex_none().text_color(color).into_any_element(),
         },
         Look::Port(text) => div().flex_none().text_color(color).text_size(px(size * 0.62)).font_weight(FontWeight::BOLD).child(text).into_any_element(),
-        Look::Letter(text) => div()
+        Look::Letter(text, frame) => div()
             .size(px(size))
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .rounded(px(3.))
-            .border(px(1.5))
-            .border_color(color)
             .text_color(color)
-            .text_size(px(size * 0.62))
             .font_weight(FontWeight::BOLD)
+            .map(|this| match frame {
+                Frame::Square => this.rounded(px(3.)).border(px(1.5)).border_color(color).text_size(px(size * 0.62)),
+                Frame::Circle => this.rounded_full().border(px(1.5)).border_color(color).text_size(px(size * 0.62)),
+                Frame::Bare => this.text_size(px(size * 1.1)).line_height(px(size)),
+            })
             .child(text)
             .into_any_element(),
     }
@@ -249,7 +261,7 @@ fn edit(ix: usize, cx: &mut App, f: impl FnOnce(&mut Preset)) {
     });
 }
 
-/// The picker panel for preset `ix`: its automatic icon, its letter and the
+/// The picker panel for preset `ix`: its automatic icon, its letters and the
 /// logos; the levels; the glyphs; the theme colour, swatches and a hue bar.
 /// Each pick applies at once.
 pub fn picker(ix: usize, cx: &App) -> AnyElement {
@@ -278,7 +290,12 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
             })
     };
     let grid = |cells: Vec<Stateful<Div>>| h_flex().flex_wrap().w(px(8. * 36.)).gap(px(2.)).children(cells);
-    let mut own = vec![cell(None, "Automatic".into(), &preset), cell(Some("letter".into()), "First letter".into(), &preset)];
+    let mut own = vec![
+        cell(None, "Automatic".into(), &preset),
+        cell(Some("letter".into()), "First letter".into(), &preset),
+        cell(Some("letterCircle".into()), "First letter in a circle".into(), &preset),
+        cell(Some("letterBare".into()), "First letter, large".into(), &preset),
+    ];
     own.extend(LOGOS.iter().map(|(key, name, _)| cell(Some(format!("logo:{key}")), (*name).into(), &preset)));
     let levels = LEVELS.iter().map(|name| cell(Some((*name).into()), words(name), &preset)).collect();
     let glyphs = GLYPHS.iter().map(|name| cell(Some((*name).into()), words(name), &preset)).collect();

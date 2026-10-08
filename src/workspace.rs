@@ -14,8 +14,7 @@ use std::{
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, TitleBar, WindowExt as _,
-    badge::Badge,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -1286,9 +1285,13 @@ impl Workspace {
         }
     }
 
-    /// Settings in a dialog over the window, as den has them.
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Settings in a dialog over the window, as den has them; scrolled to
+    /// the presets with `presets`.
+    pub(crate) fn open_settings(&mut self, presets: bool, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SettingsPanel::new(window, cx));
+        if presets {
+            view.read(cx).show_presets();
+        }
         let viewport = window.viewport_size();
         let height = (viewport.height - px(140.)).max(px(320.));
         let width = (viewport.width - px(80.)).min(px(860.)).max(px(480.));
@@ -1450,9 +1453,23 @@ impl Workspace {
         }
     }
 
-    /// Another tab like those in `group`, as den does: a group of Claude Code
-    /// tabs gets another Claude Code; a mix, or a shell among them, a shell.
+    /// Another tab for `group`: what it is the default for (a new file, a
+    /// shell, the first agent preset, the home page); else one like its
+    /// tabs, as den does: a group of Claude Code tabs gets another Claude
+    /// Code; a mix, or a shell among them, a shell.
     pub(crate) fn open_more(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        match self.defaults.effective(&self.tree, group) {
+            Some(Kind::Files) => return self.explorer.update(cx, |explorer, cx| explorer.new_file(window, cx)),
+            Some(Kind::Terminals) => return self.open_terminal(Some(group), None, false, window, cx),
+            Some(Kind::Agents) => {
+                let preset = Settings::get(cx).presets.iter().find(|p| p.kind() == Kind::Agents).map(|p| p.command.clone());
+                if preset.is_some() {
+                    return self.open_terminal(Some(group), preset, true, window, cx);
+                }
+            }
+            Some(Kind::Browsers) => return self.open_browser(Some(group), None, window, cx),
+            None => {}
+        }
         let programs: Vec<Option<(String, bool)>> = self
             .tree
             .tabs(group)
@@ -1784,7 +1801,9 @@ impl Workspace {
                 .small()
                 .icon(Icon::new(icon))
                 .tooltip(tooltip)
-                .map(|button| if active { button.primary() } else { button.ghost() })
+                // Highlighted, not filled: the primary colour is the change count's.
+                .ghost()
+                .selected(active)
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_view(view, cx)))
         };
 
@@ -1814,12 +1833,36 @@ impl Workspace {
                             .child(view_button("view-explorer", IconName::Files, "Explorer (Ctrl+Shift+E)", SidebarView::Explorer, cx))
                             .child(view_button("view-search", IconName::Search, "Search (Ctrl+Shift+F)", SidebarView::Search, cx))
                             .child(
-                                // As in VS Code: how many files have changed.
-                                Badge::new()
-                                    .count(self.repo.read(cx).status().map_or(0, |status| status.files.len()))
-                                    .max(999)
-                                    .color(cx.theme().primary)
-                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx)),
+                                // As in VS Code: how many files have changed, in the
+                                // bottom corner, ringed to stand off the icon.
+                                div()
+                                    .relative()
+                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx))
+                                    .map(|this| {
+                                        let changed = self.repo.read(cx).status().map_or(0, |status| status.files.len());
+                                        if changed == 0 {
+                                            return this;
+                                        }
+                                        let count = if changed > 999 { "999+".to_string() } else { changed.to_string() };
+                                        this.child(
+                                            h_flex()
+                                                .absolute()
+                                                .bottom(-px(4.))
+                                                .right(-px(4.))
+                                                .min_w(px(14.))
+                                                .h(px(14.))
+                                                .px(px(3.))
+                                                .justify_center()
+                                                .rounded_full()
+                                                .border_1()
+                                                .border_color(cx.theme().title_bar)
+                                                .bg(cx.theme().primary)
+                                                .text_color(cx.theme().primary_foreground)
+                                                .text_size(px(9.))
+                                                .line_height(relative(1.))
+                                                .child(count),
+                                        )
+                                    }),
                             )
                             .child(view_button("view-extensions", IconName::Blocks, "Extensions (Ctrl+Shift+X)", SidebarView::Extensions, cx)),
                     ),
@@ -1846,7 +1889,7 @@ impl Workspace {
                                 .ghost()
                                 .icon(Icon::new(IconName::Settings))
                                 .tooltip("Settings (Ctrl+,)")
-                                .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.open_settings(false, window, cx))),
                         ),
                 ),
             )
@@ -1952,7 +1995,7 @@ impl Workspace {
                     .item(item("Split Down", "Ctrl+Shift+-", |this, _, cx| this.split(this.active_group, Side::Bottom, cx)))
                     .item(item("Save Layout…", "", |this, window, cx| this.prompt_save_preset(window, cx)))
                     .item(item("Reset Layout", "", |this, _, cx| this.reset_layout(cx)))
-                    .item(item("Settings", "Ctrl+,", |this, window, cx| this.open_settings(window, cx)))
+                    .item(item("Settings", "Ctrl+,", |this, window, cx| this.open_settings(false, window, cx)))
                     .item(item("Check for Updates…", "", |_, window, cx| crate::update::check_in_window(true, window, cx)))
                     .separator()
                     .label("TERMINAL")
@@ -2046,7 +2089,7 @@ impl Workspace {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(false, window, cx)))
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
             .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))

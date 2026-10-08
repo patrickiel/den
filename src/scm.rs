@@ -16,8 +16,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     hover_card::HoverCard,
-    input::{Input, InputState},
+    input::{Input, InputState, Textarea, TextareaState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+    scroll::ScrollableElement as _,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -34,6 +35,19 @@ use crate::{
 
 /// A commit row's height.
 const COMMIT_ROW: f32 = 22.;
+
+/// The commits section's height when the view opens, header included.
+const COMMITS_HEIGHT: f32 = 320.;
+
+/// Dragging the commits section's top edge to resize it.
+#[derive(Clone)]
+struct CommitsResize;
+
+impl Render for CommitsResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 pub enum ScmEvent {
     /// Open a changed file in an editor tab.
@@ -70,12 +84,17 @@ impl Group {
     }
 }
 
+const MESSAGE_PLACEHOLDER: &str = "Message (Ctrl+Enter to commit)";
+
 pub struct ScmView {
     repo: Entity<Repo>,
-    message: Entity<InputState>,
+    message: Entity<TextareaState>,
     commits_open: bool,
-    /// Generate Commit Message while it runs: how to stop it, and what it does.
-    generating: Option<(crate::backend::http::Cancel, SharedString)>,
+    /// The commits section's height while open, set by dragging its top edge.
+    commits_height: f32,
+    /// Generate Commit Message while it runs: how to stop it. What it does
+    /// shows as the message box's placeholder.
+    generating: Option<crate::backend::http::Cancel>,
     /// Commits expanded to their files, with the files once loaded.
     expanded: HashMap<String, Option<(Option<String>, Vec<git::CommitFile>)>>,
     /// What a commit changed, for its hover card: `None` while it loads.
@@ -100,12 +119,13 @@ impl EventEmitter<ScmEvent> for ScmView {}
 
 impl ScmView {
     pub fn new(repo: Entity<Repo>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Message (Ctrl+Enter to commit)"));
+        let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(MESSAGE_PLACEHOLDER));
         let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
         Self {
             repo,
             message,
             commits_open: true,
+            commits_height: COMMITS_HEIGHT,
             generating: None,
             expanded: Default::default(),
             stats: Default::default(),
@@ -683,8 +703,9 @@ impl ScmView {
     /// first download, then write the message into the box as it streams.
     fn generate_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use crate::backend::ai;
-        if let Some((cancel, _)) = self.generating.take() {
+        if let Some(cancel) = self.generating.take() {
             cancel.cancel();
+            self.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
             return cx.notify();
         }
         let config = crate::settings::Settings::get(cx).ai_config();
@@ -723,7 +744,11 @@ impl ScmView {
             Done(Result<String, String>),
         }
         let cancel = crate::backend::http::Cancel::default();
-        self.generating = Some((cancel.clone(), "Starting…".into()));
+        self.generating = Some(cancel.clone());
+        self.message.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder("Starting…", window, cx);
+        });
         cx.notify();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Update>();
         std::thread::spawn(move || {
@@ -735,7 +760,7 @@ impl ScmView {
                     ai::install(&config, &cancel, &mut |stage, done, total| {
                         let text = match total {
                             0 => format!("{stage}…"),
-                            total => format!("Downloading {stage}: {}%", done * 100 / total.max(1)),
+                            total => format!("Downloading {stage}: {:.2}%", done as f64 * 100.0 / total as f64),
                         };
                         if text != last {
                             last = text.clone();
@@ -754,8 +779,8 @@ impl ScmView {
                 let alive = this.update_in(cx, |this, window, cx| {
                     match update {
                         Update::Status(text) => {
-                            if let Some((_, status)) = &mut this.generating {
-                                *status = text.into();
+                            if this.generating.is_some() {
+                                this.message.update(cx, |input, cx| input.set_placeholder(text, window, cx));
                             }
                         }
                         Update::Text(text) => {
@@ -765,6 +790,7 @@ impl ScmView {
                         }
                         Update::Done(result) => {
                             let stopped = this.generating.take().is_none();
+                            this.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
                             match result {
                                 Ok(text) => this.message.update(cx, |input, cx| input.set_value(text, window, cx)),
                                 Err(err) if err == crate::backend::http::CANCELLED || stopped => {}
@@ -968,20 +994,19 @@ impl ScmView {
 
     fn render_commits(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let repo = self.repo.read(cx);
-        let commits = &repo.commits;
-        let uncommitted = repo.uncommitted.zip(repo.graph.first().cloned());
-        let graph_w = git_graph::column_width(&repo.graph);
+        let graph_w = git_graph::column_width(&self.repo.read(cx).graph);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let more = !commits.is_empty() && commits.len().is_multiple_of(50);
+        let hover = theme.primary.opacity(0.5);
         v_flex()
+            .relative()
+            .when(self.commits_open, |this| this.h(px(self.commits_height)))
             .child(
                 h_flex()
                     .id("commits-header")
-                    .mt_2()
+                    .flex_none()
                     .px_2()
                     .h(px(24.))
                     .gap_1()
@@ -998,40 +1023,62 @@ impl ScmView {
                     })),
             )
             .when(self.commits_open, |this| {
-                this.when_some(uncommitted, |this, (count, graph)| {
-                    this.child(
-                        h_flex()
-                            .pr_2()
-                            .h(px(COMMIT_ROW))
-                            .gap_2()
-                            .text_sm()
-                            .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .italic()
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{count} change{}", if count == 1 { "" } else { "s" })),
-                            ),
-                    )
-                })
-                .children(commits.iter().enumerate().map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)))
-                .when(more, |this| {
-                    this.child(
-                        div()
-                            .id("load-more")
-                            .pl(graph_w)
-                            .h(px(COMMIT_ROW))
-                            .text_sm()
-                            .italic()
-                            .text_color(theme.muted_foreground)
-                            .hover(|this| this.bg(theme.list_hover))
-                            .child("Load more…")
-                            .on_click(cx.listener(|this, _, _, cx| this.repo.update(cx, |repo, cx| repo.load_more(cx)))),
-                    )
-                })
+                this.child(
+                    div()
+                        .id("commits-resize")
+                        .absolute()
+                        .top(px(-2.))
+                        .left_0()
+                        .right_0()
+                        .h(px(4.))
+                        .cursor_row_resize()
+                        .hover(move |this| this.bg(hover))
+                        .on_drag(CommitsResize, |_, _, _, cx| cx.new(|_| CommitsResize)),
+                )
+                .child(div().id("scm-commits").flex_1().min_h_0().overflow_y_scrollbar().child(self.render_commit_rows(graph_w, now, cx)))
+            })
+    }
+
+    fn render_commit_rows(&self, graph_w: Pixels, now: i64, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let repo = self.repo.read(cx);
+        let commits = &repo.commits;
+        let uncommitted = repo.uncommitted.zip(repo.graph.first().cloned());
+        let more = !commits.is_empty() && commits.len().is_multiple_of(50);
+        v_flex()
+            .when_some(uncommitted, |this, (count, graph)| {
+                this.child(
+                    h_flex()
+                        .pr_2()
+                        .h(px(COMMIT_ROW))
+                        .gap_2()
+                        .text_sm()
+                        .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .italic()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("{count} change{}", if count == 1 { "" } else { "s" })),
+                        ),
+                )
+            })
+            .children(commits.iter().enumerate().map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)))
+            .when(more, |this| {
+                this.child(
+                    div()
+                        .id("load-more")
+                        .pl(graph_w)
+                        .h(px(COMMIT_ROW))
+                        .text_sm()
+                        .italic()
+                        .text_color(theme.muted_foreground)
+                        .hover(|this| this.bg(theme.list_hover))
+                        .child("Load more…")
+                        .on_click(cx.listener(|this, _, _, cx| this.repo.update(cx, |repo, cx| repo.load_more(cx)))),
+                )
             })
     }
 }
@@ -1212,13 +1259,34 @@ impl Render for ScmView {
                 .into_any_element(),
             RepoState::Ready { status, .. } => {
                 let files = &status.files;
+                // The changes and the commits scroll on their own; the
+                // commits keep their height, which their top edge drags.
                 v_flex()
-                    .children(self.render_group(Group::Merge, files, cx))
-                    .children(self.render_group(Group::Staged, files, cx))
-                    .children(self.render_group(Group::Changes, files, cx))
-                    .when(files.is_empty(), |this| {
-                        this.child(div().px_3().py_1().text_sm().text_color(theme.muted_foreground).child("No changes."))
-                    })
+                    .id("scm-body")
+                    .size_full()
+                    .on_drag_move::<CommitsResize>(cx.listener(|this, event: &DragMoveEvent<CommitsResize>, _, cx| {
+                        let bounds = event.bounds;
+                        let height = (bounds.bottom() - event.event.position.y).as_f32();
+                        let max = (bounds.size.height.as_f32() - 60.).max(COMMIT_ROW * 4.);
+                        this.commits_height = height.clamp(COMMIT_ROW * 4., max);
+                        cx.notify();
+                    }))
+                    .child(
+                        v_flex()
+                            .id("scm-changes")
+                            .track_focus(&self.list_focus)
+                            .on_key_down(cx.listener(Self::list_key))
+                            .flex_1()
+                            .min_h_0()
+                            .pb_2()
+                            .overflow_y_scrollbar()
+                            .children(self.render_group(Group::Merge, files, cx))
+                            .children(self.render_group(Group::Staged, files, cx))
+                            .children(self.render_group(Group::Changes, files, cx))
+                            .when(files.is_empty(), |this| {
+                                this.child(div().px_3().py_1().text_sm().text_color(theme.muted_foreground).child("No changes."))
+                            }),
+                    )
                     .child(self.render_commits(cx))
                     .into_any_element()
             }
@@ -1262,22 +1330,20 @@ impl Render for ScmView {
                                 cx.stop_propagation();
                             }
                         }))
-                        .child(
+                        .child({
+                            let busy = self.generating.is_some();
                             h_flex()
                                 .gap_1()
-                                .child(div().flex_1().min_w_0().child(Input::new(&self.message).small()))
-                                .child({
-                                    let busy = self.generating.is_some();
+                                .items_start()
+                                .child(div().flex_1().min_w_0().child(Textarea::new(&self.message).small().disabled(busy)))
+                                .child(
                                     Button::new("generate-message")
                                         .ghost()
                                         .small()
                                         .icon(Icon::new(if busy { IconName::CircleStop } else { IconName::Sparkles }))
                                         .tooltip(if busy { "Stop" } else { "Generate Commit Message (local AI)" })
-                                        .on_click(cx.listener(|this, _, window, cx| this.generate_message(window, cx)))
-                                }),
-                        )
-                        .when_some(self.generating.as_ref().map(|(_, s)| s.clone()), |this, status| {
-                            this.child(div().text_xs().text_color(cx.theme().muted_foreground).child(status))
+                                        .on_click(cx.listener(|this, _, window, cx| this.generate_message(window, cx))),
+                                )
                         })
                         .child(
                             h_flex()
@@ -1311,16 +1377,6 @@ impl Render for ScmView {
                         ),
                 )
             })
-            .child(
-                div()
-                    .id("scm-changes")
-                    .track_focus(&self.list_focus)
-                    .on_key_down(cx.listener(Self::list_key))
-                    .flex_1()
-                    .min_h_0()
-                    .pt_2()
-                    .overflow_y_scroll()
-                    .child(body),
-            )
+            .child(div().flex_1().min_h_0().pt_2().child(body))
     }
 }

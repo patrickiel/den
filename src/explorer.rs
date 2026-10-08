@@ -339,6 +339,11 @@ impl Explorer {
         window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
     }
 
+    /// Ask for a new file's name where New File creates, then open it.
+    pub fn new_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_new(self.target_dir(), false, window, cx);
+    }
+
     fn prompt_new(&mut self, dir: PathBuf, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
         let title = if folder { "New Folder" } else { "New File" };
         self.prompt_name(
