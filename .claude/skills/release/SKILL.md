@@ -1,15 +1,15 @@
 ---
 name: release
-description: Release den — build, sign and publish a new version to GitHub Releases via scripts/release.ts.
+description: Release den — bump, notes, tag and a draft release via scripts/release.ts; GitHub Actions builds both platforms and publishes it.
 argument-hint: "[major|minor|patch] [dry-run]"
 disable-model-invocation: true
 allowed-tools: Bash(node scripts/release.ts:*)
 ---
 
-Run the release script from the repo root. It does everything (bump, notes, build, sign, tag, push, publish); don't do any of those steps by hand.
+Run the release script from the repo root. It does the local part (bump, notes, commit, tag, push, draft release); the `release` workflow (`.github/workflows/release.yml`) then builds and signs the Windows installer and the Mac app, adds them with `latest.json` to the release and publishes it. Don't do any of those steps by hand.
 
 Arguments: `$ARGUMENTS`
 
-1. Build the command: `node scripts/release.ts --yes`, plus `--bump <level>` if the arguments name major, minor or patch, plus `--dry-run` if they say dry run. On a Mac, or if the arguments say attach, the command is `node scripts/release.ts --attach` instead: it adds this Mac's build to the release of the version in Cargo.toml, whose tag must be checked out and already released from Windows. Run exactly that, alone, with the Bash tool and `run_in_background: true` (the release build takes several minutes), then wait for it to finish.
-2. Report the result in a few lines: the version, the release link, and the notes it printed. If it failed, quote the `✗` line. The script restores its files on failure and prints any remaining steps; don't retry or work around it, tell the user.
-3. After a Windows release, say that the Mac build follows on its own: the `mac` workflow (`.github/workflows/mac.yml`) runs when the release is published and attaches it, usually within ten minutes. Point to its run in the Actions tab. If it failed, it can be rerun there, or a Mac with the signing key can `git fetch --tags; git checkout v<version>` and `/release attach`. Until then Mac users see the release as not yet built for them.
+1. Build the command: `node scripts/release.ts --yes`, plus `--bump <level>` if the arguments name major, minor or patch, plus `--dry-run` if they say dry run. Run exactly that, alone, with the Bash tool and `run_in_background: true`, then wait for it to finish.
+2. Report the result in a few lines: the version, the notes it printed, and the two links it ends with (the workflow run, which takes some ten minutes, and the release page, a draft until the workflow publishes it). If it failed, quote the `✗` line and the remaining steps it printed; don't retry or work around it, tell the user.
+3. If asked how the build went, check the run with `gh run list --workflow release.yml --limit 1` and `gh run view <id>`; a failed run can be repeated from the Actions tab (Run workflow, with the tag).

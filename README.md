@@ -51,7 +51,7 @@ Settings and app state are kept in `%APPDATA%\den\`. Each project's layout is ke
 
 Git comes with the Xcode Command Line Tools (`xcode-select --install`) or Homebrew. Browser tabs use the WebKit that ships with macOS. Started from the Finder or the Dock, den takes your login shell's `PATH` over, so `claude`, `pnpm` and the formatters it runs are the ones your terminal sees.
 
-Settings and app state are kept in `~/Library/Application Support/den/`. The Mac build of a release is made by a GitHub Actions workflow once the Windows release is published; until it is there, Check for Updates says so.
+Settings and app state are kept in `~/Library/Application Support/den/`. Releases are built for both platforms by a GitHub Actions workflow and published together.
 
 ## Build from source
 

@@ -1,0 +1,113 @@
+# Builds a release for both platforms. scripts/release.ts bumps the version,
+# tags it and makes a draft release with the notes; the tag starts this, which
+# builds and signs the Windows installer and the Mac app archive, adds them
+# and the updater manifest (latest.json) to the release, and publishes it.
+# Until then the previous release stays the latest, so updates never see a
+# half-built one.
+#
+# Secrets: DEN_SIGNING_KEY holds the updater's private key file (the one
+# packaging/updater.pub belongs to), DEN_SIGNING_KEY_PASSWORD its password if
+# it has one. Set them with
+#   gh secret set DEN_SIGNING_KEY < ~/.keys/den.key
+# A failed run can be repeated from the Actions tab (Run workflow, with the tag).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release's tag (v1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: darwin-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "$env:TAG".TrimStart("v")
+          New-Item -ItemType Directory -Force dist | Out-Null
+          if ($IsWindows) {
+            $asset = "den_${version}_x64-setup.exe"
+            makensis -V2 "-DVERSION=$version" "-DEXE=$PWD/target/release/den.exe" "-DOUTFILE=$PWD/dist/$asset" packaging/installer.nsi
+          } else {
+            $asset = "den_${version}_aarch64.app.tar.gz"
+            sh scripts/bundle-macos.sh $version
+            tar -czf "dist/$asset" -C target/release den.app
+          }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The updater checks this signature against packaging/updater.pub.
+          Set-Content -NoNewline "$env:RUNNER_TEMP/den.key" $env:KEY
+          pnpm dlx @tauri-apps/cli@2 signer sign -f "$env:RUNNER_TEMP/den.key" "--password=$env:PASSWORD" "dist/$asset"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        env:
+          KEY: ${{ secrets.DEN_SIGNING_KEY }}
+          PASSWORD: ${{ secrets.DEN_SIGNING_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest
+        shell: pwsh
+        run: |
+          # latest.json in Tauri's format; src/update.rs reads its entry for the platform.
+          $version = "$env:TAG".TrimStart("v")
+          $notes = gh release view $env:TAG --repo $env:REPO --json body -q .body
+          $platforms = [ordered]@{}
+          foreach ($sig in Get-ChildItem dist/*.sig) {
+            $asset = $sig.BaseName
+            $platform = if ($asset -like "*setup.exe") { "windows-x86_64" } else { "darwin-aarch64" }
+            $platforms[$platform] = [ordered]@{
+              signature = (Get-Content $sig -Raw).Trim()
+              url = "https://github.com/$env:REPO/releases/download/$env:TAG/$asset"
+            }
+          }
+          Remove-Item dist/*.sig
+          $manifest = [ordered]@{ version = $version; notes = $notes; pub_date = (Get-Date).ToUniversalTime().ToString("o"); platforms = $platforms }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8NoBOM dist/latest.json
+        env:
+          REPO: ${{ github.repository }}
+      - name: Publish
+        run: |
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

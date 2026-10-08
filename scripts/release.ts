@@ -1,8 +1,9 @@
-// Release: Claude reads the changes since the last `v*` tag, picks the semver bump
-// by scripts/release-scale.md and writes the release notes. The script then bumps the version in
-// Cargo.toml, builds den, packs the per-user NSIS installer (packaging/installer.nsi), signs it
-// with the updater key, writes the updater manifest (latest.json), commits, tags, pushes and
-// publishes a GitHub release that installed copies update from.
+// Release: Claude reads the changes since the last `v*` tag, picks the semver bump by
+// scripts/release-scale.md and writes the release notes. The script bumps the version in
+// Cargo.toml (and the lockfile), commits, tags, pushes and makes a draft GitHub release with the
+// notes. The tag starts .github/workflows/release.yml, which builds and signs the Windows
+// installer and the Mac app, adds them and latest.json (the updater's manifest) to the release
+// and publishes it.
 //
 //   node scripts/release.ts [--dry-run] [--yes] [--bump major|minor|patch]
 //
@@ -11,23 +12,14 @@
 // e.g. from Claude Code); --bump overrides Claude's level. The first release (no tag yet) publishes
 // the current version.
 //
-// Signing key: DEN_SIGNING_KEY (path), else ~/.keys/den.key; its password (if any) in
-// DEN_SIGNING_KEY_PASSWORD. Make one with
-//   pnpm dlx @tauri-apps/cli signer generate -w %USERPROFILE%\.keys\den.key
-// Its public half goes into packaging/updater.pub (done here on the first release), which den
-// builds in to check downloads. Global TAURI_SIGNING_* variables are ignored: they may belong to
-// another app. NSIS comes from Tauri's tool cache (%LOCALAPPDATA%\tauri\NSIS) or PATH.
-//
-// The Mac build joins the release afterwards: .github/workflows/mac.yml runs when the release is
-// published and, on a Mac with the same signing key, so does
-//   node scripts/release.ts --attach
-// at the release's tag. Either builds den.app (scripts/bundle-macos.sh), packs it as
-// den_<version>_aarch64.app.tar.gz, signs it, uploads it to the release and adds its entry to
-// latest.json. Until then a Mac den reports the release as not yet built for it.
+// The updater's signing key lives in the repository's secrets (DEN_SIGNING_KEY, and
+// DEN_SIGNING_KEY_PASSWORD if it has one); its public half is packaging/updater.pub, which den
+// builds in to check downloads. Make a pair with
+//   pnpm dlx @tauri-apps/cli signer generate -w ~/.keys/den.key
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -35,21 +27,14 @@ import { parseArgs } from "node:util";
 const REPO = "patrickiel/den";
 const BRANCH = "main";
 const ROOT = join(import.meta.dirname, "..");
-/** Cargo.toml has the version; cargo updates the lockfile's copy during the build. */
-const RELEASE_FILES = ["Cargo.toml", "Cargo.lock", "packaging/updater.pub"];
-const OUT_DIR = join(ROOT, "target", "release");
+/** Cargo.toml has the version; `cargo update --workspace` carries it into the lockfile. */
+const RELEASE_FILES = ["Cargo.toml", "Cargo.lock"];
 const PUB_FILE = join(ROOT, "packaging", "updater.pub");
 /** Diff text for Claude is cut here; the log and the stat always go in full. */
 const DIFF_LIMIT = 150_000;
 const BUMPS = ["major", "minor", "patch"] as const;
 
 type Bump = (typeof BUMPS)[number];
-type Env = Record<string, string | undefined>;
-interface Tools {
-  key: string;
-  /** makensis; none on a Mac. */
-  nsis: string | null;
-}
 interface Proposal {
   bump: Bump;
   reason: string;
@@ -98,18 +83,16 @@ function tryOut(cmd: string, args: string[]): string | null {
   }
 }
 
-/** Run a command with its output on the terminal. `shell` for .cmd shims such as pnpm. */
-function run(cmd: string, args: string[], opts: { shell?: boolean; env?: Env } = {}): void {
+/** Run a command with its output on the terminal. */
+function run(cmd: string, args: string[]): void {
   console.log(`\n> ${cmd} ${args.join(" ")}`);
-  const r = opts.shell
-    ? spawnSync([cmd, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" "), { cwd: ROOT, stdio: "inherit", env: opts.env, shell: true })
-    : spawnSync(cmd, args, { cwd: ROOT, stdio: "inherit", env: opts.env });
+  const r = spawnSync(cmd, args, { cwd: ROOT, stdio: "inherit" });
   if (r.status !== 0) throw new Error(`${cmd} ${args[0]} failed${r.status === null ? "" : ` (exit ${r.status})`}`);
 }
 
 /**
- * Add the saved user and machine PATH. A shell started before PATH last changed (one an IDE
- * opened, say) misses newer entries, such as the ones for claude and pnpm.
+ * On Windows, add the saved user and machine PATH. A shell started before PATH last changed (one
+ * an IDE opened, say) misses newer entries, such as the ones for claude and gh.
  */
 function refreshPath(): void {
   if (process.platform !== "win32") return;
@@ -143,76 +126,35 @@ function bumpVersion(version: string, bump: Bump): string {
   return bump === "major" ? `${major + 1}.0.0` : bump === "minor" ? `${major}.${minor + 1}.0` : `${major}.${minor}.${patch + 1}`;
 }
 
-/** The [package] version line, the first `version =` in Cargo.toml. */
+/** The [package] version line, the first `version =` in Cargo.toml, and the lockfile's copy. */
 function setVersion(version: string): void {
   const path = join(ROOT, "Cargo.toml");
   const text = readFileSync(path, "utf8");
   writeFileSync(path, text.replace(/^version = "[^"]*"/m, `version = "${version}"`));
-}
-
-function makensis(): string {
-  const cached = join(process.env.LOCALAPPDATA ?? "", "tauri", "NSIS", "Bin", "makensis.exe");
-  if (existsSync(cached)) return cached;
-  if (tryOut("makensis", ["/VERSION"]) !== null) return "makensis";
-  fail("NSIS (makensis) not found: install NSIS, or build any Tauri app once (it caches NSIS in %LOCALAPPDATA%\\tauri).");
-}
-
-/** Tauri's signer, through pnpm dlx. */
-function signer(): { cmd: string; args: string[] } {
-  return { cmd: "pnpm", args: ["dlx", "@tauri-apps/cli@2"] };
+  run("cargo", ["update", "--workspace", "--offline"]);
 }
 
 // ---------- steps ----------
 
-/** With `attach`, the checkout is a released tag, not the branch's tip. */
-function preflight(dryRun: boolean, attach = false): Tools {
-  if (process.platform !== "win32" && !attach) fail("Releases are cut on Windows; on a Mac, add its build to one with --attach.");
-  if (!attach) {
-    const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
-    if (branch !== BRANCH) fail(`Releases are made from ${BRANCH}; this is ${branch}.`);
-  }
+function preflight(dryRun: boolean): void {
+  const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+  if (branch !== BRANCH) fail(`Releases are made from ${BRANCH}; this is ${branch}.`);
   if (!dryRun && out("git", ["status", "--porcelain"])) fail("The working tree has changes: commit or stash them first.");
-  if (!attach) {
-    out("git", ["fetch", "--quiet", "origin", BRANCH]);
-    const behind = Number(out("git", ["rev-list", "--count", `HEAD..origin/${BRANCH}`]));
-    if (behind > 0) fail(`${BRANCH} is ${behind} commit(s) behind origin/${BRANCH}: pull first.`);
-  }
+  out("git", ["fetch", "--quiet", "origin", BRANCH]);
+  const behind = Number(out("git", ["rev-list", "--count", `HEAD..origin/${BRANCH}`]));
+  if (behind > 0) fail(`${BRANCH} is ${behind} commit(s) behind origin/${BRANCH}: pull first.`);
   if (tryOut("gh", ["auth", "status"]) === null) fail("The GitHub CLI is not logged in: run `gh auth login`.");
-  if (!attach && tryOut("claude", ["--version"]) === null) fail("The `claude` CLI is not on PATH (it picks the bump and writes the notes).");
-  const key = process.env.DEN_SIGNING_KEY ?? join(homedir(), ".keys", "den.key");
-  if (!existsSync(key)) {
-    fail(`Signing key not found: ${key}. Make one with:\n  pnpm dlx @tauri-apps/cli signer generate -w "${join(homedir(), ".keys", "den.key")}"`);
-  }
-  // The public half is built into den; the first release puts it there.
-  const pub = existsSync(PUB_FILE) ? readFileSync(PUB_FILE, "utf8").trim() : "";
-  const keyPub = existsSync(`${key}.pub`) ? readFileSync(`${key}.pub`, "utf8").trim() : "";
-  if (!pub) {
-    if (!keyPub) fail(`${key}.pub not found: packaging/updater.pub needs the public key.`);
-    if (!dryRun) writeFileSync(PUB_FILE, keyPub + "\n");
-  } else if (keyPub && keyPub !== pub) {
-    fail("packaging/updater.pub is not the public half of the signing key: installed copies would refuse the update.");
-  }
-  return { key, nsis: process.platform === "win32" ? makensis() : null };
-}
-
-/** The updater's name for this machine; src/update.rs looks its entry up in latest.json. */
-function platformKey(): string {
-  if (process.platform === "win32") return "windows-x86_64";
-  return `darwin-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
-}
-
-/** The release asset for this machine: the NSIS installer on Windows, the app archive on a Mac. */
-function assetName(version: string): string {
-  if (process.platform === "win32") return `den_${version}_x64-setup.exe`;
-  return `den_${version}_${process.arch === "arm64" ? "aarch64" : "x86_64"}.app.tar.gz`;
+  if (tryOut("claude", ["--version"]) === null) fail("The `claude` CLI is not on PATH (it picks the bump and writes the notes).");
+  // den builds the public key in; the workflow signs with the private half from the secrets.
+  if (!readFileSync(PUB_FILE, "utf8").trim()) fail("packaging/updater.pub is empty: put the public half of the signing key there.");
 }
 
 /** The prompt for Claude: the scale, the version and what changed since `lastTag`. */
 function changesPrompt(version: string, lastTag: string | null, log: string): string {
   const scale = readFileSync(join(ROOT, "scripts/release-scale.md"), "utf8");
   const parts = [
-    "Decide the version bump for the next release of den (a native Windows desktop app: a project terminal with",
-    "split panes, editor, browser, explorer, search and source control) and write its release notes,",
+    "Decide the version bump for the next release of den (a native desktop app for Windows and macOS: a project",
+    "terminal with split panes, editor, browser, explorer, search and source control) and write its release notes,",
     "following the scale below. Answer with the structured output only.",
     `\n<scale>\n${scale}\n</scale>`,
     `\nCurrent version: ${version}. ${lastTag ? `Last release: ${lastTag}.` : "There is no earlier release."}`,
@@ -255,94 +197,18 @@ async function confirm(bump: Bump): Promise<Bump | null> {
   return isBump(answer) ? answer : null;
 }
 
-/**
- * Build den, pack and sign this machine's asset (the installer, or the app archive on a Mac); on
- * failure put the release files back. Returns its name.
- */
-function build(version: string, { key, nsis }: Tools): string {
-  const asset = assetName(version);
-  try {
-    run("cargo", ["build", "--release"]);
-    if (nsis) {
-      run(nsis, ["-V2", `-DVERSION=${version}`, `-DEXE=${join(OUT_DIR, "den.exe")}`, `-DOUTFILE=${join(OUT_DIR, asset)}`, join(ROOT, "packaging", "installer.nsi")]);
-    } else {
-      run("sh", [join(ROOT, "scripts", "bundle-macos.sh"), version]);
-      run("tar", ["-czf", join(OUT_DIR, asset), "-C", OUT_DIR, "den.app"]);
-    }
-    const { cmd, args } = signer();
-    // `--password=` keeps the password one argument: the pnpm shim drops an empty one (no password).
-    run(cmd, [...args, "signer", "sign", "-f", key, `--password=${process.env.DEN_SIGNING_KEY_PASSWORD ?? ""}`, join(OUT_DIR, asset)], {
-      shell: true,
-      env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: undefined, TAURI_SIGNING_PRIVATE_KEY_PATH: undefined, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: undefined },
-    });
-  } catch (e) {
-    out("git", ["checkout", "--", ...RELEASE_FILES]);
-    fail(`${(e as Error).message}. The release files are restored.`);
-  }
-  return asset;
-}
-
-interface Manifest {
-  version: string;
-  notes: string;
-  pub_date: string;
-  platforms: Record<string, { signature: string; url: string }>;
-}
-
-/**
- * The updater manifest next to the asset, in Tauri's format (src/update.rs reads it): a new one,
- * or `existing` (the release's, when a Mac build joins it) with this platform's entry added.
- */
-function writeManifest(version: string, notes: string, asset: string, existing?: Manifest): string {
-  const path = join(OUT_DIR, "latest.json");
-  const manifest: Manifest = existing ?? { version, notes, pub_date: new Date().toISOString(), platforms: {} };
-  if (manifest.version !== version) fail(`The release's latest.json is for ${manifest.version}, not ${version}.`);
-  manifest.platforms[platformKey()] = {
-    signature: readFileSync(`${join(OUT_DIR, asset)}.sig`, "utf8").trim(),
-    url: `https://github.com/${REPO}/releases/download/v${version}/${asset}`,
-  };
-  writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
-  return path;
-}
-
-/**
- * On a Mac: build this platform's archive for the version released from Windows (the tag must
- * be checked out) and add it, with its manifest entry, to that release.
- */
-function attach(tools: Tools): void {
-  const version = currentVersion();
-  const tag = `v${version}`;
-  if (tryOut("git", ["rev-list", "-n", "1", tag]) !== out("git", ["rev-parse", "HEAD"])) {
-    fail(`HEAD is not ${tag}: check the release out first (git fetch --tags; git checkout ${tag}).`);
-  }
-  if (tryOut("gh", ["release", "view", tag, "--repo", REPO, "--json", "tagName"]) === null) {
-    fail(`There is no release ${tag} yet: make it from Windows first.`);
-  }
-  const asset = build(version, tools);
-  const dir = mkdtempSync(join(tmpdir(), "den-release-"));
-  run("gh", ["release", "download", tag, "--repo", REPO, "--pattern", "latest.json", "--dir", dir]);
-  const existing: Manifest = JSON.parse(readFileSync(join(dir, "latest.json"), "utf8"));
-  const manifest = writeManifest(version, existing.notes, asset, existing);
-  run("gh", ["release", "upload", tag, join(OUT_DIR, asset), manifest, "--repo", REPO, "--clobber"]);
-  console.log(`\n✓ ${asset} added to https://github.com/${REPO}/releases/tag/${tag}`);
-}
-
 // ---------- main ----------
 
 async function main(): Promise<void> {
   const { values: opts } = parseArgs({
-    options: { "dry-run": { type: "boolean" }, yes: { type: "boolean" }, bump: { type: "string" }, attach: { type: "boolean" } },
+    options: { "dry-run": { type: "boolean" }, yes: { type: "boolean" }, bump: { type: "string" } },
   });
   const dryRun = opts["dry-run"] ?? false;
   const forced = opts.bump;
   if (forced !== undefined && !isBump(forced)) fail(`--bump takes major, minor or patch, not "${forced}".`);
 
   refreshPath();
-  if (opts.attach) {
-    if (process.platform === "win32") fail("--attach adds a Mac build to a release made here: run it on a Mac.");
-    return attach(preflight(false, true));
-  }
-  const tools = preflight(dryRun);
+  preflight(dryRun);
 
   const current = currentVersion();
   const lastTag = tryOut("git", ["describe", "--tags", "--abbrev=0", "--match", "v*"]);
@@ -369,17 +235,14 @@ async function main(): Promise<void> {
   const tag = `v${version}`;
   if (tryOut("git", ["rev-parse", "--quiet", "--verify", `refs/tags/${tag}`]) !== null) fail(`Tag ${tag} already exists.`);
 
-  if (version !== current) setVersion(version);
-  const setup = build(version, tools);
-  const manifest = writeManifest(version, proposal.notes, setup);
   const notesFile = join(mkdtempSync(join(tmpdir(), "den-release-")), "notes.md");
   writeFileSync(notesFile, proposal.notes + "\n");
-  const ghArgs = [
-    "release", "create", tag, join(OUT_DIR, setup), manifest,
-    "--repo", REPO, "--title", `den ${tag}`, "--notes-file", notesFile, "--latest", "--verify-tag",
-  ];
+  // A draft: the workflow adds the builds and publishes it, so the previous release stays the
+  // latest until this one is whole.
+  const ghArgs = ["release", "create", tag, "--repo", REPO, "--title", `den ${tag}`, "--notes-file", notesFile, "--draft", "--verify-tag"];
 
   try {
+    if (version !== current) setVersion(version);
     run("git", ["add", "--", ...RELEASE_FILES]);
     if (tryOut("git", ["diff", "--cached", "--quiet"]) === null) run("git", ["commit", "--quiet", "-m", `chore: release ${tag}`]);
     run("git", ["tag", "-a", tag, "-m", `den ${tag}`]);
@@ -393,7 +256,9 @@ async function main(): Promise<void> {
       + `  gh ${ghArgs.map((a) => (/[\s\\]/.test(a) ? `"${a}"` : a)).join(" ")}`,
     );
   }
-  console.log(`\n✓ den ${tag} released: https://github.com/${REPO}/releases/tag/${tag}`);
+  console.log(`\n✓ den ${tag} tagged; the release workflow builds and publishes it:`);
+  console.log(`  https://github.com/${REPO}/actions/workflows/release.yml`);
+  console.log(`  https://github.com/${REPO}/releases/tag/${tag}`);
 }
 
 main().catch((e) => fail(e instanceof Error ? e.message : String(e)));
