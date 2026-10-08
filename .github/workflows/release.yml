@@ -41,7 +41,7 @@ jobs:
             platform: darwin-aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
@@ -49,10 +49,10 @@ jobs:
         with:
           # The compiled dependencies are worth keeping even when packaging fails.
           cache-on-failure: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
       - run: cargo build --release
@@ -82,7 +82,7 @@ jobs:
         env:
           KEY: ${{ secrets.DEN_SIGNING_KEY }}
           PASSWORD: ${{ secrets.DEN_SIGNING_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.platform }}
           path: dist/*
@@ -93,7 +93,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
