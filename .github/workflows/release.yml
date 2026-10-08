@@ -60,7 +60,10 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           if ($IsWindows) {
             $asset = "den_${version}_x64-setup.exe"
-            makensis -V2 "-DVERSION=$version" "-DEXE=$PWD/target/release/den.exe" "-DOUTFILE=$PWD/dist/$asset" packaging/installer.nsi
+            # The runner image has NSIS, but not on PATH.
+            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+            if (-not (Test-Path $makensis)) { choco install nsis -y --no-progress | Out-Null }
+            & $makensis -V2 "-DVERSION=$version" "-DEXE=$PWD/target/release/den.exe" "-DOUTFILE=$PWD/dist/$asset" packaging/installer.nsi
           } else {
             $asset = "den_${version}_aarch64.app.tar.gz"
             sh scripts/bundle-macos.sh $version
@@ -68,7 +71,7 @@ jobs:
           }
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The updater checks this signature against packaging/updater.pub.
-          Set-Content -NoNewline "$env:RUNNER_TEMP/den.key" $env:KEY
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP/den.key", $env:KEY)
           pnpm dlx @tauri-apps/cli@2 signer sign -f "$env:RUNNER_TEMP/den.key" "--password=$env:PASSWORD" "dist/$asset"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
         env:
