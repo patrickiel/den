@@ -376,7 +376,7 @@ pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
     let tail = |ix: usize, depth: usize| -> String {
         let mut names: Vec<&str> = parts[ix].iter().take(depth).map(String::as_str).collect();
         names.reverse();
-        names.join("\\")
+        names.join(std::path::MAIN_SEPARATOR_STR)
     };
     let mut depth = vec![1; paths.len()];
     // Lengthen every name that clashes with another until none do (or a path
@@ -407,12 +407,18 @@ pub fn strip_verbatim(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Where den keeps its files: `%APPDATA%\den` on Windows,
+/// `~/Library/Application Support/den` on macOS, `~/.config/den` elsewhere.
 pub(crate) fn data_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("den")
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        home().map(|home| home.join("Library").join("Application Support"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|home| home.join(".config")))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("den")
 }
 
 /// The most recent folder that still exists, read before the app starts.

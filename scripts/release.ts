@@ -17,6 +17,13 @@
 // Its public half goes into packaging/updater.pub (done here on the first release), which den
 // builds in to check downloads. Global TAURI_SIGNING_* variables are ignored: they may belong to
 // another app. NSIS comes from Tauri's tool cache (%LOCALAPPDATA%\tauri\NSIS) or PATH.
+//
+// The Mac build joins the release afterwards. On a Mac with the same signing key, check the
+// release's tag out and run
+//   node scripts/release.ts --attach
+// which builds den.app (scripts/bundle-macos.sh), packs it as den_<version>_aarch64.app.tar.gz,
+// signs it, uploads it to the release and adds its entry to latest.json. Until then a Mac den
+// reports the release as not yet built for it.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -40,7 +47,8 @@ type Bump = (typeof BUMPS)[number];
 type Env = Record<string, string | undefined>;
 interface Tools {
   key: string;
-  nsis: string;
+  /** makensis; none on a Mac. */
+  nsis: string | null;
 }
 interface Proposal {
   bump: Bump;
@@ -104,6 +112,7 @@ function run(cmd: string, args: string[], opts: { shell?: boolean; env?: Env } =
  * opened, say) misses newer entries, such as the ones for claude and pnpm.
  */
 function refreshPath(): void {
+  if (process.platform !== "win32") return;
   const saved = tryOut("powershell", [
     "-NoProfile", "-Command",
     '[Environment]::GetEnvironmentVariable("PATH", "User") + ";" + [Environment]::GetEnvironmentVariable("PATH", "Machine")',
@@ -155,15 +164,21 @@ function signer(): { cmd: string; args: string[] } {
 
 // ---------- steps ----------
 
-function preflight(dryRun: boolean): Tools {
-  const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (branch !== BRANCH) fail(`Releases are made from ${BRANCH}; this is ${branch}.`);
+/** With `attach`, the checkout is a released tag, not the branch's tip. */
+function preflight(dryRun: boolean, attach = false): Tools {
+  if (process.platform !== "win32" && !attach) fail("Releases are cut on Windows; on a Mac, add its build to one with --attach.");
+  if (!attach) {
+    const branch = out("git", ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branch !== BRANCH) fail(`Releases are made from ${BRANCH}; this is ${branch}.`);
+  }
   if (!dryRun && out("git", ["status", "--porcelain"])) fail("The working tree has changes: commit or stash them first.");
-  out("git", ["fetch", "--quiet", "origin", BRANCH]);
-  const behind = Number(out("git", ["rev-list", "--count", `HEAD..origin/${BRANCH}`]));
-  if (behind > 0) fail(`${BRANCH} is ${behind} commit(s) behind origin/${BRANCH}: pull first.`);
+  if (!attach) {
+    out("git", ["fetch", "--quiet", "origin", BRANCH]);
+    const behind = Number(out("git", ["rev-list", "--count", `HEAD..origin/${BRANCH}`]));
+    if (behind > 0) fail(`${BRANCH} is ${behind} commit(s) behind origin/${BRANCH}: pull first.`);
+  }
   if (tryOut("gh", ["auth", "status"]) === null) fail("The GitHub CLI is not logged in: run `gh auth login`.");
-  if (tryOut("claude", ["--version"]) === null) fail("The `claude` CLI is not on PATH (it picks the bump and writes the notes).");
+  if (!attach && tryOut("claude", ["--version"]) === null) fail("The `claude` CLI is not on PATH (it picks the bump and writes the notes).");
   const key = process.env.DEN_SIGNING_KEY ?? join(homedir(), ".keys", "den.key");
   if (!existsSync(key)) {
     fail(`Signing key not found: ${key}. Make one with:\n  pnpm dlx @tauri-apps/cli signer generate -w "${join(homedir(), ".keys", "den.key")}"`);
@@ -177,7 +192,19 @@ function preflight(dryRun: boolean): Tools {
   } else if (keyPub && keyPub !== pub) {
     fail("packaging/updater.pub is not the public half of the signing key: installed copies would refuse the update.");
   }
-  return { key, nsis: makensis() };
+  return { key, nsis: process.platform === "win32" ? makensis() : null };
+}
+
+/** The updater's name for this machine; src/update.rs looks its entry up in latest.json. */
+function platformKey(): string {
+  if (process.platform === "win32") return "windows-x86_64";
+  return `darwin-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
+}
+
+/** The release asset for this machine: the NSIS installer on Windows, the app archive on a Mac. */
+function assetName(version: string): string {
+  if (process.platform === "win32") return `den_${version}_x64-setup.exe`;
+  return `den_${version}_${process.arch === "arm64" ? "aarch64" : "x86_64"}.app.tar.gz`;
 }
 
 /** The prompt for Claude: the scale, the version and what changed since `lastTag`. */
@@ -228,15 +255,23 @@ async function confirm(bump: Bump): Promise<Bump | null> {
   return isBump(answer) ? answer : null;
 }
 
-/** Build den, pack and sign the installer; on failure put the release files back. Returns its name. */
+/**
+ * Build den, pack and sign this machine's asset (the installer, or the app archive on a Mac); on
+ * failure put the release files back. Returns its name.
+ */
 function build(version: string, { key, nsis }: Tools): string {
-  const setup = `den_${version}_x64-setup.exe`;
+  const asset = assetName(version);
   try {
     run("cargo", ["build", "--release"]);
-    run(nsis, ["-V2", `-DVERSION=${version}`, `-DEXE=${join(OUT_DIR, "den.exe")}`, `-DOUTFILE=${join(OUT_DIR, setup)}`, join(ROOT, "packaging", "installer.nsi")]);
+    if (nsis) {
+      run(nsis, ["-V2", `-DVERSION=${version}`, `-DEXE=${join(OUT_DIR, "den.exe")}`, `-DOUTFILE=${join(OUT_DIR, asset)}`, join(ROOT, "packaging", "installer.nsi")]);
+    } else {
+      run("sh", [join(ROOT, "scripts", "bundle-macos.sh"), version]);
+      run("tar", ["-czf", join(OUT_DIR, asset), "-C", OUT_DIR, "den.app"]);
+    }
     const { cmd, args } = signer();
     // `--password=` keeps the password one argument: the pnpm shim drops an empty one (no password).
-    run(cmd, [...args, "signer", "sign", "-f", key, `--password=${process.env.DEN_SIGNING_KEY_PASSWORD ?? ""}`, join(OUT_DIR, setup)], {
+    run(cmd, [...args, "signer", "sign", "-f", key, `--password=${process.env.DEN_SIGNING_KEY_PASSWORD ?? ""}`, join(OUT_DIR, asset)], {
       shell: true,
       env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: undefined, TAURI_SIGNING_PRIVATE_KEY_PATH: undefined, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: undefined },
     });
@@ -244,38 +279,69 @@ function build(version: string, { key, nsis }: Tools): string {
     out("git", ["checkout", "--", ...RELEASE_FILES]);
     fail(`${(e as Error).message}. The release files are restored.`);
   }
-  return setup;
+  return asset;
 }
 
-/** The updater manifest next to the installer, in Tauri's format (src/update.rs reads it). */
-function writeManifest(version: string, notes: string, setup: string): string {
+interface Manifest {
+  version: string;
+  notes: string;
+  pub_date: string;
+  platforms: Record<string, { signature: string; url: string }>;
+}
+
+/**
+ * The updater manifest next to the asset, in Tauri's format (src/update.rs reads it): a new one,
+ * or `existing` (the release's, when a Mac build joins it) with this platform's entry added.
+ */
+function writeManifest(version: string, notes: string, asset: string, existing?: Manifest): string {
   const path = join(OUT_DIR, "latest.json");
-  const manifest = {
-    version,
-    notes,
-    pub_date: new Date().toISOString(),
-    platforms: {
-      "windows-x86_64": {
-        signature: readFileSync(`${join(OUT_DIR, setup)}.sig`, "utf8").trim(),
-        url: `https://github.com/${REPO}/releases/download/v${version}/${setup}`,
-      },
-    },
+  const manifest: Manifest = existing ?? { version, notes, pub_date: new Date().toISOString(), platforms: {} };
+  if (manifest.version !== version) fail(`The release's latest.json is for ${manifest.version}, not ${version}.`);
+  manifest.platforms[platformKey()] = {
+    signature: readFileSync(`${join(OUT_DIR, asset)}.sig`, "utf8").trim(),
+    url: `https://github.com/${REPO}/releases/download/v${version}/${asset}`,
   };
   writeFileSync(path, JSON.stringify(manifest, null, 2) + "\n");
   return path;
+}
+
+/**
+ * On a Mac: build this platform's archive for the version released from Windows (the tag must
+ * be checked out) and add it, with its manifest entry, to that release.
+ */
+function attach(tools: Tools): void {
+  const version = currentVersion();
+  const tag = `v${version}`;
+  if (tryOut("git", ["rev-list", "-n", "1", tag]) !== out("git", ["rev-parse", "HEAD"])) {
+    fail(`HEAD is not ${tag}: check the release out first (git fetch --tags; git checkout ${tag}).`);
+  }
+  if (tryOut("gh", ["release", "view", tag, "--repo", REPO, "--json", "tagName"]) === null) {
+    fail(`There is no release ${tag} yet: make it from Windows first.`);
+  }
+  const asset = build(version, tools);
+  const dir = mkdtempSync(join(tmpdir(), "den-release-"));
+  run("gh", ["release", "download", tag, "--repo", REPO, "--pattern", "latest.json", "--dir", dir]);
+  const existing: Manifest = JSON.parse(readFileSync(join(dir, "latest.json"), "utf8"));
+  const manifest = writeManifest(version, existing.notes, asset, existing);
+  run("gh", ["release", "upload", tag, join(OUT_DIR, asset), manifest, "--repo", REPO, "--clobber"]);
+  console.log(`\n✓ ${asset} added to https://github.com/${REPO}/releases/tag/${tag}`);
 }
 
 // ---------- main ----------
 
 async function main(): Promise<void> {
   const { values: opts } = parseArgs({
-    options: { "dry-run": { type: "boolean" }, yes: { type: "boolean" }, bump: { type: "string" } },
+    options: { "dry-run": { type: "boolean" }, yes: { type: "boolean" }, bump: { type: "string" }, attach: { type: "boolean" } },
   });
   const dryRun = opts["dry-run"] ?? false;
   const forced = opts.bump;
   if (forced !== undefined && !isBump(forced)) fail(`--bump takes major, minor or patch, not "${forced}".`);
 
   refreshPath();
+  if (opts.attach) {
+    if (process.platform === "win32") fail("--attach adds a Mac build to a release made here: run it on a Mac.");
+    return attach(preflight(false, true));
+  }
   const tools = preflight(dryRun);
 
   const current = currentVersion();

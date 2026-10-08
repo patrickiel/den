@@ -125,18 +125,23 @@ fn on_path(name: &str) -> Option<PathBuf> {
 
 /// The folders of PATH. On Windows the saved user and machine PATH follow
 /// den's own: den may have been started before a tool was installed, or by a
-/// program with an older environment.
+/// program with an older environment. (On macOS den takes the login shell's
+/// PATH over at start; see `main`.)
 fn search_path() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     #[cfg(windows)]
-    for (key, sub) in [
-        (windows_registry::CURRENT_USER, "Environment"),
-        (windows_registry::LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
-    ] {
-        if let Ok(saved) = key.open(sub).and_then(|k| k.get_string("Path")) {
-            dirs.extend(std::env::split_paths(&expand_env(&saved)));
+    let dirs = {
+        let mut dirs = dirs;
+        for (key, sub) in [
+            (windows_registry::CURRENT_USER, "Environment"),
+            (windows_registry::LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ] {
+            if let Ok(saved) = key.open(sub).and_then(|k| k.get_string("Path")) {
+                dirs.extend(std::env::split_paths(&expand_env(&saved)));
+            }
         }
-    }
+        dirs
+    };
     dirs
 }
 
@@ -182,6 +187,14 @@ fn psscriptanalyzer_installed() -> bool {
             dirs.push(base.join("PowerShell").join("Modules"));
         }
     }
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            dirs.push(PathBuf::from(home).join(".local").join("share").join("powershell").join("Modules"));
+        }
+        dirs.push(PathBuf::from("/usr/local/share/powershell/Modules"));
+        dirs.push(PathBuf::from("/usr/local/microsoft/powershell/7/Modules"));
+    }
     dirs.iter().any(|dir| dir.join("PSScriptAnalyzer").is_dir())
 }
 
@@ -215,15 +228,30 @@ enum Kind {
     Plugin,
 }
 
-/// dprint, which runs the plugins. The x64 build everywhere: the Prettier
-/// plugin has no Arm one, and Windows on Arm runs x64 programs.
+/// Whether this is an Apple Silicon Mac (the Intel build otherwise).
+const APPLE_ARM: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+
+/// dprint, which runs the plugins. On Windows the x64 build everywhere: the
+/// Prettier plugin has no Arm one, and Windows on Arm runs x64 programs.
 static DPRINT: Kit = Kit {
     name: "dprint",
     formats: "runs the plugins",
-    file: "dprint.exe",
+    file: if cfg!(windows) { "dprint.exe" } else { "dprint" },
     dir: "dprint-0.59.0",
-    url: "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-pc-windows-msvc.zip",
-    sha256: "f75040d7288d3cf0a271b025dedcab589edec6b363c481790ff53850dadae6f5",
+    url: if cfg!(windows) {
+        "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-pc-windows-msvc.zip"
+    } else if APPLE_ARM {
+        "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-aarch64-apple-darwin.zip"
+    } else {
+        "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-apple-darwin.zip"
+    },
+    sha256: if cfg!(windows) {
+        "f75040d7288d3cf0a271b025dedcab589edec6b363c481790ff53850dadae6f5"
+    } else if APPLE_ARM {
+        "1888b152b3541c3690ec5291dd58bde7116e6c8beb4aa1f242187f22071df22f"
+    } else {
+        "cf3efa1f000125feac934f1afcf76daa35dad4c79dc22ae4c58f92de114e0845"
+    },
     kind: Kind::Zip,
     size: "9 MB",
 };
@@ -336,22 +364,42 @@ static CMAKE: Kit = plugin(
 static STYLUA: Kit = Kit {
     name: "StyLua",
     formats: "Lua",
-    file: "stylua.exe",
+    file: if cfg!(windows) { "stylua.exe" } else { "stylua" },
     dir: "stylua-2.5.2",
-    url: "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-windows-x86_64.zip",
-    sha256: "e77d0ea1226b8b389b43f702240091249a96eea25857281f90ea24d0eb9eb969",
+    url: if cfg!(windows) {
+        "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-windows-x86_64.zip"
+    } else if APPLE_ARM {
+        "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-macos-aarch64.zip"
+    } else {
+        "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-macos-x86_64.zip"
+    },
+    sha256: if cfg!(windows) {
+        "e77d0ea1226b8b389b43f702240091249a96eea25857281f90ea24d0eb9eb969"
+    } else if APPLE_ARM {
+        "92ff0889e16324801bc072692974bb67f8161e62010fc90f96c62a17f81f32c7"
+    } else {
+        "53c50a1605d0a6345d160a1a5a21db40bcf2bf9cd23c17f7c277a63a1bff3a7f"
+    },
     kind: Kind::Zip,
     size: "3 MB",
 };
 
-/// The native build, which needs no Java.
+/// The native build, which needs no Java. Google ships none for Intel Macs.
 static JAVA_FORMAT: Kit = Kit {
     name: "google-java-format",
     formats: "Java",
-    file: "google-java-format.exe",
+    file: if cfg!(windows) { "google-java-format.exe" } else { "google-java-format" },
     dir: "google-java-format-1.37.0",
-    url: "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_windows-x86-64.exe",
-    sha256: "48260bed87f6830bae44a7a27f66ce98f7d9fb245f500021bd7ae16c9e2daa06",
+    url: if cfg!(windows) {
+        "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_windows-x86-64.exe"
+    } else {
+        "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_darwin-arm64"
+    },
+    sha256: if cfg!(windows) {
+        "48260bed87f6830bae44a7a27f66ce98f7d9fb245f500021bd7ae16c9e2daa06"
+    } else {
+        "657cf1011c8dfb7e0dac08516db02b701436e59600b961077f83b89b69cc3495"
+    },
     kind: Kind::Program,
     size: "33 MB",
 };
@@ -403,7 +451,23 @@ pub fn kits() -> &'static [&'static Kit] {
         &PSSCRIPTANALYZER,
         &DPRINT,
     ];
-    if cfg!(windows) { &KITS } else { &[] }
+    if cfg!(windows) {
+        &KITS
+    } else if cfg!(target_os = "macos") {
+        // No PSScriptAnalyzer (it needs PowerShell), and no google-java-format
+        // build for Intel Macs.
+        static MAC: [&Kit; 13] = [&PRETTIER_PLUGIN, &RUFF, &GOFUMPT, &SHFMT, &CLANG_FORMAT, &TOML, &DOCKERFILE, &MAGO, &SQL, &MARKUP, &CMAKE, &STYLUA, &DPRINT];
+        static MAC_ARM: [&Kit; 14] =
+            [&PRETTIER_PLUGIN, &RUFF, &GOFUMPT, &SHFMT, &CLANG_FORMAT, &TOML, &DOCKERFILE, &MAGO, &SQL, &MARKUP, &CMAKE, &STYLUA, &JAVA_FORMAT, &DPRINT];
+        if APPLE_ARM { &MAC_ARM } else { &MAC }
+    } else {
+        &[]
+    }
+}
+
+/// Whether den offers `kit` for download on this platform.
+fn offered(kit: &'static Kit) -> bool {
+    kits().iter().any(|k| std::ptr::eq(*k, kit))
 }
 
 /// The dprint plugin for `path`, and the file name its text goes by: dprint
@@ -440,18 +504,16 @@ fn plugin_for(path: &Path) -> Option<(&'static Kit, String)> {
 
 /// What den can download for `path`, when nothing installed formats it.
 pub fn kit_for(path: &Path) -> Option<&'static Kit> {
-    if !cfg!(windows) {
-        return None;
-    }
-    if let Some((kit, _)) = plugin_for(path) {
-        return Some(kit);
-    }
-    match extension(path).as_str() {
-        "lua" => Some(&STYLUA),
-        "java" => Some(&JAVA_FORMAT),
-        e if POWERSHELL_FILES.contains(&e) => Some(&PSSCRIPTANALYZER),
-        _ => None,
-    }
+    let kit = match plugin_for(path) {
+        Some((kit, _)) => kit,
+        None => match extension(path).as_str() {
+            "lua" => &STYLUA,
+            "java" => &JAVA_FORMAT,
+            e if POWERSHELL_FILES.contains(&e) => &PSSCRIPTANALYZER,
+            _ => return None,
+        },
+    };
+    offered(kit).then_some(kit)
 }
 
 fn tools_dir() -> PathBuf {
@@ -510,7 +572,16 @@ pub fn install(kit: &'static Kit, cancel: &Cancel, progress: Progress) -> Result
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    installed(kit).map(|_| ()).ok_or_else(|| format!("The {} download has no {}", kit.name, kit.file))
+    let file = installed(kit).ok_or_else(|| format!("The {} download has no {}", kit.name, kit.file))?;
+    // A program downloaded as a plain file has no mode yet; one from a zip
+    // may have lost it.
+    #[cfg(unix)]
+    if kit.kind != Kind::Plugin {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755));
+    }
+    let _ = file;
+    Ok(())
 }
 
 /// Run dprint once with the plugin at `file`.

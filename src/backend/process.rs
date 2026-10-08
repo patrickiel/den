@@ -34,18 +34,21 @@ pub fn output_with_input(mut cmd: Command, stdin: Option<&str>) -> std::io::Resu
 }
 
 /// Unpack `archive` into the new folder `into` with the system tar (bsdtar on
-/// Windows 10+ reads zip too); `what` names it in the error.
+/// Windows 10+ and macOS reads zip too); `what` names it in the error.
 pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
     let tar = if cfg!(windows) {
         let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
         PathBuf::from(sysroot).join("System32").join("tar.exe")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/usr/bin/tar")
     } else {
         PathBuf::from("tar")
     };
     let mut cmd = Command::new(tar);
-    cmd.arg(if cfg!(windows) { "-xf" } else { "-xzf" }).arg(archive).arg("-C").arg(into);
+    // bsdtar tells the format itself; GNU tar needs the compression named.
+    cmd.arg(if cfg!(target_os = "linux") { "-xzf" } else { "-xf" }).arg(archive).arg("-C").arg(into);
     no_window(&mut cmd);
     let out = cmd.output().map_err(|e| format!("Cannot run tar: {e}"))?;
     if !out.status.success() {

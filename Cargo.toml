@@ -5,7 +5,7 @@ members = [".", "crates/den-extension", "examples/hello-extension"]
 name = "den"
 version = "0.10.0"
 edition = "2024"
-description = "A project terminal for Windows: split panes, editor, browser, explorer, search and source control"
+description = "A project terminal for Windows and macOS: split panes, editor, browser, explorer, search and source control"
 
 [dependencies]
 anyhow = "1"

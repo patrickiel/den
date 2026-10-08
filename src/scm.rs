@@ -84,7 +84,9 @@ impl Group {
     }
 }
 
-const MESSAGE_PLACEHOLDER: &str = "Message (Ctrl+Enter to commit)";
+fn message_placeholder() -> SharedString {
+    crate::ui::key_label("Message (Ctrl+Enter to commit)").into()
+}
 
 /// What the placeholder types while the model reads the changes.
 const QUIPS: &[&str] = &[
@@ -200,7 +202,7 @@ impl EventEmitter<ScmEvent> for ScmView {}
 
 impl ScmView {
     pub fn new(repo: Entity<Repo>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(MESSAGE_PLACEHOLDER));
+        let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(message_placeholder()));
         let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
         Self {
             repo,
@@ -362,8 +364,8 @@ impl ScmView {
             self.selection_group = Some(group);
             self.anchor = None;
         }
-        let plain = !modifiers.control && !modifiers.shift;
-        if modifiers.control {
+        let plain = !modifiers.secondary() && !modifiers.shift;
+        if modifiers.secondary() {
             if let Some(at) = self.selection.iter().position(|r| *r == rel) {
                 self.selection.remove(at);
             } else {
@@ -788,7 +790,7 @@ impl ScmView {
         if let Some(cancel) = self.generating.take() {
             cancel.cancel();
             self.typewriter = None;
-            self.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
+            self.message.update(cx, |input, cx| input.set_placeholder(message_placeholder(), window, cx));
             return cx.notify();
         }
         let config = crate::settings::Settings::get(cx).ai_config();
@@ -880,7 +882,7 @@ impl ScmView {
                         Update::Done(result) => {
                             this.typewriter = None;
                             let stopped = this.generating.take().is_none();
-                            this.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
+                            this.message.update(cx, |input, cx| input.set_placeholder(message_placeholder(), window, cx));
                             match result {
                                 Ok(text) => this.message.update(cx, |input, cx| input.set_value(text, window, cx)),
                                 Err(err) if err == crate::backend::http::CANCELLED || stopped => {}
@@ -1374,7 +1376,11 @@ impl Render for ScmView {
                 .px_3()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child("Git was not found. Install Git for Windows to use Source Control.")
+                .child(if cfg!(windows) {
+                    "Git was not found. Install Git for Windows to use Source Control."
+                } else {
+                    "Git was not found. Install the Xcode Command Line Tools (xcode-select --install) or Git from Homebrew to use Source Control."
+                })
                 .into_any_element(),
             RepoState::NoRepo => v_flex()
                 .px_3()
@@ -1458,7 +1464,7 @@ impl Render for ScmView {
                         .px_2()
                         .gap_1()
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.key == "enter" && event.keystroke.modifiers.control {
+                            if event.keystroke.key == "enter" && event.keystroke.modifiers.secondary() {
                                 this.commit(false, false, window, cx);
                                 cx.stop_propagation();
                             }

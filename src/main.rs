@@ -1,4 +1,4 @@
-//! den: a project terminal for Windows, on GPUI.
+//! den: a project terminal for Windows and macOS, on GPUI.
 //!
 //! See README.md for what is in it and how it is built.
 
@@ -117,7 +117,76 @@ fn start_folder() -> PathBuf {
     cwd.unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The menu bar on macOS: the app needs one for Cmd+Q and for the standard
+/// look; the keys come from the bindings above.
+fn set_menus(cx: &mut App) {
+    let menu = |name: &str, items: Vec<MenuItem>| Menu { name: name.to_string().into(), items, disabled: false };
+    cx.set_menus(vec![
+        menu("den", vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit den", Quit)]),
+        menu(
+            "File",
+            vec![
+                MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::action("Open Files…", OpenFiles),
+                MenuItem::separator(),
+                MenuItem::action("New Terminal", NewTerminal),
+                MenuItem::action("New Browser", NewBrowser),
+                MenuItem::separator(),
+                MenuItem::action("Save", SaveFile),
+                MenuItem::action("Format Document", FormatDocument),
+                MenuItem::separator(),
+                MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close Group", CloseGroup),
+            ],
+        ),
+        menu(
+            "View",
+            vec![
+                MenuItem::action("Explorer", FocusExplorer),
+                MenuItem::action("Search", FocusSearch),
+                MenuItem::action("Source Control", FocusScm),
+                MenuItem::action("Extensions", FocusExtensions),
+                MenuItem::separator(),
+                MenuItem::action("Split Right", SplitRight),
+                MenuItem::action("Split Down", SplitDown),
+                MenuItem::separator(),
+                MenuItem::action("Next Tab", NextTab),
+                MenuItem::action("Previous Tab", PrevTab),
+            ],
+        ),
+    ]);
+}
+
+/// Started from the Finder or the Dock, a Mac app gets the system's bare
+/// PATH: no Homebrew, no `~/.cargo/bin`, so no `claude`, `pnpm` or `rustfmt`
+/// for Source Control, Format Document and the presets. Take the login
+/// shell's PATH over, in front of den's own. Run before anything else
+/// starts: it writes the environment.
+#[cfg(target_os = "macos")]
+fn inherit_login_path() {
+    use std::process::{Command, Stdio};
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+    // An interactive login shell, as a terminal starts one, so PATH set in
+    // .zshrc counts too; markers in case the profile prints something.
+    let script = "printf '%s' \"<den-path>$PATH</den-path>\"";
+    let Ok(out) = Command::new(&shell).args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stderr(Stdio::null()).output() else { return };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(login) = text.split("<den-path>").nth(1).and_then(|rest| rest.split("</den-path>").next()) else { return };
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(login).collect();
+    for dir in std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default() {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        // SAFETY: called first thing in `main`, before any other thread exists.
+        unsafe { std::env::set_var("PATH", joined) };
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "macos")]
+    inherit_login_path();
     // GPUI composites its frame topmost over child windows through
     // DirectComposition, which would hide the browser tabs' WebView2.
     // Presenting to the window directly puts child windows on top. Read once
@@ -144,33 +213,39 @@ fn main() {
             diff::init(cx);
             extensions::init(cx);
 
+            // Ctrl is the command key on macOS; Ctrl+Tab stays, as in every
+            // Mac app with tabs.
+            let primary = ui::primary;
             cx.bind_keys([
-                KeyBinding::new("ctrl-s", SaveFile, None),
+                KeyBinding::new(&primary("ctrl-s"), SaveFile, None),
                 KeyBinding::new("shift-alt-f", FormatDocument, None),
-                KeyBinding::new("ctrl-,", OpenSettings, None),
-                KeyBinding::new("ctrl-shift-e", FocusExplorer, None),
-                KeyBinding::new("ctrl-shift-x", FocusExtensions, None),
-                KeyBinding::new("ctrl-shift-f", FocusSearch, None),
-                KeyBinding::new("ctrl-shift-g", FocusScm, None),
-                KeyBinding::new("ctrl-shift-h", ReplaceInFiles, None),
-                KeyBinding::new("ctrl-shift-d", SplitRight, None),
-                KeyBinding::new("ctrl-shift--", SplitDown, None),
-                KeyBinding::new("ctrl-shift-t", NewTerminal, None),
-                KeyBinding::new("ctrl-shift-b", NewBrowser, None),
-                KeyBinding::new("ctrl-shift-w", CloseTab, None),
-                KeyBinding::new("ctrl-w", CloseTab, None),
-                KeyBinding::new("ctrl-shift-q", CloseGroup, None),
+                KeyBinding::new(&primary("ctrl-,"), OpenSettings, None),
+                KeyBinding::new(&primary("ctrl-shift-e"), FocusExplorer, None),
+                KeyBinding::new(&primary("ctrl-shift-x"), FocusExtensions, None),
+                KeyBinding::new(&primary("ctrl-shift-f"), FocusSearch, None),
+                KeyBinding::new(&primary("ctrl-shift-g"), FocusScm, None),
+                KeyBinding::new(&primary("ctrl-shift-h"), ReplaceInFiles, None),
+                KeyBinding::new(&primary("ctrl-shift-d"), SplitRight, None),
+                KeyBinding::new(&primary("ctrl-shift--"), SplitDown, None),
+                KeyBinding::new(&primary("ctrl-shift-t"), NewTerminal, None),
+                KeyBinding::new(&primary("ctrl-shift-b"), NewBrowser, None),
+                KeyBinding::new(&primary("ctrl-shift-w"), CloseTab, None),
+                KeyBinding::new(&primary("ctrl-w"), CloseTab, None),
+                KeyBinding::new(&primary("ctrl-shift-q"), CloseGroup, None),
                 KeyBinding::new("ctrl-tab", NextTab, None),
                 KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-                KeyBinding::new("ctrl-shift-o", OpenFolder, None),
-                KeyBinding::new("ctrl-o", OpenFiles, None),
+                KeyBinding::new(&primary("ctrl-shift-o"), OpenFolder, None),
+                KeyBinding::new(&primary("ctrl-o"), OpenFiles, None),
                 KeyBinding::new("alt-left", FocusLeft, None),
                 KeyBinding::new("alt-right", FocusRight, None),
                 KeyBinding::new("alt-up", FocusUp, None),
                 KeyBinding::new("alt-down", FocusDown, None),
-                KeyBinding::new("alt-f4", Quit, None),
+                KeyBinding::new(if ui::COMMAND_KEY { "cmd-q" } else { "alt-f4" }, Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            if ui::COMMAND_KEY {
+                set_menus(cx);
+            }
 
             open_workspace(root, None, cx);
             cx.activate(true);

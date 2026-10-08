@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The app bundle's manifest; scripts/bundle-macos.sh fills in the version. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>den</string>
+  <key>CFBundleDisplayName</key>
+  <string>den</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.patrickiel.den</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleExecutable</key>
+  <string>den</string>
+  <key>CFBundleIconFile</key>
+  <string>den</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Patrick Demichiel</string>
+  <!-- A Mac app shows its own dark or light title bar; den draws its own. -->
+  <key>NSRequiresAquaSystemAppearance</key>
+  <false/>
+</dict>
+</plist>

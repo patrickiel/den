@@ -82,10 +82,7 @@ impl ExtensionsView {
 fn open_extensions_folder() {
     let dir = crate::backend::extensions::dir();
     let _ = std::fs::create_dir_all(&dir);
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-    }
+    crate::explorer::open_folder(&dir);
 }
 
 /// Whether any of `texts` holds the filter `query` (lowercase).

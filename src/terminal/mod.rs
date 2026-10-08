@@ -1,11 +1,12 @@
 //! Terminal tabs: a shell (or a program in one, such as Claude Code) on a
 //! pseudo console.
 //!
-//! portable-pty opens the ConPTY and spawns the shell; a thread reads its
-//! output into alacritty_terminal's parser, which keeps the screen grid;
-//! `element.rs` paints the grid cell by cell, `keys.rs` turns keystrokes into
-//! the bytes a terminal sends, and `links.rs` finds URLs and file paths for
-//! Ctrl+click.
+//! portable-pty opens the ConPTY (a pty elsewhere) and spawns the shell; a
+//! thread reads its output into alacritty_terminal's parser, which keeps the
+//! screen grid; `element.rs` paints the grid cell by cell, `keys.rs` turns
+//! keystrokes into the bytes a terminal sends, `links.rs` finds URLs and file
+//! paths for Ctrl+click (Cmd+click on macOS), and `unix.rs` holds the zsh
+//! and bash integration.
 
 pub mod colors;
 mod element;
@@ -13,6 +14,7 @@ mod glyphs;
 mod keys;
 mod links;
 mod osc;
+mod unix;
 
 pub use osc::encode_powershell;
 
@@ -113,6 +115,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-pageup", ScrollPageUp, context),
         KeyBinding::new("shift-pagedown", ScrollPageDown, context),
     ]);
+    if crate::ui::COMMAND_KEY {
+        cx.bind_keys([KeyBinding::new("cmd-c", Copy, context), KeyBinding::new("cmd-v", Paste, context)]);
+    }
 }
 
 /// What a terminal is started with.
@@ -140,8 +145,8 @@ fn program_label(program: &str, cx: &App) -> String {
 }
 
 /// The shell from Settings; else `pwsh` when it is installed, else Windows
-/// PowerShell (`$SHELL` elsewhere). `TERM_SHELL` overrides the automatic choice,
-/// as in den.
+/// PowerShell (the login shell, `$SHELL`, elsewhere: zsh on a Mac).
+/// `TERM_SHELL` overrides the automatic choice, as in den.
 fn shell(setting: &str) -> String {
     if !setting.trim().is_empty() {
         return setting.trim().to_string();
@@ -155,7 +160,8 @@ fn shell(setting: &str) -> String {
         };
         if on_path("pwsh.exe") { "pwsh.exe".into() } else { "powershell.exe".into() }
     } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        let fallback = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/sh" };
+        std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| fallback.into())
     }
 }
 
@@ -366,6 +372,8 @@ impl TerminalPanel {
                 script.push('\n');
             }
             cmd.args(["-NoLogo", "-NoExit", "-EncodedCommand", &osc::encode_powershell(&script)]);
+        } else if unix::configure(&mut cmd, shell, self.hook_id, command.as_deref()) {
+            // zsh or bash on macOS or Linux: den's rc files do the rest.
         } else {
             cmd.env("PROMPT_COMMAND", osc::BASH_HOOK);
             if let Some(command) = &command {
@@ -579,8 +587,9 @@ impl TerminalPanel {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        // Ctrl+C copies while there is a selection, as in Windows Terminal.
-        if keystroke.key == "c" && keystroke.modifiers.control && !keystroke.modifiers.shift && !keystroke.modifiers.alt && self.copy(cx) {
+        // Ctrl+C copies while there is a selection, as in Windows Terminal
+        // (Cmd+C on macOS, where Ctrl+C always interrupts).
+        if keystroke.key == "c" && keystroke.modifiers.secondary() && !keystroke.modifiers.shift && !keystroke.modifiers.alt && self.copy(cx) {
             cx.stop_propagation();
             return;
         }
@@ -635,7 +644,7 @@ impl TerminalPanel {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
-        if event.modifiers.control {
+        if event.modifiers.secondary() {
             if let Some((_, _, link)) = self.link_at(event.position) {
                 self.open_link(link, cx);
             }

@@ -960,7 +960,7 @@ impl SettingsPanel {
         });
         let shell = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Automatic: pwsh, else Windows PowerShell")
+                .placeholder(if cfg!(windows) { "Automatic: pwsh, else Windows PowerShell" } else { "Automatic: your login shell ($SHELL)" })
                 .default_value(settings.shell.clone())
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
@@ -1599,7 +1599,7 @@ fn choice<T: Copy + PartialEq + 'static>(
 }
 
 /// A setting switched on or off.
-fn toggle(name: &'static str, description: &'static str, id: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &App) -> Div {
+fn toggle(name: &'static str, description: impl Into<SharedString>, id: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &App) -> Div {
     let switch = Switch::new(id).checked(on).on_click(move |checked, _, cx| {
         let checked = *checked;
         Settings::update(cx, |s| set(s, checked))
@@ -1670,7 +1670,7 @@ impl Render for SettingsPanel {
                     .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
                     .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
                     .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
-                    .child(toggle("Format on save", "Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded.", "format-on-save", settings.format_on_save, |s, v| s.format_on_save = v, cx))
+                    .child(toggle("Format on save", crate::ui::key_label("Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded."), "format-on-save", settings.format_on_save, |s, v| s.format_on_save = v, cx))
                     .child(setting_row(
                         "Downloaded formatters",
                         "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
@@ -1737,7 +1737,7 @@ impl Render for SettingsPanel {
                     .child(toggle("Toast", "A message in the window's corner; click it to go to the tab.", "notify-toast", settings.notify_toast, |s, v| s.notify_toast = v, cx))
                     .child(toggle("Tab mark", "A dot on the tab until you look at it.", "notify-tab", settings.notify_tab, |s, v| s.notify_tab = v, cx))
                     .child(toggle("Sound", "A sound for a finished turn or a question, picked below.", "notify-sound", settings.notify_sound, |s, v| s.notify_sound = v, cx))
-                    .child(toggle("Taskbar", "Flash the taskbar button while the window is in the background.", "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
+                    .child(toggle(if crate::ui::COMMAND_KEY { "Dock" } else { "Taskbar" }, if crate::ui::COMMAND_KEY { "Bounce the Dock icon while the window is in the background." } else { "Flash the taskbar button while the window is in the background." }, "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
                     .child(setting_row(
                         "Tab strip buttons",
                         "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu.",

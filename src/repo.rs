@@ -28,9 +28,15 @@ pub enum RepoState {
 
 /// A path as a map key: case-insensitive where the file system is.
 pub fn key(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('/', "\\");
-    let text = text.trim_end_matches('\\');
-    if cfg!(windows) { text.to_lowercase() } else { text.to_string() }
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    } else {
+        // macOS file systems are usually case-insensitive too, but git and
+        // the shell are not; paths are compared as they are.
+        let text = text.trim_end_matches('/');
+        if text.is_empty() { "/".to_string() } else { text.to_string() }
+    }
 }
 
 /// How much a refresh reads again.

@@ -1,7 +1,8 @@
 //! Notification sounds, as den makes them: short tones synthesized from a
 //! few notes with a quick attack and an exponential decay, so the app ships
 //! no audio files. Rendered to a WAV in memory and played by Windows'
-//! PlaySound.
+//! PlaySound; elsewhere written once under den's data folder and played by
+//! the system's player (`afplay` on macOS).
 
 use std::{collections::HashMap, sync::Mutex};
 
@@ -108,7 +109,26 @@ pub fn play_named(name: &str, volume: u32) {
         }
     }
     #[cfg(not(windows))]
-    let _ = wav;
+    play_file(name, volume, wav);
+}
+
+/// Play the WAV from a file under den's data folder (written once per sound
+/// and volume) with the system's player, which runs on its own.
+#[cfg(not(windows))]
+fn play_file(name: &str, volume: u32, wav: &[u8]) {
+    let dir = crate::settings::data_dir().join("sounds");
+    let path = dir.join(format!("{name}-{volume}.wav"));
+    if !path.is_file() && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, wav).is_err()) {
+        return;
+    }
+    let players: &[&str] = if cfg!(target_os = "macos") { &["afplay"] } else { &["paplay", "aplay"] };
+    for player in players {
+        let mut cmd = std::process::Command::new(player);
+        cmd.arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        if cmd.spawn().is_ok() {
+            return;
+        }
+    }
 }
 
 /// The sound Settings pick for `kind`.

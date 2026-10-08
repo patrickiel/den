@@ -169,7 +169,7 @@ impl BrowserPanel {
             let alive = this.update(cx, |this, cx| {
                 match built {
                     Ok(webview) => this.webview = Some(Rc::new(webview)),
-                    Err(err) => this.error = Some(format!("Cannot start the browser (WebView2): {err}").into()),
+                    Err(err) => this.error = Some(format!("Cannot start the browser ({}): {err}", if cfg!(windows) { "WebView2" } else { "WebKit" }).into()),
                 }
                 cx.notify();
             });

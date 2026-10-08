@@ -556,10 +556,10 @@ impl Workspace {
             .ghost()
             .icon(Icon::new(if down { IconName::Rows2 } else { IconName::Columns2 }))
             .tooltip(if down {
-                format!("Split {scope} down (Ctrl+Shift+-)")
+                crate::ui::key_label(&format!("Split {scope} down (Ctrl+Shift+-)"))
             } else {
-                format!("Split {scope} right (Ctrl+Shift+D)
-[Alt] Split {scope} down")
+                crate::ui::key_label(&format!("Split {scope} right (Ctrl+Shift+D)
+[Alt] Split {scope} down"))
             })
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                 let side = if event.modifiers().alt { Side::Bottom } else { Side::Right };
@@ -764,7 +764,7 @@ impl Workspace {
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::SquareTerminal))
-                    .tooltip("New Terminal (Ctrl+Shift+T)")
+                    .tooltip(crate::ui::key_label("New Terminal (Ctrl+Shift+T)"))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(Some(group), None, false, window, cx))),
             ))
             .when(buttons.browser && self.defaults.allows(&self.tree, group, Kind::Browsers), |this| this.child(
@@ -772,7 +772,7 @@ impl Workspace {
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::Globe))
-                    .tooltip("New Browser (Ctrl+Shift+B)")
+                    .tooltip(crate::ui::key_label("New Browser (Ctrl+Shift+B)"))
                     .on_click(cx.listener(move |this, _, window, cx| this.open_browser(Some(group), None, window, cx))),
             ))
             .children(Settings::get(cx).presets.iter().enumerate().filter(|(_, preset)| {
@@ -819,7 +819,7 @@ impl Workspace {
                         .small()
                         .ghost()
                         .icon(Icon::new(IconName::X))
-                        .tooltip("Close Group (Ctrl+Shift+Q)")
+                        .tooltip(crate::ui::key_label("Close Group (Ctrl+Shift+Q)"))
                         .on_click(cx.listener(move |this, _, window, cx| this.request_close_group(group, window, cx))),
                 )
             })

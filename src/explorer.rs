@@ -599,14 +599,32 @@ impl Render for Explorer {
     }
 }
 
-/// Show `path` selected in Windows Explorer.
+/// Show `path` selected in the system's file manager (Explorer, Finder).
 pub fn reveal(path: &Path) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-    }
+    let mut cmd = if cfg!(windows) {
+        let mut cmd = std::process::Command::new("explorer");
+        cmd.arg(format!("/select,{}", path.display()));
+        cmd
+    } else if cfg!(target_os = "macos") {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-R").arg(path);
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(path.parent().unwrap_or(path));
+        cmd
+    };
+    let _ = cmd.spawn();
+}
+
+/// Open folder `dir` in the system's file manager.
+pub fn open_folder(dir: &Path) {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program).arg(dir).spawn();
 }

@@ -9,14 +9,23 @@
 //! which scripts/release.ts signs with). While that file is empty, a build
 //! does not update.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::Command};
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 
 const MANIFEST_URL: &str = "https://github.com/patrickiel/den/releases/latest/download/latest.json";
 const PUBLIC_KEY: &str = include_str!("../packaging/updater.pub");
-const PLATFORM: &str = "windows-x86_64";
+/// This build's entry in the manifest's `platforms`, as Tauri names them.
+const PLATFORM: &str = if cfg!(windows) {
+    "windows-x86_64"
+} else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    "darwin-aarch64"
+} else if cfg!(target_os = "macos") {
+    "darwin-x86_64"
+} else {
+    "linux-x86_64"
+};
 
 /// A release newer than this build.
 #[derive(Clone, Debug)]
@@ -55,10 +64,14 @@ pub fn check() -> Result<Option<Release>, String> {
         return Ok(None);
     }
     let platform = &manifest["platforms"][PLATFORM];
+    if platform.is_null() {
+        // The Mac build joins a release after the Windows one (scripts/release.ts --attach).
+        return Err(format!("den {version} is out, but not built for this platform yet."));
+    }
     Ok(Some(Release {
         version,
         notes: manifest["notes"].as_str().unwrap_or_default().to_string(),
-        url: platform["url"].as_str().ok_or("Bad update manifest: no installer for Windows")?.to_string(),
+        url: platform["url"].as_str().ok_or("Bad update manifest: no download for this platform")?.to_string(),
         signature: platform["signature"].as_str().ok_or("Bad update manifest: no signature")?.to_string(),
     }))
 }
@@ -100,14 +113,67 @@ fn verify_with(public_key: &str, bytes: &[u8], signature: &str) -> Result<(), St
     key.verify(bytes, &signature, false).map_err(|_| "The download's signature does not match: not installed.".to_string())
 }
 
-/// Download and check the installer; its path. (An installer is some 15 MB;
-/// the cap only guards against a wrong manifest.)
+/// Download and check the installer (the app archive on macOS); its path.
+/// (A download is some 15 MB; the cap only guards against a wrong manifest.)
 fn download(release: &Release) -> Result<PathBuf, String> {
     let bytes = crate::backend::http::get_bytes(&release.url, 200 * 1024 * 1024).map_err(|e| format!("Download failed: {e}"))?;
     verify(&bytes, &release.signature)?;
-    let path = std::env::temp_dir().join(format!("den_{}_setup.exe", release.version));
+    let name = if cfg!(windows) { format!("den_{}_setup.exe", release.version) } else { format!("den_{}.app.tar.gz", release.version) };
+    let path = std::env::temp_dir().join(name);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// What starts the new version once this den has quit: on Windows the
+/// installer, silently (it waits for the exe, installs over it and starts
+/// den again); on macOS the bundle, swapped for the new one here, started
+/// again by a shell that waits for this process to end.
+fn stage(download: &std::path::Path) -> Result<Command, String> {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new(download);
+        cmd.args(["/S", "/UPDATE"]);
+        Ok(cmd)
+    }
+    #[cfg(not(windows))]
+    {
+        // The running bundle: `…/den.app/Contents/MacOS/den`.
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let bundle = exe
+            .ancestors()
+            .nth(3)
+            .filter(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+            .ok_or("den is not running from an app bundle (a cargo build?); update it by hand.")?
+            .to_path_buf();
+        let parent = bundle.parent().ok_or("bad bundle path")?;
+        // Next to the bundle, so the swap is two renames on one volume.
+        let staging = parent.join(".den-update");
+        crate::backend::process::unpack(download, &staging, "the update")
+            .map_err(|err| format!("{err} (is {} writable?)", parent.display()))?;
+        let new = staging.join("den.app");
+        if !new.join("Contents").join("MacOS").join("den").is_file() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err("The update archive has no den.app.".into());
+        }
+        let old = parent.join(".den.app.old");
+        let _ = std::fs::remove_dir_all(&old);
+        std::fs::rename(&bundle, &old).map_err(|e| format!("Cannot replace {}: {e}", bundle.display()))?;
+        if let Err(err) = std::fs::rename(&new, &bundle) {
+            let _ = std::fs::rename(&old, &bundle);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("Cannot install the update: {err}"));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&staging);
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; open -n \"$0\"", std::process::id()))
+            .arg(&bundle)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        Ok(cmd)
+    }
 }
 
 /// Look for an update; `manual` says so when there is none (or it fails).
@@ -145,15 +211,15 @@ fn offer(release: Release, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Download, check, run the installer silently and quit; it starts den again.
+/// Download, check, stage the new version and quit; it starts again by itself.
 fn install(release: Release, window: &mut Window, cx: &mut App) {
     crate::toast::push(window, format!("Downloading den {}…", release.version), cx);
     let handle = window.window_handle();
     cx.spawn(async move |cx| {
-        let result = cx.background_spawn(async move { download(&release) }).await;
+        let result = cx.background_spawn(async move { download(&release).and_then(|file| stage(&file)) }).await;
         _ = handle.update(cx, |_, window, cx| match result {
-            Ok(setup) => match std::process::Command::new(&setup).args(["/S", "/UPDATE"]).spawn() {
-                // Quitting saves every session; the installer waits for the exe.
+            Ok(mut restart) => match restart.spawn() {
+                // Quitting saves every session; the restart waits for this process.
                 Ok(_) => cx.quit(),
                 Err(err) => crate::toast::push(window, format!("Cannot start the installer: {err}"), cx),
             },

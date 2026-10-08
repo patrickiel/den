@@ -141,8 +141,9 @@ function global:prompt {
 }
 "#;
 
-/// The bash hook, as `PROMPT_COMMAND`.
-pub const BASH_HOOK: &str = r#"printf '\e]7;file://%s%s\a' "$HOSTNAME" "$PWD""#;
+/// The bash hook, as `PROMPT_COMMAND` (zsh names the host `HOST`; den's zsh
+/// rc files run the same line from `precmd`).
+pub const BASH_HOOK: &str = r#"printf '\e]7;file://%s%s\a' "${HOSTNAME:-$HOST}" "$PWD""#;
 
 /// PowerShell's `-EncodedCommand`: the script as base64 of UTF-16LE, so no
 /// quoting can go wrong on the way through the command line.

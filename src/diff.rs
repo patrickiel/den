@@ -667,7 +667,7 @@ impl Render for DiffPanel {
                             .xsmall()
                             .icon(Icon::new(IconName::FileText))
                             .label("Open File")
-                            .tooltip("Open the file (Ctrl+Enter)")
+                            .tooltip(crate::ui::key_label("Open the file (Ctrl+Enter)"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.emit(PaneEvent::OpenFile {
                                     path: this.path.clone(),
