@@ -55,8 +55,9 @@ const CONTEXT: &str = "Terminal";
 /// Space between the panel's edge and the grid.
 const PADDING: Pixels = px(4.);
 
-/// Bytes for the shell, from a key the app binds elsewhere (Ctrl+W, Ctrl+S,
-/// Tab): bound again in the terminal's context so they reach the shell.
+/// Bytes for the shell, from a key the app binds elsewhere (Tab, a Ctrl+W
+/// that closes tabs): bound again in the terminal's context so they reach
+/// the shell.
 #[derive(Clone, PartialEq, Eq, Deserialize, Action)]
 #[action(namespace = terminal, no_json)]
 pub struct SendText(pub String);
@@ -104,20 +105,22 @@ pub fn init(cx: &mut App) {
         let launch = Launch { cwd, program, command, history, agent };
         std::rc::Rc::new(cx.new(|cx| TerminalPanel::new(launch, window, cx)))
     });
+    // Tab moves the focus through the window elsewhere; here it is the
+    // shell's. The commands' keys (copy, paste, scrolling) are the keymap's.
     let context = Some(CONTEXT);
     cx.bind_keys([
-        KeyBinding::new("ctrl-w", SendText("\x17".into()), context),
-        KeyBinding::new("ctrl-s", SendText("\x13".into()), context),
         KeyBinding::new("tab", SendText("\t".into()), context),
         KeyBinding::new("shift-tab", SendText("\x1b[Z".into()), context),
-        KeyBinding::new("ctrl-shift-c", Copy, context),
-        KeyBinding::new("ctrl-shift-v", Paste, context),
-        KeyBinding::new("shift-pageup", ScrollPageUp, context),
-        KeyBinding::new("shift-pagedown", ScrollPageDown, context),
     ]);
-    if crate::ui::COMMAND_KEY {
-        cx.bind_keys([KeyBinding::new("cmd-c", Copy, context), KeyBinding::new("cmd-v", Paste, context)]);
-    }
+}
+
+/// What a plain Ctrl+letter sends a terminal's program (Ctrl+W: 0x17): such
+/// a key reaches the program even when a command has it (see `keymap`).
+pub fn control_text(keystroke: &Keystroke) -> Option<String> {
+    let m = &keystroke.modifiers;
+    let only_ctrl = m.control && !m.alt && !m.shift && !m.platform && !m.function;
+    let letter = keystroke.key.len() == 1 && keystroke.key.as_bytes()[0].is_ascii_lowercase();
+    (only_ctrl && letter).then(|| char::from(keystroke.key.as_bytes()[0] - b'a' + 1).to_string())
 }
 
 /// What a terminal is started with.

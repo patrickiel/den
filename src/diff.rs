@@ -42,7 +42,6 @@ const INLINE_BELOW: Pixels = px(900.);
 actions!(diff, [OpenDiffedFile]);
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-enter", OpenDiffedFile, Some("Diff"))]);
     crate::pane::register(cx, DIFF, |data, _, cx| {
         let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
         let (path, top, rel) = (PathBuf::from(text("path")), PathBuf::from(text("top")), text("rel"));
@@ -667,7 +666,7 @@ impl Render for DiffPanel {
                             .xsmall()
                             .icon(Icon::new(IconName::FileText))
                             .label("Open File")
-                            .tooltip(crate::ui::key_label("Open the file (Ctrl+Enter)"))
+                            .tooltip(crate::keymap::with_keys("Open the file", &OpenDiffedFile, cx))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.emit(PaneEvent::OpenFile {
                                     path: this.path.clone(),

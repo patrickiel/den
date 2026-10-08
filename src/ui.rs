@@ -6,12 +6,6 @@ use gpui_kit::*;
 /// Whether the primary modifier is the command key (macOS) rather than Ctrl.
 pub const COMMAND_KEY: bool = cfg!(target_os = "macos");
 
-/// Keys in gpui's notation with `ctrl` as the platform's primary modifier:
-/// `ctrl-shift-t` stays on Windows and Linux, and is `cmd-shift-t` on macOS.
-pub fn primary(keys: &str) -> String {
-    if COMMAND_KEY { keys.replace("ctrl-", "cmd-") } else { keys.to_string() }
-}
-
 /// A label such as `New Terminal (Ctrl+Shift+T)` with its keys as the
 /// platform shows them: on macOS as its menus do, `New Terminal (⇧⌘T)`.
 pub fn key_label(label: &str) -> String {

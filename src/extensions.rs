@@ -228,7 +228,7 @@ pub fn init(cx: &mut App) {
         };
         extensions.entries.push(Entry { id: installed.id, dir: installed.dir, manifest, status, change: None });
     }
-    bind_commands(&extensions.entries, cx);
+    // Their keys go into den's keymap (`keymap::init`).
     cx.set_global(extensions);
 
     cx.spawn(async move |cx| {
@@ -400,35 +400,9 @@ pub fn commands(cx: &App) -> Vec<(String, String, Command)> {
         .collect()
 }
 
-/// Bind the keys of the started extensions' commands; a keybinding den
-/// can't read is logged and left out.
-fn bind_commands(entries: &[Entry], cx: &mut App) {
-    let mut bindings = Vec::new();
-    for entry in entries.iter().filter(|e| e.started()) {
-        let Some(manifest) = &entry.manifest else { continue };
-        for command in manifest.commands.iter().filter(|c| !c.keybinding.trim().is_empty()) {
-            if let Err(err) = command.keybinding.split_whitespace().try_for_each(|key| Keystroke::parse(key).map(drop)) {
-                backend::log(&entry.id, &format!("the keybinding \"{}\" of {} is not one den reads: {err}", command.keybinding, command.id));
-                continue;
-            }
-            bindings.push(KeyBinding::new(&command.keybinding, RunCommand { extension: entry.id.clone(), command: command.id.clone() }, None));
-        }
-    }
-    cx.bind_keys(bindings);
-}
-
 /// Run extension `id`'s command `command` for the window on `root`.
 pub fn run_command(id: &str, command: &str, root: &Path, cx: &App) {
     send(id, den_extension::events::COMMAND, serde_json::json!({ "root": root, "id": command }), cx);
-}
-
-/// `ctrl-alt-h` as menus show keys: `Ctrl+Alt+H`.
-pub fn pretty_keys(keys: &str) -> String {
-    let key = |key: &str| key.split('-').map(|part| {
-        let mut chars = part.chars();
-        chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
-    }).collect::<Vec<_>>().join("+");
-    keys.split_whitespace().map(key).collect::<Vec<_>>().join(" ")
 }
 
 /// A click on extension `id`'s button `button` in the window on `root`.
@@ -546,14 +520,7 @@ pub fn pattern_matches(pattern: &str, path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, Listing, Status, pattern_matches, pretty_keys, uninstalled, update_available};
-
-    #[test]
-    fn shows_keys_as_menus_do() {
-        assert_eq!(pretty_keys("ctrl-alt-h"), "Ctrl+Alt+H");
-        assert_eq!(pretty_keys("ctrl-k ctrl-s"), "Ctrl+K Ctrl+S");
-        assert_eq!(pretty_keys("f5"), "F5");
-    }
+    use super::{Entry, Listing, Status, pattern_matches, uninstalled, update_available};
 
     fn listing(id: &str, version: &str, api: u32) -> Listing {
         Listing {

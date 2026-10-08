@@ -24,6 +24,7 @@ mod file_icon;
 mod git_graph;
 mod float;
 mod history;
+mod keymap;
 mod layout;
 mod layout_file;
 mod layout_view;
@@ -83,8 +84,24 @@ actions!(
         HideOthers,
         ShowAll,
         Quit,
+        ShowCommands,
+        OpenKeyboardShortcuts,
+        ToggleSidebar,
+        GoToLine,
+        NavigateBack,
+        NavigateForward,
     ]
 );
+
+/// Show the active group's tab at this place, counted from 1; 0 for its last.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, Action)]
+#[action(namespace = den, no_json)]
+pub struct OpenTab(pub usize);
+
+/// Focus the group at this place in the layout, counted from 1.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, Action)]
+#[action(namespace = den, no_json)]
+pub struct FocusGroup(pub usize);
 
 /// A window on the session for `root`, at `bounds` (centred when `None`).
 pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut App) {
@@ -129,8 +146,8 @@ fn start_folder() -> PathBuf {
 
 /// The menu bar on macOS, which stands for the title bar's menu button
 /// there: everything that menu has, and what every Mac app's has. The keys
-/// shown come from the bindings above.
-fn set_menus(cx: &mut App) {
+/// shown come from the keymap, which sets the menus again when it changes.
+pub(crate) fn set_menus(cx: &mut App) {
     use gpui_kit::component::input;
     let menu = |name: &str, items: Vec<MenuItem>| Menu { name: name.to_string().into(), items, disabled: false };
     let mut menus = vec![
@@ -138,6 +155,7 @@ fn set_menus(cx: &mut App) {
             "den",
             vec![
                 MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Keyboard Shortcuts", OpenKeyboardShortcuts),
                 MenuItem::action("Check for Updates…", CheckForUpdates),
                 MenuItem::separator(),
                 MenuItem::os_submenu("Services", SystemMenuType::Services),
@@ -183,6 +201,9 @@ fn set_menus(cx: &mut App) {
         menu(
             "View",
             vec![
+                MenuItem::action("Show All Commands", ShowCommands),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Explorer", FocusExplorer),
                 MenuItem::action("Search", FocusSearch),
                 MenuItem::action("Source Control", FocusScm),
@@ -195,6 +216,8 @@ fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),
+                MenuItem::action("Back", NavigateBack),
+                MenuItem::action("Forward", NavigateForward),
             ],
         ),
         menu(
@@ -285,6 +308,13 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<ResetLayout>,
         forward::<CheckForUpdates>,
         forward::<NewAgent>,
+        forward::<ShowCommands>,
+        forward::<OpenKeyboardShortcuts>,
+        forward::<ToggleSidebar>,
+        forward::<NavigateBack>,
+        forward::<NavigateForward>,
+        forward::<OpenTab>,
+        forward::<FocusGroup>,
         forward::<extensions::RunCommand>,
     ];
     for register in forwarded {
@@ -377,46 +407,14 @@ fn main() {
             terminal::init(cx);
             diff::init(cx);
             extensions::init(cx);
+            // Last: it keeps the keys bound so far and adds every command's
+            // (and sets the menu bar on macOS).
+            keymap::init(cx);
 
-            // Ctrl is the command key on macOS; Ctrl+Tab stays, as in every
-            // Mac app with tabs.
-            let primary = ui::primary;
-            cx.bind_keys([
-                KeyBinding::new(&primary("ctrl-s"), SaveFile, None),
-                KeyBinding::new("shift-alt-f", FormatDocument, None),
-                KeyBinding::new(&primary("ctrl-,"), OpenSettings, None),
-                KeyBinding::new(&primary("ctrl-shift-e"), FocusExplorer, None),
-                KeyBinding::new(&primary("ctrl-shift-x"), FocusExtensions, None),
-                KeyBinding::new(&primary("ctrl-shift-f"), FocusSearch, None),
-                KeyBinding::new(&primary("ctrl-shift-g"), FocusScm, None),
-                KeyBinding::new(&primary("ctrl-shift-h"), ReplaceInFiles, None),
-                KeyBinding::new(&primary("ctrl-shift-d"), SplitRight, None),
-                KeyBinding::new(&primary("ctrl-shift--"), SplitDown, None),
-                KeyBinding::new(&primary("ctrl-shift-t"), NewTerminal, None),
-                KeyBinding::new(&primary("ctrl-shift-b"), NewBrowser, None),
-                KeyBinding::new(&primary("ctrl-shift-w"), CloseTab, None),
-                KeyBinding::new(&primary("ctrl-w"), CloseTab, None),
-                KeyBinding::new(&primary("ctrl-shift-q"), CloseGroup, None),
-                KeyBinding::new("ctrl-tab", NextTab, None),
-                KeyBinding::new("ctrl-shift-tab", PrevTab, None),
-                KeyBinding::new(&primary("ctrl-shift-o"), OpenFolder, None),
-                KeyBinding::new(&primary("ctrl-o"), OpenFiles, None),
-                KeyBinding::new("alt-left", FocusLeft, None),
-                KeyBinding::new("alt-right", FocusRight, None),
-                KeyBinding::new("alt-up", FocusUp, None),
-                KeyBinding::new("alt-down", FocusDown, None),
-                KeyBinding::new(if ui::COMMAND_KEY { "cmd-q" } else { "alt-f4" }, Quit, None),
-            ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
             on_unfocused_actions(cx);
             if ui::COMMAND_KEY {
-                cx.bind_keys([
-                    KeyBinding::new("cmd-m", Minimize, None),
-                    KeyBinding::new("cmd-h", HideApp, None),
-                    KeyBinding::new("alt-cmd-h", HideOthers, None),
-                ]);
                 on_window_actions(cx);
-                set_menus(cx);
             }
 
             open_workspace(root, None, cx);

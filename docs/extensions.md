@@ -258,7 +258,8 @@ Apply a change straight away; the user expects it without a restart. `workspace-
 
 - den lists each command in its menu under **Extensions** as *Name: Title*, with its keys. A command runs in the window it was picked from, and the extension gets `command { root, id }`.
 - `keybinding` uses den's notation: modifiers `ctrl`, `alt`, `shift` and `win`/`cmd` joined to the key with `-` (`ctrl-alt-h`, `shift-f5`), and chords separated by a space (`ctrl-k ctrl-s`).
-- A keybinding den can't read is skipped and logged. One that den already uses is taken over while the extension runs, so pick keys den leaves free (`ctrl-alt-…` combinations mostly are).
+- A keybinding den can't read is skipped and logged. One that den already uses is taken over while the extension runs, so pick keys den leaves free (`ctrl-alt-…` combinations mostly are). In a terminal, a plain Ctrl+letter goes to the program running there, as with den's own commands.
+- The keybinding is the default: users can change or remove it under Settings → Keyboard Shortcuts, where the command is listed as `<extension id>.<command id>`. Commands also show in the command palette (Ctrl+Shift+P).
 - `id`s must be unique within the extension, and every command needs a `title`.
 - Only running extensions' commands are listed and bound. Commands added in a new version appear after the restart that installs it.
 

@@ -120,7 +120,7 @@ pub struct Settings {
     /// Lines a terminal keeps above the screen.
     pub scrollback: usize,
     pub tab_close_button: bool,
-    /// Ctrl+S formats the file first (Format Document's formatter).
+    /// Saving formats the file first (Format Document's formatter).
     pub format_on_save: bool,
     pub diff_layout: DiffLayout,
     pub smart_commit: SmartCommit,
@@ -158,6 +158,9 @@ pub struct Settings {
     pub disabled_extensions: Vec<String>,
     /// What the user set of each extension's settings, by id and key.
     pub extension_settings: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// The keys of the commands the user changed, by command id
+    /// (`den.newTerminal`), in place of the defaults; none for unbound.
+    pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Preset {
@@ -215,6 +218,7 @@ impl Default for Settings {
             browser_home: "https://www.google.com".into(),
             disabled_extensions: Vec::new(),
             extension_settings: Default::default(),
+            keybindings: Default::default(),
         }
     }
 }

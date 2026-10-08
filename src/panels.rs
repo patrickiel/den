@@ -885,6 +885,7 @@ impl Render for FilePanel {
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::save))
+            .when(!showing_preview, |this| this.on_action(cx.listener(|this, _: &crate::GoToLine, window, cx| this.prompt_go_to_line(window, cx))))
             .when(previewable, |this| this.child(self.render_switch(cx)))
             .when_some(self.error.clone(), |this, error| {
                 this.child(
@@ -945,9 +946,19 @@ pub struct SettingsPanel {
     themes: Vec<crate::theme::Imported>,
     /// One name and one command field per preset, in the order of the list.
     preset_rows: Vec<(Entity<InputState>, Entity<InputState>, Vec<Subscription>)>,
-    /// The page: the general settings, then the presets.
+    /// The page: the general settings, then the presets, then Keyboard Shortcuts.
     scroll: ScrollHandle,
+    /// The command whose new keys are being typed, if any.
+    recording: Option<Recording>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// New keys for a command, as they are typed: a key, or two for a chord.
+struct Recording {
+    id: String,
+    strokes: Vec<String>,
+    /// Takes every key before the keymap does, so den's own keys can be typed.
+    _keys: Subscription,
 }
 
 impl SettingsPanel {
@@ -1001,6 +1012,7 @@ impl SettingsPanel {
             themes: crate::theme::imported(),
             preset_rows: Vec::new(),
             scroll: ScrollHandle::new(),
+            recording: None,
             _subscriptions,
         }
     }
@@ -1009,9 +1021,46 @@ impl SettingsPanel {
         self.search.clone()
     }
 
-    /// Scroll the presets to the top of the page.
-    pub fn show_presets(&self) {
-        self.scroll.scroll_to_top_of_item(1);
+    /// Scroll a part of the page to its top: 1 the presets, 2 Keyboard Shortcuts.
+    pub fn show_section(&self, section: usize) {
+        self.scroll.scroll_to_top_of_item(section);
+    }
+
+    /// Start taking the keys for command `id`.
+    fn record(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
+        let keys = cx.intercept_keystrokes(move |event, _, cx| {
+            cx.stop_propagation();
+            _ = this.update(cx, |this, cx| this.recorded(&event.keystroke, cx));
+        });
+        self.recording = Some(Recording { id, strokes: Vec::new(), _keys: keys });
+        // Off the search field, so a typed letter goes nowhere.
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// A key while recording: Enter keeps the keys typed, Esc gives up, a
+    /// modifier alone waits for its key, and a third key starts again.
+    fn recorded(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
+        let Some(recording) = &mut self.recording else { return };
+        let bare = keystroke.modifiers == Modifiers::none();
+        match keystroke.key.as_str() {
+            "shift" | "control" | "alt" | "platform" | "function" => return,
+            "escape" if bare => self.recording = None,
+            "enter" if bare && !recording.strokes.is_empty() => {
+                let (id, keys) = (recording.id.clone(), recording.strokes.join(" "));
+                self.recording = None;
+                set_keys(&id, |list| *list = vec![keys], cx);
+            }
+            "enter" if bare => {}
+            _ => {
+                if recording.strokes.len() == 2 {
+                    recording.strokes.clear();
+                }
+                recording.strokes.push(keystroke.unparse());
+            }
+        }
+        cx.notify();
     }
 
     /// Ask for a VS Code theme file, import it and switch to it.
@@ -1449,6 +1498,11 @@ fn setting_row(name: impl Into<SharedString>, description: impl Into<SharedStrin
     if !passes(&[name.as_ref(), description.as_ref()]) {
         return div();
     }
+    row(name, description, control, cx)
+}
+
+/// A setting's row, whatever the search.
+fn row(name: SharedString, description: SharedString, control: impl IntoElement, cx: &App) -> Div {
     h_flex()
         .w_full()
         .py_3()
@@ -1670,7 +1724,17 @@ impl Render for SettingsPanel {
                     .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
                     .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
                     .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
-                    .child(toggle("Format on save", crate::ui::key_label("Ctrl+S formats the file first, with the formatter Format Document (Shift+Alt+F) uses: an installed one, else one den downloaded."), "format-on-save", settings.format_on_save, |s, v| s.format_on_save = v, cx))
+                    .child(toggle(
+                        "Format on save",
+                        format!(
+                            "Saving formats the file first, with the formatter {} uses: an installed one, else one den downloaded.",
+                            crate::keymap::with_keys("Format Document", &crate::FormatDocument, cx)
+                        ),
+                        "format-on-save",
+                        settings.format_on_save,
+                        |s, v| s.format_on_save = v,
+                        cx,
+                    ))
                     .child(setting_row(
                         "Downloaded formatters",
                         "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
@@ -1814,6 +1878,21 @@ impl Render for SettingsPanel {
                         self.render_presets(Kind::Browsers, cx),
                         cx,
                     )),
+            )
+            // Third, so Keyboard Shortcuts can scroll to it.
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_2()
+                    .pb_4()
+                    .child(section_title("Keyboard Shortcuts", cx))
+                    .when(!filtering(), |this| {
+                        this.child(div().pb_1().text_xs().text_color(cx.theme().muted_foreground).child(
+                            "VS Code's keys by default. Click the pencil and type the new keys (two for a chord, such as Ctrl+K Ctrl+S), then Enter. \
+                             In a terminal, a plain Ctrl+letter goes to the program running there. The changes are in settings.json under keybindings.",
+                        ))
+                    })
+                    .child(self.render_shortcuts(&settings, cx)),
             );
         let empty = FILTER.with(|filter| filter.borrow().2 == 0) && filtering();
         v_flex()
@@ -1876,6 +1955,134 @@ fn section_title(title: &'static str, cx: &App) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
         .child(title.to_uppercase())
+}
+
+/// Change command `id`'s keys, starting from the ones it has; set back to
+/// its defaults, the change is forgotten.
+fn set_keys(id: &str, change: impl FnOnce(&mut Vec<String>), cx: &mut App) {
+    let Some(command) = crate::keymap::commands(cx).iter().find(|c| c.id == id) else { return };
+    let defaults = command.defaults.clone();
+    let mut keys = Settings::get(cx).keybindings.get(id).cloned().unwrap_or_else(|| defaults.clone());
+    change(&mut keys);
+    Settings::update(cx, |s| {
+        if keys == defaults {
+            s.keybindings.remove(id);
+        } else {
+            s.keybindings.insert(id.to_string(), keys);
+        }
+    });
+}
+
+/// One command's row in Keyboard Shortcuts, read before the controls are made.
+struct ShortcutRow {
+    id: String,
+    title: SharedString,
+    description: SharedString,
+    /// Each key as the platform shows it; `None` for one den can't read.
+    keys: Vec<(String, Option<String>)>,
+    changed: bool,
+}
+
+impl SettingsPanel {
+    /// Every command with its keys: change, remove or reset them, as VS
+    /// Code's Keyboard Shortcuts do.
+    fn render_shortcuts(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        use crate::keymap::{context_label, normalize, shown_keys};
+        let commands = crate::keymap::commands(cx);
+        let keys_of = |c: &crate::keymap::Command| settings.keybindings.get(&c.id).unwrap_or(&c.defaults).clone();
+        // Which commands each key runs, where it works, to tell of a key bound twice.
+        let mut owners: std::collections::HashMap<(Option<&str>, String), Vec<&str>> = Default::default();
+        for command in commands {
+            for keys in keys_of(command) {
+                owners.entry((command.context, normalize(&keys))).or_default().push(&command.title);
+            }
+        }
+        let mut rows = Vec::new();
+        for command in commands {
+            let keys = keys_of(command);
+            let mut about = vec![command.id.clone()];
+            if let Some(context) = command.context {
+                about.push(context_label(context).to_string());
+            }
+            let mut others: Vec<&str> = keys.iter().flat_map(|k| owners[&(command.context, normalize(k))].iter().copied()).filter(|t| *t != command.title).collect();
+            others.sort_unstable();
+            others.dedup();
+            if !others.is_empty() {
+                about.push(format!("same keys as {}", others.join(", ")));
+            }
+            let keys: Vec<(String, Option<String>)> = keys.into_iter().map(|k| (k.clone(), shown_keys(&k, cx))).collect();
+            let shown = keys.iter().filter_map(|(_, s)| s.clone()).collect::<Vec<_>>().join(" ");
+            let raw = keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(" ");
+            let description = about.join(" · ");
+            if passes(&[&command.title, &description, &shown, &raw]) {
+                rows.push(ShortcutRow { id: command.id.clone(), title: command.title.clone().into(), description: description.into(), keys, changed: settings.keybindings.contains_key(&command.id) });
+            }
+        }
+
+        let theme = cx.theme();
+        let (border, muted, danger, ring) = (theme.border, theme.muted_foreground, theme.danger, theme.ring);
+        let chip = move |label: SharedString| h_flex().h(px(22.)).px_1p5().gap_0p5().items_center().rounded(px(4.)).border_1().border_color(border).text_xs().child(label);
+        let mut list = v_flex().w_full();
+        for row_data in rows {
+            let ShortcutRow { id, title, description, keys, changed } = row_data;
+            let recording = self.recording.as_ref().filter(|r| r.id == id);
+            let control = if let Some(recording) = recording {
+                let typed = recording.strokes.iter().map(|s| shown_keys(s, cx).unwrap_or_else(|| s.clone())).collect::<Vec<_>>().join(" ");
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(chip(if typed.is_empty() { "Type the keys…".into() } else { typed.into() }).border_color(ring))
+                    .child(div().text_xs().text_color(muted).child("Enter keeps them, Esc cancels"))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .flex_wrap()
+                    .justify_end()
+                    .children(keys.into_iter().enumerate().map(|(ix, (raw, shown))| {
+                        let id = id.clone();
+                        let label = match shown {
+                            Some(shown) => chip(shown.into()),
+                            None => chip(format!("{raw}?").into()).text_color(danger),
+                        };
+                        label.child(
+                            Button::new(SharedString::from(format!("key-{id}-{ix}-remove")))
+                                .xsmall()
+                                .ghost()
+                                .icon(Icon::new(IconName::X))
+                                .tooltip("Remove these keys")
+                                .on_click(move |_, _, cx| set_keys(&id, |list| _ = (ix < list.len()).then(|| list.remove(ix)), cx)),
+                        )
+                    }))
+                    .child(
+                        Button::new(SharedString::from(format!("key-{id}-change")))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Pencil))
+                            .tooltip("Change the keys")
+                            .on_click(cx.listener({
+                                let id = id.clone();
+                                move |this, _, window, cx| this.record(id.clone(), window, cx)
+                            })),
+                    )
+                    .when(changed, |this| {
+                        let id = id.clone();
+                        this.child(
+                            Button::new(SharedString::from(format!("key-{id}-reset")))
+                                .xsmall()
+                                .ghost()
+                                .icon(Icon::new(IconName::RotateCcw))
+                                .tooltip("Back to the default keys")
+                                .on_click(move |_, _, cx| Settings::update(cx, |s| _ = s.keybindings.remove(&id))),
+                        )
+                    })
+                    .into_any_element()
+            };
+            list = list.child(row(title, description, div().max_w(px(360.)).child(control), cx));
+        }
+        list
+    }
 }
 
 fn preset_section(title: &'static str, description: &'static str, list: Div, cx: &App) -> Div {

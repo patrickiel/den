@@ -1098,6 +1098,25 @@ impl Workspace {
         self.show_pane(next, true, window, cx);
     }
 
+    /// Alt+1…9 (Ctrl on macOS): the active group's tab there, counted from
+    /// 1; 0 for the last.
+    fn open_tab_at(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs = self.tree.tabs(self.active_group);
+        let pane = if n == 0 { tabs.last() } else { tabs.get(n - 1) };
+        if let Some(pane) = pane.copied() {
+            self.show_pane(pane, true, window, cx);
+        }
+    }
+
+    /// Ctrl+1…8 (Cmd on macOS): the group there in the layout, counted from 1.
+    fn focus_group_at(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(group) = n.checked_sub(1).and_then(|ix| self.tree.groups().get(ix).copied()) else { return };
+        self.set_active_group(group, cx);
+        if let Some(pane) = self.tree.active_tab(group) {
+            self.focus_pane(pane, window, cx);
+        }
+    }
+
     // -- Opening things ------------------------------------------------------
 
     /// The pane as its kind, when it is of that kind.
@@ -1304,9 +1323,15 @@ impl Workspace {
     /// Settings in a dialog over the window, as den has them; scrolled to
     /// the presets with `presets`.
     pub(crate) fn open_settings(&mut self, presets: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_at(presets.then_some(1), window, cx);
+    }
+
+    /// Settings scrolled to its `section`th part (1 the presets, 2 Keyboard
+    /// Shortcuts); the top with none.
+    pub(crate) fn open_settings_at(&mut self, section: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SettingsPanel::new(window, cx));
-        if presets {
-            view.read(cx).show_presets();
+        if let Some(section) = section {
+            view.read(cx).show_section(section);
         }
         let viewport = window.viewport_size();
         let height = (viewport.height - px(140.)).max(px(320.));
@@ -1784,6 +1809,19 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Ctrl+B: show or hide the sidebar; hidden, the keyboard goes back to
+    /// the active tab.
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let visible = AppState::update(cx, |state| {
+            state.sidebar.visible = !state.sidebar.visible;
+            state.sidebar.visible
+        });
+        if !visible && let Some(pane) = self.tree.active_tab(self.active_group) {
+            self.focus_pane(pane, window, cx);
+        }
+        cx.notify();
+    }
+
     /// The keys: focus a view, or hide the sidebar when the Explorer already
     /// has focus. (Search and Source Control keep focus in their inputs, so a
     /// second press there just focuses the input again.)
@@ -1818,12 +1856,12 @@ impl Workspace {
         let root_is_split = !self.tree.root.is_group();
         let this = cx.weak_entity();
 
-        let view_button = |id: &'static str, icon: IconName, tooltip: &'static str, view: SidebarView, cx: &mut Context<Self>| {
+        let view_button = |id: &'static str, icon: IconName, tooltip: &'static str, keys: &dyn Action, view: SidebarView, cx: &mut Context<Self>| {
             let active = sidebar.visible && sidebar.view == view;
             Button::new(id)
                 .small()
                 .icon(Icon::new(icon))
-                .tooltip(crate::ui::key_label(tooltip))
+                .tooltip(crate::keymap::with_keys(tooltip, keys, cx))
                 // Highlighted, not filled: the primary colour is the change count's.
                 .ghost()
                 .selected(active)
@@ -1858,14 +1896,14 @@ impl Workspace {
                         h_flex()
                             .gap_1()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(view_button("view-explorer", IconName::Files, "Explorer (Ctrl+Shift+E)", SidebarView::Explorer, cx))
-                            .child(view_button("view-search", IconName::Search, "Search (Ctrl+Shift+F)", SidebarView::Search, cx))
+                            .child(view_button("view-explorer", IconName::Files, "Explorer", &FocusExplorer, SidebarView::Explorer, cx))
+                            .child(view_button("view-search", IconName::Search, "Search", &FocusSearch, SidebarView::Search, cx))
                             .child(
                                 // As in VS Code: how many files have changed, in the
                                 // bottom corner, ringed to stand off the icon.
                                 div()
                                     .relative()
-                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control (Ctrl+Shift+G)", SidebarView::Scm, cx))
+                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control", &FocusScm, SidebarView::Scm, cx))
                                     .map(|this| {
                                         let changed = self.repo.read(cx).status().map_or(0, |status| status.files.len());
                                         if changed == 0 {
@@ -1892,7 +1930,7 @@ impl Workspace {
                                         )
                                     }),
                             )
-                            .child(view_button("view-extensions", IconName::Blocks, "Extensions (Ctrl+Shift+X)", SidebarView::Extensions, cx)),
+                            .child(view_button("view-extensions", IconName::Blocks, "Extensions", &FocusExtensions, SidebarView::Extensions, cx)),
                     ),
             )
             .child(
@@ -1916,7 +1954,7 @@ impl Workspace {
                                 .small()
                                 .ghost()
                                 .icon(Icon::new(IconName::Settings))
-                                .tooltip(crate::ui::key_label("Settings (Ctrl+,)"))
+                                .tooltip(crate::keymap::with_keys("Settings", &OpenSettings, cx))
                                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(false, window, cx))),
                         ),
                 ),
@@ -1987,10 +2025,10 @@ impl Workspace {
             .dropdown_menu(move |menu, window, cx| {
                 let commands = crate::extensions::commands(cx);
                 type Run = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
-                let item = |label: &'static str, chord: &'static str, run: Run| {
+                // Each with the keys of the command it runs.
+                let item = |label: &'static str, keys: &dyn Action, run: Run| {
                     let this = this.clone();
-                    let label = if chord.is_empty() { label.to_string() } else { format!("{label}    {chord}") };
-                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    PopupMenuItem::new(crate::keymap::menu_label(label, keys, cx)).on_click(move |_, window, cx| {
                         _ = this.update(cx, |this, cx| run(this, window, cx));
                     })
                 };
@@ -1998,52 +2036,57 @@ impl Workspace {
                 // whole menu shows and it only scrolls in a short window.
                 menu.max_h(window.viewport_size().height - px(56.))
                     .scrollable(true)
+                    .item(item("Show All Commands", &crate::ShowCommands, |_, window, cx| crate::keymap::open_palette(window, cx)))
+                    .separator()
                     .label("FILE")
-                    .item(item("Open Folder…", "Ctrl+Shift+O", |this, window, cx| this.prompt_open_folder(false, window, cx)))
-                    .item(item("Open Folder in New Window…", "", |this, window, cx| this.prompt_open_folder(true, window, cx)))
-                    .item(item("Open Files…", "Ctrl+O", |this, window, cx| this.prompt_open_files(window, cx)))
-                    .item(item("Close Tab", "Ctrl+Shift+W", |this, window, cx| {
+                    .item(item("Open Folder…", &OpenFolder, |this, window, cx| this.prompt_open_folder(false, window, cx)))
+                    .item(item("Open Folder in New Window…", &OpenFolderInNewWindow, |this, window, cx| this.prompt_open_folder(true, window, cx)))
+                    .item(item("Open Files…", &OpenFiles, |this, window, cx| this.prompt_open_files(window, cx)))
+                    .item(item("Close Tab", &CloseTab, |this, window, cx| {
                         if let Some(pane) = this.tree.active_tab(this.active_group) {
                             this.request_close_pane(pane, window, cx);
                         }
                     }))
-                    .item(item("Close Group", "Ctrl+Shift+Q", |this, window, cx| this.request_close_group(this.active_group, window, cx)))
+                    .item(item("Close Group", &CloseGroup, |this, window, cx| this.request_close_group(this.active_group, window, cx)))
                     .separator()
                     .label("EDIT")
-                    .item(item("Format Document", "Shift+Alt+F", |this, window, cx| this.format_active(window, cx)))
-                    .item(item("Find in Files", "Ctrl+Shift+F", |this, window, cx| this.focus_view(SidebarView::Search, window, cx)))
-                    .item(item("Replace in Files", "Ctrl+Shift+H", |_, window, cx| window.dispatch_action(Box::new(ReplaceInFiles), cx)))
+                    .item(item("Format Document", &FormatDocument, |this, window, cx| this.format_active(window, cx)))
+                    .item(item("Find in Files", &FocusSearch, |this, window, cx| this.focus_view(SidebarView::Search, window, cx)))
+                    .item(item("Replace in Files", &ReplaceInFiles, |_, window, cx| window.dispatch_action(Box::new(ReplaceInFiles), cx)))
                     .separator()
                     .label("VIEW")
-                    .item(item("Explorer", "Ctrl+Shift+E", |this, _, cx| this.toggle_view(SidebarView::Explorer, cx)))
-                    .item(item("Search", "", |this, _, cx| this.toggle_view(SidebarView::Search, cx)))
-                    .item(item("Source Control", "Ctrl+Shift+G", |this, _, cx| this.toggle_view(SidebarView::Scm, cx)))
-                    .item(item("Extensions", "Ctrl+Shift+X", |this, _, cx| this.toggle_view(SidebarView::Extensions, cx)))
-                    .item(item("Split Right", "Ctrl+Shift+D", |this, _, cx| this.split(this.active_group, Side::Right, cx)))
-                    .item(item("Split Down", "Ctrl+Shift+-", |this, _, cx| this.split(this.active_group, Side::Bottom, cx)))
-                    .item(item("Save Layout…", "", |this, window, cx| this.prompt_save_preset(window, cx)))
-                    .item(item("Reset Layout", "", |this, _, cx| this.reset_layout(cx)))
-                    .item(item("Settings", "Ctrl+,", |this, window, cx| this.open_settings(false, window, cx)))
-                    .item(item("Check for Updates…", "", |_, window, cx| crate::update::check_in_window(true, window, cx)))
+                    .item(item("Toggle Sidebar", &crate::ToggleSidebar, |this, window, cx| this.toggle_sidebar(window, cx)))
+                    .item(item("Explorer", &FocusExplorer, |this, _, cx| this.toggle_view(SidebarView::Explorer, cx)))
+                    .item(item("Search", &FocusSearch, |this, _, cx| this.toggle_view(SidebarView::Search, cx)))
+                    .item(item("Source Control", &FocusScm, |this, _, cx| this.toggle_view(SidebarView::Scm, cx)))
+                    .item(item("Extensions", &FocusExtensions, |this, _, cx| this.toggle_view(SidebarView::Extensions, cx)))
+                    .item(item("Split Right", &SplitRight, |this, _, cx| this.split(this.active_group, Side::Right, cx)))
+                    .item(item("Split Down", &SplitDown, |this, _, cx| this.split(this.active_group, Side::Bottom, cx)))
+                    .item(item("Save Layout…", &SaveLayout, |this, window, cx| this.prompt_save_preset(window, cx)))
+                    .item(item("Reset Layout", &ResetLayout, |this, _, cx| this.reset_layout(cx)))
+                    .item(item("Settings", &OpenSettings, |this, window, cx| this.open_settings(false, window, cx)))
+                    .item(item("Keyboard Shortcuts", &crate::OpenKeyboardShortcuts, |this, window, cx| this.open_settings_at(Some(2), window, cx)))
+                    .item(item("Check for Updates…", &CheckForUpdates, |_, window, cx| crate::update::check_in_window(true, window, cx)))
                     .separator()
                     .label("TERMINAL")
-                    .item(item("New Terminal", "Ctrl+Shift+T", |this, window, cx| this.open_terminal(None, None, false, window, cx)))
-                    .item(item("New Browser", "Ctrl+Shift+B", |this, window, cx| this.open_browser(None, None, window, cx)))
-                    .item(item("Claude Code", "", Self::open_agent))
+                    .item(item("New Terminal", &NewTerminal, |this, window, cx| this.open_terminal(None, None, false, window, cx)))
+                    .item(item("New Browser", &NewBrowser, |this, window, cx| this.open_browser(None, None, window, cx)))
+                    .item(item("Claude Code", &NewAgent, Self::open_agent))
                     // The running extensions' commands, each by its extension.
                     .when(!commands.is_empty(), |mut menu| {
                         menu = menu.separator().label("EXTENSIONS");
                         for (id, name, command) in &commands {
-                            let keys = if command.keybinding.is_empty() { String::new() } else { format!("    {}", crate::extensions::pretty_keys(&command.keybinding)) };
+                            let action = crate::extensions::RunCommand { extension: id.clone(), command: command.id.clone() };
+                            let label = crate::keymap::menu_label(&format!("{name}: {}", command.title), &action, cx);
                             let (this, id, command_id) = (this.clone(), id.clone(), command.id.clone());
-                            menu = menu.item(PopupMenuItem::new(format!("{name}: {}{keys}", command.title)).on_click(move |_, _, cx| {
+                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                                 _ = this.update(cx, |this, cx| crate::extensions::run_command(&id, &command_id, &this.root, cx));
                             }));
                         }
                         menu
                     })
                     .separator()
-                    .item(item("Exit", "Alt+F4", |this, window, cx| {
+                    .item(item("Exit", &crate::Quit, |this, window, cx| {
                         if this.request_close_window(window, cx) {
                             window.remove_window();
                         }
@@ -2062,7 +2105,10 @@ impl Workspace {
             .small()
             .label(name)
             .dropdown_caret(true)
-            .tooltip(crate::ui::key_label("Switch session (Ctrl+Shift+O opens a folder)"))
+            .tooltip(match crate::keymap::keys_for(&OpenFolder, cx) {
+                Some(keys) => format!("Switch session ({keys} opens a folder)"),
+                None => "Switch session".to_string(),
+            })
             .dropdown_menu(move |menu, _, cx| recent_menu(this.clone(), root.clone(), menu, cx))
     }
 
@@ -2133,6 +2179,11 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &FocusDown, window, cx| this.focus_group(Side::Bottom, window, cx)))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
+            .on_action(cx.listener(|this, action: &crate::OpenTab, window, cx| this.open_tab_at(action.0, window, cx)))
+            .on_action(cx.listener(|this, action: &crate::FocusGroup, window, cx| this.focus_group_at(action.0, window, cx)))
+            .on_action(cx.listener(|this, _: &crate::NavigateBack, window, cx| this.navigate(true, window, cx)))
+            .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| this.navigate(false, window, cx)))
+            .on_action(cx.listener(|_, _: &crate::ShowCommands, window, cx| crate::keymap::open_palette(window, cx)))
     }
 }
 
@@ -2304,6 +2355,8 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &FocusScm, window, cx| this.focus_view(SidebarView::Scm, window, cx)))
             .on_action(cx.listener(|this, _: &FocusExtensions, window, cx| this.focus_view(SidebarView::Extensions, window, cx)))
+            .on_action(cx.listener(|this, _: &crate::ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
+            .on_action(cx.listener(|this, _: &crate::OpenKeyboardShortcuts, window, cx| this.open_settings_at(Some(2), window, cx)))
             .on_action(cx.listener(|this, action: &crate::extensions::RunCommand, _, cx| {
                 crate::extensions::run_command(&action.extension, &action.command, &this.root, cx)
             }))
