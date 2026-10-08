@@ -1,4 +1,4 @@
-# <img src="assets/icons/app.png" alt="den" width="48" height="48" align="middle"> den
+# <img src="assets/icons/app.png" alt="den" width="48" height="48" align="absmiddle"> den
 
 **A project terminal for Windows.** Open a folder and get terminals, coding agents, an editor, a browser, search and git side by side in one native window. The layout is saved with the project.
 
