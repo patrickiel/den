@@ -124,7 +124,7 @@ register!(MyExtension);
 cargo build --release
 ```
 
-Copy `extension.json` and `target\release\my_extension.dll` (`target/release/libmy_extension.dylib` on a Mac) into `%APPDATA%\den\extensions\my-extension\` (`~/Library/Application Support/den/extensions/my-extension/`); the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `.\scripts\sideload.ps1 <folder>` (`./scripts/sideload.sh <folder>` on a Mac) does the build and copy for you.
+Copy `extension.json` and `target\release\my_extension.dll` (`target/release/libmy_extension.dylib` on a Mac) into `%APPDATA%\den\extensions\my-extension\` (`~/Library/Application Support/den/extensions/my-extension/`); the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `node scripts/sideload.ts <folder>` does the build and copy for you.
 
 **5. Try it.** Open the Extensions view (Ctrl+Shift+X): your extension shows as Running, or Failed with the reason. Press Ctrl+Alt+G, or pick *My Extension: Greet* from den's menu.
 
@@ -366,7 +366,7 @@ fn deactivate(&mut self) {
 **Side-loading.** Build in release and copy the folder in (see the [Quick start](#quick-start)), or in den's repository run:
 
 ```powershell
-.\scripts\sideload.ps1 examples\hello-extension   # or a path to your extension
+node scripts/sideload.ts examples/hello-extension   # or a path to your extension
 ```
 
 This stages it as `<id>.pending`, the same way an install does. den can stay open; restart it to load the new build. A running den keeps its DLL locked, so you can't overwrite it in place.

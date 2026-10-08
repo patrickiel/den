@@ -74,7 +74,7 @@ Extensions are Rust crates built on [`den-extension`](crates/den-extension). The
 
 - Start with [`examples/hello-extension`](examples/hello-extension).
 - Read the full guide in [`docs/extensions.md`](docs/extensions.md).
-- Side-load a local build with `.\scripts\sideload.ps1 examples\hello-extension` (`./scripts/sideload.sh` on a Mac).
+- Side-load a local build with `node scripts/sideload.ts examples/hello-extension`.
 
 ## Project layout
 
