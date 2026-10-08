@@ -164,16 +164,46 @@ fn set_menus(cx: &mut App) {
 /// starts: it writes the environment.
 #[cfg(target_os = "macos")]
 fn inherit_login_path() {
-    use std::process::{Command, Stdio};
+    use std::{
+        io::Read as _,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let current: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    // Started from a terminal, PATH is already the shell's: nothing to do.
+    let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+    if current.iter().any(|dir| !system.iter().any(|s| dir.as_os_str() == *s)) {
+        return;
+    }
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
     // An interactive login shell, as a terminal starts one, so PATH set in
     // .zshrc counts too; markers in case the profile prints something.
-    let script = "printf '%s' \"<den-path>$PATH</den-path>\"";
-    let Ok(out) = Command::new(&shell).args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stderr(Stdio::null()).output() else { return };
-    let text = String::from_utf8_lossy(&out.stdout);
+    let fish = std::path::Path::new(&shell).file_name().is_some_and(|name| name == "fish");
+    let script = if fish { "printf '%s' \"<den-path>\"(string join : $PATH)\"</den-path>\"" } else { "printf '%s' \"<den-path>$PATH</den-path>\"" };
+    let Ok(mut child) = Command::new(&shell).args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    else {
+        return;
+    };
+    // A profile that waits for a terminal must not hold the app up.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+    let mut text = String::new();
+    if child.stdout.take().and_then(|mut out| out.read_to_string(&mut text).ok()).is_none() {
+        return;
+    }
     let Some(login) = text.split("<den-path>").nth(1).and_then(|rest| rest.split("</den-path>").next()) else { return };
     let mut dirs: Vec<PathBuf> = std::env::split_paths(login).collect();
-    for dir in std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default() {
+    for dir in current {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }

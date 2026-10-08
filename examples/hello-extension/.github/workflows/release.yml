@@ -46,8 +46,9 @@ jobs:
           if ($IsWindows) {
             Compress-Archive -Path dist/pkg/* -DestinationPath $zip
           } else {
-            # ditto keeps the library's executable bit; Compress-Archive would not.
-            ditto -c -k --sequesterRsrc dist/pkg $zip
+            # ditto keeps the library's executable bit (Compress-Archive would not) and, without
+            # resource forks, adds no __MACOSX entries.
+            ditto -c -k --norsrc dist/pkg $zip
           }
           $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
           Set-Content -Encoding utf8NoBOM "dist/sha256-${{ matrix.platform }}.txt" $sha

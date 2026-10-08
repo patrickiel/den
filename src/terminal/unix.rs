@@ -4,10 +4,11 @@
 //! so every run reports to its tab, and run the tab's first command.
 //!
 //! zsh is pointed at den's folder with `ZDOTDIR`; each file there loads the
-//! user's equivalent from `DEN_USER_ZDOTDIR` (their `ZDOTDIR`, else home) and
-//! `.zlogin` puts `ZDOTDIR` back, so nested shells see nothing of it. bash
-//! takes den's file with `--rcfile`; it loads the profile files a login shell
-//! would, as macOS's Terminal starts one.
+//! user's equivalent from `DEN_USER_ZDOTDIR` (their `ZDOTDIR`, else home), and
+//! `.zshrc` puts `ZDOTDIR` back before anything runs, so nested shells see
+//! nothing of it (zsh reads the user's own `.zlogin` next). bash takes den's
+//! file with `--rcfile`; it loads the profile files a login shell would, as
+//! macOS's Terminal starts one.
 
 use std::path::{Path, PathBuf};
 
@@ -49,10 +50,17 @@ __den_precmd() { printf '\e]7;file://%s%s\a' "$HOST" "$PWD" }
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __den_precmd
 
-# Every `claude` in this tab reports to it (finished, needs input).
+# Every `claude` in this tab reports to it (finished, needs input). An alias
+# of yours would turn the definition into a parse error, so it goes first,
+# on a line of its own: a block is parsed whole before it runs.
+unalias claude 2>/dev/null
 if [[ -n "$DEN_CLAUDE_HOOKS" ]]; then
   claude() { command claude --settings "$DEN_CLAUDE_HOOKS" "$@" }
 fi
+
+# Nested shells get your own files (zsh reads your .zlogin from there next).
+ZDOTDIR="$DEN_USER_ZDOTDIR"
+unset DEN_USER_ZDOTDIR DEN_ZDOTDIR
 
 # The tab's first command: a preset, or a session coming back.
 if [[ -n "$DEN_INIT_COMMAND" ]]; then
@@ -62,18 +70,6 @@ if [[ -n "$DEN_INIT_COMMAND" ]]; then
   eval "$__den_init"
   unset __den_init
 fi
-"#;
-
-const ZLOGIN: &str = r#"# den's shell integration. Your own .zlogin loads here.
-if [[ -f "$DEN_USER_ZDOTDIR/.zlogin" ]]; then
-  DEN_ZDOTDIR="$ZDOTDIR"
-  ZDOTDIR="$DEN_USER_ZDOTDIR"
-  . "$DEN_USER_ZDOTDIR/.zlogin"
-  ZDOTDIR="$DEN_ZDOTDIR"
-fi
-# Nested shells get your own files.
-ZDOTDIR="$DEN_USER_ZDOTDIR"
-unset DEN_USER_ZDOTDIR DEN_ZDOTDIR
 "#;
 
 const BASHRC: &str = r#"# den's shell integration. The files a login shell reads load first.
@@ -87,7 +83,10 @@ unset __den_file
 __den_prompt() { printf '\e]7;file://%s%s\a' "${HOSTNAME:-$HOST}" "$PWD"; }
 PROMPT_COMMAND="__den_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 
-# Every `claude` in this tab reports to it (finished, needs input).
+# Every `claude` in this tab reports to it (finished, needs input). An alias
+# of yours would turn the definition into a parse error, so it goes first,
+# on a line of its own: a block is parsed whole before it runs.
+unalias claude 2>/dev/null
 if [ -n "$DEN_CLAUDE_HOOKS" ]; then
   claude() { command claude --settings "$DEN_CLAUDE_HOOKS" "$@"; }
 fi
@@ -110,26 +109,26 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
         return false;
     }
     let Some(name) = Path::new(shell).file_name().and_then(|n| n.to_str()) else { return false };
-    let dir = crate::settings::data_dir().join("shell");
-    let ready = match name {
+    // The files first: `cmd` is left alone unless they are there.
+    let dir = crate::settings::data_dir().join("shell").join(name);
+    match name {
         "zsh" => {
-            let zsh = dir.join("zsh");
+            if !write(&dir, &[(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC)]) {
+                return false;
+            }
             let user = std::env::var_os("ZDOTDIR").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
-            cmd.env("ZDOTDIR", &zsh);
+            cmd.env("ZDOTDIR", &dir);
             cmd.env("DEN_USER_ZDOTDIR", user);
             cmd.arg("-l");
-            write(&zsh, &[(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC), (".zlogin", ZLOGIN)])
         }
         "bash" => {
-            let bash = dir.join("bash");
+            if !write(&dir, &[("bashrc", BASHRC)]) {
+                return false;
+            }
             cmd.arg("--rcfile");
-            cmd.arg(bash.join("bashrc"));
-            write(&bash, &[("bashrc", BASHRC)])
+            cmd.arg(dir.join("bashrc"));
         }
         _ => return false,
-    };
-    if !ready {
-        return false;
     }
     if let Some(hooks) = agent::claude_hooks(pane) {
         cmd.env("DEN_CLAUDE_HOOKS", hooks);
@@ -167,6 +166,9 @@ mod tests {
             assert!(rc.contains("unset DEN_INIT_COMMAND"), "the first command must not reach child shells");
             assert!(rc.contains("--settings \"$DEN_CLAUDE_HOOKS\""));
         }
-        assert!(ZLOGIN.contains("ZDOTDIR=\"$DEN_USER_ZDOTDIR\""));
+        // ZDOTDIR goes back before the first command runs, so its children see the user's files.
+        let restore = ZSHRC.find("ZDOTDIR=\"$DEN_USER_ZDOTDIR\"").expect("zshrc restores ZDOTDIR");
+        assert!(restore < ZSHRC.find("eval \"$__den_init\"").unwrap());
+        assert!(ZSHRC.contains("unalias claude") && BASHRC.contains("unalias claude"));
     }
 }

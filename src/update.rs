@@ -124,16 +124,15 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// What starts the new version once this den has quit: on Windows the
-/// installer, silently (it waits for the exe, installs over it and starts
-/// den again); on macOS the bundle, swapped for the new one here, started
-/// again by a shell that waits for this process to end.
-fn stage(download: &std::path::Path) -> Result<Command, String> {
+/// Start what brings the new version up once this den has quit: on Windows
+/// the installer, silently (it waits for the exe, installs over it and
+/// starts den again); on macOS a shell that waits for this process to end
+/// and opens the bundle, swapped for the new one here. Nothing is lost if
+/// the start fails: on macOS the swap is undone.
+fn stage(download: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let mut cmd = Command::new(download);
-        cmd.args(["/S", "/UPDATE"]);
-        Ok(cmd)
+        Command::new(download).args(["/S", "/UPDATE"]).spawn().map(|_| ()).map_err(|e| format!("Cannot start the installer: {e}"))
     }
     #[cfg(not(windows))]
     {
@@ -163,16 +162,24 @@ fn stage(download: &std::path::Path) -> Result<Command, String> {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(format!("Cannot install the update: {err}"));
         }
-        let _ = std::fs::remove_dir_all(&old);
-        let _ = std::fs::remove_dir_all(&staging);
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c")
-            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; open -n \"$0\"", std::process::id()))
+        // The old bundle and the staging folder go once the new one is open.
+        let started = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; open -n \"$0\"; rm -rf \"$1\" \"$2\"", std::process::id()))
             .arg(&bundle)
+            .arg(&old)
+            .arg(&staging)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        Ok(cmd)
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Err(err) = started {
+            let _ = std::fs::rename(&bundle, &new);
+            let _ = std::fs::rename(&old, &bundle);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("Cannot start the restart helper: {err}"));
+        }
+        Ok(())
     }
 }
 
@@ -218,11 +225,8 @@ fn install(release: Release, window: &mut Window, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = cx.background_spawn(async move { download(&release).and_then(|file| stage(&file)) }).await;
         _ = handle.update(cx, |_, window, cx| match result {
-            Ok(mut restart) => match restart.spawn() {
-                // Quitting saves every session; the restart waits for this process.
-                Ok(_) => cx.quit(),
-                Err(err) => crate::toast::push(window, format!("Cannot start the installer: {err}"), cx),
-            },
+            // Quitting saves every session; the restart waits for this process.
+            Ok(()) => cx.quit(),
             Err(err) => crate::toast::push(window, err, cx),
         });
     })

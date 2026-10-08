@@ -128,20 +128,17 @@ fn on_path(name: &str) -> Option<PathBuf> {
 /// program with an older environment. (On macOS den takes the login shell's
 /// PATH over at start; see `main`.)
 fn search_path() -> Vec<PathBuf> {
-    let dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     #[cfg(windows)]
-    let dirs = {
-        let mut dirs = dirs;
-        for (key, sub) in [
-            (windows_registry::CURRENT_USER, "Environment"),
-            (windows_registry::LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
-        ] {
-            if let Ok(saved) = key.open(sub).and_then(|k| k.get_string("Path")) {
-                dirs.extend(std::env::split_paths(&expand_env(&saved)));
-            }
+    for (key, sub) in [
+        (windows_registry::CURRENT_USER, "Environment"),
+        (windows_registry::LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ] {
+        if let Ok(saved) = key.open(sub).and_then(|k| k.get_string("Path")) {
+            dirs.extend(std::env::split_paths(&expand_env(&saved)));
         }
-        dirs
-    };
+    }
     dirs
 }
 
@@ -384,7 +381,8 @@ static STYLUA: Kit = Kit {
     size: "3 MB",
 };
 
-/// The native build, which needs no Java. Google ships none for Intel Macs.
+/// The native build, which needs no Java. Google ships none for Intel Macs
+/// (no URL: not offered there).
 static JAVA_FORMAT: Kit = Kit {
     name: "google-java-format",
     formats: "Java",
@@ -392,26 +390,31 @@ static JAVA_FORMAT: Kit = Kit {
     dir: "google-java-format-1.37.0",
     url: if cfg!(windows) {
         "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_windows-x86-64.exe"
-    } else {
+    } else if APPLE_ARM {
         "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_darwin-arm64"
+    } else {
+        ""
     },
     sha256: if cfg!(windows) {
         "48260bed87f6830bae44a7a27f66ce98f7d9fb245f500021bd7ae16c9e2daa06"
-    } else {
+    } else if APPLE_ARM {
         "657cf1011c8dfb7e0dac08516db02b701436e59600b961077f83b89b69cc3495"
+    } else {
+        ""
     },
     kind: Kind::Program,
     size: "33 MB",
 };
 
-/// The module from the PowerShell Gallery, imported by its manifest.
+/// The module from the PowerShell Gallery, imported by its manifest. Windows
+/// only (no URL elsewhere): it needs PowerShell.
 static PSSCRIPTANALYZER: Kit = Kit {
     name: "PSScriptAnalyzer",
     formats: "PowerShell",
     file: "PSScriptAnalyzer.psd1",
     dir: "PSScriptAnalyzer-1.25.0",
-    url: "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0",
-    sha256: "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60",
+    url: if cfg!(windows) { "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0" } else { "" },
+    sha256: if cfg!(windows) { "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60" } else { "" },
     kind: Kind::Zip,
     size: "15 MB",
 };
@@ -451,18 +454,11 @@ pub fn kits() -> &'static [&'static Kit] {
         &PSSCRIPTANALYZER,
         &DPRINT,
     ];
-    if cfg!(windows) {
-        &KITS
-    } else if cfg!(target_os = "macos") {
-        // No PSScriptAnalyzer (it needs PowerShell), and no google-java-format
-        // build for Intel Macs.
-        static MAC: [&Kit; 13] = [&PRETTIER_PLUGIN, &RUFF, &GOFUMPT, &SHFMT, &CLANG_FORMAT, &TOML, &DOCKERFILE, &MAGO, &SQL, &MARKUP, &CMAKE, &STYLUA, &DPRINT];
-        static MAC_ARM: [&Kit; 14] =
-            [&PRETTIER_PLUGIN, &RUFF, &GOFUMPT, &SHFMT, &CLANG_FORMAT, &TOML, &DOCKERFILE, &MAGO, &SQL, &MARKUP, &CMAKE, &STYLUA, &JAVA_FORMAT, &DPRINT];
-        if APPLE_ARM { &MAC_ARM } else { &MAC }
-    } else {
-        &[]
-    }
+    // The ones with a download for this platform (Windows and macOS).
+    static OFFERED: std::sync::OnceLock<Vec<&'static Kit>> = std::sync::OnceLock::new();
+    OFFERED.get_or_init(|| {
+        if cfg!(any(windows, target_os = "macos")) { KITS.iter().copied().filter(|kit| !kit.url.is_empty()).collect() } else { Vec::new() }
+    })
 }
 
 /// Whether den offers `kit` for download on this platform.
