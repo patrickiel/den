@@ -44,8 +44,17 @@ pub const ENTRY: &[u8] = b"den_extension_v1\0";
 /// The manifest's file name, next to the DLL.
 pub const MANIFEST: &str = "extension.json";
 
-/// The platform part of a release asset's name (`<id>-windows-x86_64.zip`).
-pub const PLATFORM: &str = "windows-x86_64";
+/// The platform part of a release asset's name: `<id>-windows-x86_64.zip`,
+/// `<id>-macos-aarch64.zip`.
+pub const PLATFORM: &str = if cfg!(windows) {
+    "windows-x86_64"
+} else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    "macos-aarch64"
+} else if cfg!(target_os = "macos") {
+    "macos-x86_64"
+} else {
+    "linux-x86_64"
+};
 
 /// Events den sends to [`Extension::event`], by name.
 pub mod events {
@@ -104,9 +113,14 @@ pub struct Manifest {
     /// The GitHub `owner/repo` whose releases carry it, for updates.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repository: String,
-    /// The SHA-256 of the release zip, in hex; checked on install when set.
+    /// The SHA-256 of the Windows release zip, in hex; checked on install
+    /// when set. (The first platform; the others are in `platforms`.)
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sha256: String,
+    /// The SHA-256 of each other platform's release zip, by [`PLATFORM`]
+    /// name (`"macos-aarch64"`), in hex.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub platforms: std::collections::BTreeMap<String, String>,
     /// An image in the extension's folder (`icon.png`, `images/icon.svg`),
     /// shown in den's Extensions view and on its page; square, 128 px or more.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -248,6 +262,12 @@ impl Manifest {
     /// The release asset with the manifest and the DLL.
     pub fn asset(&self) -> String {
         format!("{}-{PLATFORM}.zip", self.id)
+    }
+
+    /// The SHA-256 of this platform's release zip, if the manifest has it.
+    pub fn asset_sha256(&self) -> Option<&str> {
+        let sha = if PLATFORM == "windows-x86_64" { &self.sha256 } else { self.platforms.get(PLATFORM)? };
+        (!sha.is_empty()).then_some(sha.as_str())
     }
 }
 

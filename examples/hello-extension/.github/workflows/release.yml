@@ -1,7 +1,8 @@
 # Publishes the extension where den installs it from: a tag `v<version>`
-# makes a GitHub release with `<id>-windows-x86_64.zip` (extension.json + the
-# DLL, README.md and the icon when there are) and `extension.json` with the zip's
-# sha256, which den reads first.
+# makes a GitHub release with `<id>-windows-x86_64.zip` and
+# `<id>-macos-aarch64.zip` (extension.json + the library, README.md and the
+# icon when there are) and `extension.json` with each zip's sha256, which den
+# reads first.
 name: release
 
 on:
@@ -12,8 +13,15 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: macos-aarch64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - run: cargo build --release
@@ -23,9 +31,10 @@ jobs:
           $manifest = Get-Content extension.json -Raw | ConvertFrom-Json
           if ("v$($manifest.version)" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match version $($manifest.version) in extension.json" }
           $id = $manifest.id
-          $dll = "target/release/$($id -replace '-', '_').dll"
+          $name = $id -replace '-', '_'
+          $lib = if ($IsWindows) { "target/release/$name.dll" } else { "target/release/lib$name.dylib" }
           New-Item -ItemType Directory -Force dist/pkg | Out-Null
-          Copy-Item extension.json, $dll dist/pkg/
+          Copy-Item extension.json, $lib dist/pkg/
           # den shows these in its Extensions view and on the extension's page.
           if (Test-Path README.md) { Copy-Item README.md dist/pkg/ }
           if ($manifest.icon) {
@@ -33,12 +42,45 @@ jobs:
             New-Item -ItemType Directory -Force (Split-Path $icon) | Out-Null
             Copy-Item $manifest.icon $icon
           }
-          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/$id-windows-x86_64.zip"
-          $sha = (Get-FileHash "dist/$id-windows-x86_64.zip" -Algorithm SHA256).Hash.ToLower()
-          $manifest | Add-Member -NotePropertyName sha256 -NotePropertyValue $sha -Force
-          $manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM dist/extension.json
-      - name: Release
+          $zip = "dist/$id-${{ matrix.platform }}.zip"
+          if ($IsWindows) {
+            Compress-Archive -Path dist/pkg/* -DestinationPath $zip
+          } else {
+            # ditto keeps the library's executable bit; Compress-Archive would not.
+            ditto -c -k --sequesterRsrc dist/pkg $zip
+          }
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Encoding utf8NoBOM "dist/sha256-${{ matrix.platform }}.txt" $sha
+          Remove-Item -Recurse dist/pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Manifest
         shell: pwsh
+        run: |
+          $manifest = Get-Content extension.json -Raw | ConvertFrom-Json
+          # The Windows zip's hash is `sha256` (the first platform); the others go under `platforms`.
+          $manifest | Add-Member -NotePropertyName sha256 -NotePropertyValue (Get-Content dist/sha256-windows-x86_64.txt -Raw).Trim() -Force
+          $platforms = @{}
+          foreach ($file in Get-ChildItem dist/sha256-*.txt) {
+            $platform = $file.BaseName -replace '^sha256-', ''
+            if ($platform -ne 'windows-x86_64') { $platforms[$platform] = (Get-Content $file -Raw).Trim() }
+          }
+          $manifest | Add-Member -NotePropertyName platforms -NotePropertyValue $platforms -Force
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM dist/extension.json
+          Remove-Item dist/sha256-*.txt
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ github.ref_name }}" dist/*.zip dist/extension.json --title "${{ github.ref_name }}" --generate-notes

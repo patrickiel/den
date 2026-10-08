@@ -30,14 +30,14 @@ This guide covers writing, testing, publishing and listing an extension for den.
 
 ## How extensions work
 
-An extension is a **Rust `cdylib`** (a DLL), built against the [`den-extension`](../crates/den-extension) crate, plus an **`extension.json`** manifest. den loads every folder in `%APPDATA%\den\extensions\<id>\` that holds both.
+An extension is a **Rust `cdylib`** (a DLL on Windows, a dylib on macOS), built against the [`den-extension`](../crates/den-extension) crate, plus an **`extension.json`** manifest. den loads every folder in `%APPDATA%\den\extensions\<id>\` (`~/Library/Application Support/den/extensions/<id>/` on a Mac) that holds both.
 
 ```
 %APPDATA%\den\
   extensions\
     my-extension\
       extension.json      the manifest
-      my_extension.dll    the code
+      my_extension.dll    the code (libmy_extension.dylib on a Mac)
       README.md           shown on the extension's page (optional)
       icon.svg            shown in the Extensions view (optional)
   extensions-data\
@@ -124,7 +124,7 @@ register!(MyExtension);
 cargo build --release
 ```
 
-Copy `extension.json` and `target\release\my_extension.dll` into `%APPDATA%\den\extensions\my-extension\`; the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `.\scripts\sideload.ps1 <folder>` does the build and copy for you.
+Copy `extension.json` and `target\release\my_extension.dll` (`target/release/libmy_extension.dylib` on a Mac) into `%APPDATA%\den\extensions\my-extension\` (`~/Library/Application Support/den/extensions/my-extension/`); the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `.\scripts\sideload.ps1 <folder>` (`./scripts/sideload.sh <folder>` on a Mac) does the build and copy for you.
 
 **5. Try it.** Open the Extensions view (Ctrl+Shift+X): your extension shows as Running, or Failed with the reason. Press Ctrl+Alt+G, or pick *My Extension: Greet* from den's menu.
 
@@ -132,7 +132,7 @@ Copy `extension.json` and `target\release\my_extension.dll` into `%APPDATA%\den\
 
 | Field | Required | |
 | --- | --- | --- |
-| `id` | yes | Lowercase letters, digits and `-`, at most 64 characters, not starting or ending with `-`. It must equal the crate's name; the DLL is the id with `-` turned into `_` (`my_extension.dll`). It also names the extension's folders. |
+| `id` | yes | Lowercase letters, digits and `-`, at most 64 characters, not starting or ending with `-`. It must equal the crate's name; the library is the id with `-` turned into `_` (`my_extension.dll`, `libmy_extension.dylib`). It also names the extension's folders. |
 | `name` | yes | Shown everywhere. |
 | `version` | yes | `x.y.z`. den compares versions to offer updates. |
 | `api` | yes | The extension API it was built for: `den_extension::API_VERSION`, currently `1`. |
@@ -142,7 +142,8 @@ Copy `extension.json` and `target\release\my_extension.dll` into `%APPDATA%\den\
 | `settings` | no | See [Settings](#settings). |
 | `commands` | no | See [Commands and keybindings](#commands-and-keybindings). |
 | `views` | no | Tabs of its own: `[{ "id", "title", "icon" }]`. See [Views, prompts and diffs](#views-prompts-and-diffs). |
-| `sha256` | no | The SHA-256 of the release zip. `release.yml` adds it to the released copy, and den checks it on install. Leave it out of your source copy. |
+| `sha256` | no | The SHA-256 of the Windows release zip. `release.yml` adds it to the released copy, and den checks it on install. Leave it out of your source copy. |
+| `platforms` | no | The other platforms' zips' SHA-256s by platform name: `{ "macos-aarch64": "…" }`. `release.yml` adds them too. |
 
 A `README.md` next to the manifest is shown on the extension's page, both installed and before installing (from the repository). Write it for users: what the extension does, its settings, and its commands.
 
@@ -392,9 +393,9 @@ Publish each extension from its **own public GitHub repository**, with `extensio
    ```sh
    git tag v0.2.0; git push origin v0.2.0
    ```
-3. The workflow builds on Windows and makes a release with:
-   - `<id>-windows-x86_64.zip`: `extension.json`, the DLL, and `README.md` and the icon if present;
-   - `extension.json` with the zip's `sha256` added. den reads this first.
+3. The workflow builds on Windows and macOS and makes a release with:
+   - `<id>-windows-x86_64.zip` and `<id>-macos-aarch64.zip`: `extension.json`, the library, and `README.md` and the icon if present;
+   - `extension.json` with the zips' `sha256` and `platforms` added. den reads this first.
 
 Anyone can then install the extension by typing `owner/repo` in the Extensions view. Users who installed it get the new release from its update button.
 
@@ -416,14 +417,14 @@ CI checks your latest release the way den installs it:
 
 Once a maintainer merges it, the index is rebuilt and den shows your extension within the hour. New releases appear as updates on their own, because the index is rebuilt daily.
 
-Being listed isn't a security audit. Keep your source public, and have it build the released DLL.
+Being listed isn't a security audit. Keep your source public, and have it build the released libraries.
 
 ## Compatibility
 
 - **The API version** (`api` in the manifest, `den_extension::API_VERSION` in code) changes only when the boundary itself breaks. den loads extensions built for its version and refuses others, with the reason.
 - **New features arrive under the same version**, as new host methods, events and manifest fields. An extension built against an older `den-extension` keeps working: it never calls the new methods, and ignores events it doesn't know.
 - **An extension that uses a new method** fails in an older den only at that call: `call` returns an error naming the method. Handle that error if you want to support older dens.
-- **Only Windows x86-64 for now**: the release asset is `<id>-windows-x86_64.zip`.
+- **Windows x86-64 and macOS arm64**: den installs `<id>-<platform>.zip` (`den_extension::PLATFORM`), so a release needs one zip per platform it supports. An extension without a zip for the user's platform fails to install with that reason.
 
 ## What extensions can't do yet
 
