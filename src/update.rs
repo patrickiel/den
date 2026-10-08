@@ -65,8 +65,8 @@ pub fn check() -> Result<Option<Release>, String> {
     }
     let platform = &manifest["platforms"][PLATFORM];
     if platform.is_null() {
-        // The Mac build joins a release after the Windows one (scripts/release.ts --attach).
-        return Err(format!("den {version} is out, but not built for this platform yet."));
+        // A release is published with both platforms' builds; this guards a hand-made one.
+        return Err(format!("den {version} is out, but not built for this platform."));
     }
     Ok(Some(Release {
         version,
