@@ -397,13 +397,17 @@ pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
     }
 }
 
-/// `canonicalize` on Windows returns `\\?\C:\…`, which is noise in titles and
-/// tab tooltips.
+/// `canonicalize` on Windows returns `\\?\C:\…` and `\\?\UNC\server\…`,
+/// which are noise in titles and tab tooltips. A folder inside WSL comes out
+/// as `\\wsl.localhost\…`, the form den builds from git's paths there.
 pub fn strip_verbatim(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
-        _ => path,
+    let plain = match path.to_string_lossy().strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest.strip_prefix(r"UNC\").map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}"))),
+        None => path.clone(),
+    };
+    match crate::backend::wsl::split(&plain) {
+        Some((distro, linux)) => crate::backend::wsl::to_windows(Some(&distro), &linux).unwrap_or(plain),
+        None => plain,
     }
 }
 
@@ -551,8 +555,18 @@ pub fn mono_font(cx: &App) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_settings, session_key, unique_names, write_text};
+    use super::{read_settings, session_key, strip_verbatim, unique_names, write_text};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn plain_paths_from_canonicalize() {
+        let plain = |p: &str| strip_verbatim(PathBuf::from(p));
+        assert_eq!(plain(r"\\?\C:\Users\me"), PathBuf::from(r"C:\Users\me"));
+        assert_eq!(plain(r"\\?\UNC\server\share\x"), PathBuf::from(r"\\server\share\x"));
+        assert_eq!(plain(r"\\?\UNC\wsl.localhost\Ubuntu\home\me"), PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me"));
+        assert_eq!(plain(r"\\wsl$\Ubuntu\home\me"), PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me"));
+        assert_eq!(plain("/Users/me"), PathBuf::from("/Users/me"));
+    }
 
     #[test]
     fn a_broken_settings_file_is_kept_aside() {

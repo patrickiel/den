@@ -47,6 +47,8 @@ Settings and app state are kept in `%APPDATA%\den\`. Each project's layout is ke
 
 Set the shell (Settings) to `wsl`, or `wsl -d Ubuntu` for a particular distribution, and terminals open in WSL with your own bash or zsh setup. Leave it empty and a folder inside WSL (`\\wsl.localhost\Ubuntu\home\you\project`) opens its terminals there by itself. Either way the tab follows your prompt from folder to folder, and Claude Code running in WSL marks its tab when it finishes or needs input, as it does on Windows.
 
+A project inside WSL works like any other: Source Control runs the distribution's own `git` (your Linux config, hooks and credentials), and the Explorer, git status and open files follow changes made in WSL. Changes are picked up within a second, or as they happen with `inotify-tools` installed in the distribution. Format Document still uses the formatters installed on Windows.
+
 ### macOS (Apple Silicon)
 
 1. Download `den_<version>_aarch64.dmg` from the [latest release](https://github.com/patrickiel/den/releases/latest), open it and drag `den` onto the Applications folder.

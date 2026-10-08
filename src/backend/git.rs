@@ -11,7 +11,7 @@ use std::{
     process::Command,
 };
 
-use super::process;
+use super::{process, wsl};
 
 /// A git run that started: its exit code and output.
 #[derive(Clone, Debug)]
@@ -45,11 +45,25 @@ impl std::fmt::Display for Error {
 }
 
 /// Run `git <args>` in `cwd`, feeding `stdin` if given. Ok even on a non-zero
-/// exit (the caller reads `code`); Err only when git could not start.
+/// exit (the caller reads `code`); Err only when git could not start. A
+/// folder inside WSL gets the distribution's own git, with its config,
+/// hooks and credentials (Windows git there is slow and not trusted).
 pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Error> {
-    let mut cmd = Command::new("git");
+    let wsl = wsl::split(cwd).filter(|_| cfg!(windows));
+    let mut cmd = match &wsl {
+        Some((distro, linux)) => {
+            let mut cmd = Command::new("wsl.exe");
+            cmd.args(["-d", distro, "--cd", linux, "--exec", "git"])
+                .env("WSLENV", wsl::wslenv(&["GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "LC_ALL"]));
+            cmd
+        }
+        None => {
+            let mut cmd = Command::new("git");
+            cmd.current_dir(cwd);
+            cmd
+        }
+    };
     cmd.args(args)
-        .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0") // fail instead of waiting for a password
         .env("GIT_OPTIONAL_LOCKS", "0") // status never writes the index (no watcher loop)
         .env("LC_ALL", "C")
@@ -63,10 +77,15 @@ pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Err
             Error::Failed(e.to_string())
         }
     })?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // wsl.exe ran, but found no git in the distribution.
+    if wsl.is_some() && !out.status.success() && stderr.contains("execvpe(git) failed") {
+        return Err(Error::NotFound);
+    }
     Ok(Output {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        stderr,
     })
 }
 
@@ -155,9 +174,15 @@ pub struct Status {
 /// The repository `dir` is in: its top level, or `None` outside one.
 pub fn toplevel(dir: &Path) -> Result<Option<PathBuf>, Error> {
     let out = run(dir, &["rev-parse", "--show-toplevel"], None)?;
-    Ok(out
-        .ok()
-        .then(|| PathBuf::from(out.stdout.trim().replace('/', std::path::MAIN_SEPARATOR_STR))))
+    if !out.ok() {
+        return Ok(None);
+    }
+    let top = out.stdout.trim();
+    // Inside WSL git names a Linux folder.
+    if let Some((distro, _)) = wsl::split(dir).filter(|_| cfg!(windows)) {
+        return Ok(wsl::to_windows(Some(&distro), top));
+    }
+    Ok(Some(PathBuf::from(top.replace('/', std::path::MAIN_SEPARATOR_STR))))
 }
 
 pub fn status(top: &Path) -> Result<Status, Error> {
