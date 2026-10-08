@@ -1,3 +1,3 @@
 # File icons
 
-`seti.ttf` and `seti.json`: VS Code's default "Seti" file icon theme (MIT), from microsoft/vscode `extensions/theme-seti`, itself from jesseweed/seti-ui, as den ships it. `seti.ttf` is den's `seti.woff` unpacked to TrueType.
+`seti.ttf` and `seti.json`: VS Code's default "Seti" file icon theme (MIT), from microsoft/vscode `extensions/theme-seti`, itself from jesseweed/seti-ui, as den ships it. `seti.ttf` is den's `seti.woff` unpacked to TrueType, with an empty `m` and space glyph added (GPUI on macOS loads no font without an `m`).

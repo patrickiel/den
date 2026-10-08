@@ -234,6 +234,64 @@ fn on_window_actions(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
 }
 
+/// The workspace's actions when nothing in the window has the focus (the
+/// focused tab closed, a dialog gone). An action goes along the path from
+/// the focused element to the root, and the workspace's handlers hang below
+/// the root: with no focus they are out of reach, and macOS shows the menu
+/// bar's items disabled. These run only once nothing in the window took the
+/// action, and hand it to a handle under the handlers.
+fn on_unfocused_actions(cx: &mut App) {
+    fn forward<A: Action>(cx: &mut App) {
+        cx.on_action(|action: &A, cx: &mut App| {
+            let Some(window) = cx.active_window() else { return };
+            let action = action.boxed_clone();
+            // This runs inside the window's update: reach it afterwards.
+            cx.defer(move |cx| {
+                _ = window.update(cx, |_, window, cx| {
+                    if let Some(focus) = workspace::action_target(window, cx)
+                        && window.is_action_available_in(&*action, &focus)
+                    {
+                        focus.dispatch_action(&*action, window, cx);
+                    }
+                });
+            });
+        });
+    }
+    let forwarded: &[fn(&mut App)] = &[
+        forward::<SaveFile>,
+        forward::<FormatDocument>,
+        forward::<OpenSettings>,
+        forward::<FocusExplorer>,
+        forward::<FocusExtensions>,
+        forward::<FocusSearch>,
+        forward::<FocusScm>,
+        forward::<SplitRight>,
+        forward::<SplitDown>,
+        forward::<NewTerminal>,
+        forward::<NewBrowser>,
+        forward::<ReplaceInFiles>,
+        forward::<CloseTab>,
+        forward::<CloseGroup>,
+        forward::<NextTab>,
+        forward::<PrevTab>,
+        forward::<OpenFolder>,
+        forward::<OpenFiles>,
+        forward::<FocusLeft>,
+        forward::<FocusRight>,
+        forward::<FocusUp>,
+        forward::<FocusDown>,
+        forward::<OpenFolderInNewWindow>,
+        forward::<SaveLayout>,
+        forward::<ResetLayout>,
+        forward::<CheckForUpdates>,
+        forward::<NewAgent>,
+        forward::<extensions::RunCommand>,
+    ];
+    for register in forwarded {
+        register(cx);
+    }
+}
+
 /// Started from the Finder or the Dock, a Mac app gets the system's bare
 /// PATH: no Homebrew, no `~/.cargo/bin`, so no `claude`, `pnpm` or `rustfmt`
 /// for Source Control, Format Document and the presets. Take the login
@@ -350,6 +408,7 @@ fn main() {
                 KeyBinding::new(if ui::COMMAND_KEY { "cmd-q" } else { "alt-f4" }, Quit, None),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            on_unfocused_actions(cx);
             if ui::COMMAND_KEY {
                 cx.bind_keys([
                     KeyBinding::new("cmd-m", Minimize, None),

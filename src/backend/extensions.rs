@@ -536,7 +536,11 @@ pub fn install(manifest: &Manifest, cancel: &Cancel, progress: Progress) -> Resu
     let _ = std::fs::remove_file(&archive);
     let _ = std::fs::remove_file(http::part_path(&archive));
     let sha256 = manifest.asset_sha256();
-    http::download(&release_url(&manifest.repository, &manifest.asset()), &archive, sha256, "Downloading", cancel, progress)?;
+    // The release has a zip per platform it was built for; none for this
+    // one is the usual reason a download fails.
+    http::download(&release_url(&manifest.repository, &manifest.asset()), &archive, sha256, "Downloading", cancel, progress).map_err(|err| {
+        if err.contains("status code 404") { format!("{} has no build for {} in its latest release.", manifest.name, den_extension::PLATFORM) } else { err }
+    })?;
     let pending = dir.join(format!("{}{PENDING}", manifest.id));
     let unpacked = process::unpack(&archive, &pending, "the extension").and_then(|()| check_unpacked(manifest, &pending));
     let _ = std::fs::remove_file(&archive);

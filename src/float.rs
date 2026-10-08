@@ -52,6 +52,11 @@ impl FloatWindow {
             _subscriptions,
         }
     }
+
+    /// The focus handle of this window's active tab.
+    pub fn focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.workspace.upgrade()?.read(cx).window_focus(Some(self.id), cx)
+    }
 }
 
 impl Render for FloatWindow {

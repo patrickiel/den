@@ -285,6 +285,9 @@ fn layout_preset_row(ix: usize, this: WeakEntity<Workspace>, menu: WeakEntity<Po
 
 pub struct Workspace {
     pub(crate) root: PathBuf,
+    /// Under the workspace's action handlers, for actions with no tab to
+    /// take them (see `action_target`).
+    focus_handle: FocusHandle,
     pub(crate) tree: Tree,
     pub(crate) panes: HashMap<PaneId, PaneRef>,
     pane_subscriptions: HashMap<PaneId, Subscription>,
@@ -422,6 +425,7 @@ impl Workspace {
             attention: Default::default(),
             window: window.window_handle(),
             float_windows: HashMap::new(),
+            focus_handle: cx.focus_handle(),
             last_active: HashMap::new(),
             dragging: None,
             zones: Zones::default(),
@@ -466,7 +470,19 @@ impl Workspace {
         if let Err(err) = loaded {
             eprintln!("den: the saved layout could not be read, starting fresh: {err}");
         }
+        // The active tab takes the keyboard from the start: the keys and the
+        // menu bar reach the workspace through the focused element (nothing
+        // focused, macOS shows the menu bar's items disabled).
+        let focus = this.action_target(cx);
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
         this
+    }
+
+    /// Where the main window's actions go when nothing in it has the focus:
+    /// the active tab, or with no tab the workspace's own handle, both under
+    /// its handlers.
+    pub(crate) fn action_target(&self, cx: &App) -> FocusHandle {
+        self.window_focus(None, cx).unwrap_or_else(|| self.focus_handle.clone())
     }
 
     // -- State ---------------------------------------------------------------
@@ -1796,7 +1812,7 @@ impl Workspace {
 
     // -- Render --------------------------------------------------------------
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = AppState::get(cx).sidebar.clone();
         let root_node = self.tree.root.id();
         let root_is_split = !self.tree.root.is_group();
@@ -1827,6 +1843,9 @@ impl Workspace {
         let border = cx.theme().border;
         let separator = move || div().w(px(1.)).h(px(16.)).mx_1p5().bg(border);
         TitleBar::new()
+            // The title bar keeps room for the traffic lights on macOS; in
+            // full screen they are gone with the menu bar.
+            .when(crate::ui::COMMAND_KEY && window.is_fullscreen(), |this| this.pl_0())
             .child(
                 h_flex()
                     .flex_1()
@@ -2265,6 +2284,8 @@ impl Render for Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Without size, so no click lands on it: a focus target only.
+            .child(div().track_focus(&self.focus_handle))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.prompt_open_folder(false, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFolderInNewWindow, window, cx| this.prompt_open_folder(true, window, cx)))
             .on_action(cx.listener(|this, _: &SaveLayout, window, cx| this.prompt_save_preset(window, cx)))
@@ -2286,9 +2307,20 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, action: &crate::extensions::RunCommand, _, cx| {
                 crate::extensions::run_command(&action.extension, &action.command, &this.root, cx)
             }))
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(div().flex_1().min_h_0().child(body))
             .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
+    }
+}
+
+/// Where `window`'s actions go when nothing in it has the focus: a handle
+/// under the workspace's action handlers, in the main window or a floating
+/// one (see `Workspace::action_target`).
+pub(crate) fn action_target(window: &Window, cx: &App) -> Option<FocusHandle> {
+    let view = window.root::<gpui_kit::base::Root>().flatten()?.read(cx).view().clone();
+    match view.downcast::<Workspace>() {
+        Ok(workspace) => Some(workspace.read(cx).action_target(cx)),
+        Err(view) => view.downcast::<crate::float::FloatWindow>().ok()?.read(cx).focus(cx),
     }
 }
 

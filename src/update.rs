@@ -128,11 +128,12 @@ fn download(release: &Release) -> Result<PathBuf, String> {
 /// the installer, silently (it waits for the exe, installs over it and
 /// starts den again); on macOS a shell that waits for this process to end
 /// and opens the bundle, swapped for the new one here. Nothing is lost if
-/// the start fails: on macOS the swap is undone.
-fn stage(download: &std::path::Path) -> Result<(), String> {
+/// the start fails: on macOS the swap is undone. `Some` names the folder the
+/// new version went to when that is not where this one runs from.
+fn stage(download: &std::path::Path) -> Result<Option<PathBuf>, String> {
     #[cfg(windows)]
     {
-        Command::new(download).args(["/S", "/UPDATE"]).spawn().map(|_| ()).map_err(|e| format!("Cannot start the installer: {e}"))
+        Command::new(download).args(["/S", "/UPDATE"]).spawn().map(|_| None).map_err(|e| format!("Cannot start the installer: {e}"))
     }
     #[cfg(not(windows))]
     {
@@ -145,7 +146,28 @@ fn stage(download: &std::path::Path) -> Result<(), String> {
             .ok_or("den is not running from an app bundle (a cargo build?); update it by hand.")?
             .to_path_buf();
         let parent = bundle.parent().ok_or("bad bundle path")?;
-        // Next to the bundle, so the swap is two renames on one volume.
+        // The new bundle goes over this one, from a staging folder next to
+        // it (two renames on one volume). Opened from the disk image, or from
+        // the read-only copy macOS runs a downloaded app from until the
+        // Finder has moved it (App Translocation), nothing can be written
+        // there: then it goes to the Applications folder, where a Mac app
+        // belongs, and den starts from there.
+        let (bundle, moved) = if writable(parent) {
+            (bundle, false)
+        } else {
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let apps = [PathBuf::from("/Applications"), home.join("Applications")]
+                .into_iter()
+                .find(|dir| std::fs::create_dir_all(dir).is_ok() && writable(dir))
+                .ok_or_else(|| {
+                    format!(
+                        "den is running from a read-only place ({}) and the Applications folder cannot be written to. Drag den.app into it with the Finder, open it from there and update again.",
+                        parent.display()
+                    )
+                })?;
+            (apps.join("den.app"), true)
+        };
+        let parent = bundle.parent().ok_or("bad bundle path")?;
         let staging = parent.join(".den-update");
         crate::backend::process::unpack(download, &staging, "the update")
             .map_err(|err| format!("{err} (is {} writable?)", parent.display()))?;
@@ -156,10 +178,20 @@ fn stage(download: &std::path::Path) -> Result<(), String> {
         }
         let old = parent.join(".den.app.old");
         let _ = std::fs::remove_dir_all(&old);
-        std::fs::rename(&bundle, &old).map_err(|e| format!("Cannot replace {}: {e}", bundle.display()))?;
+        // In the Applications folder there may be no den yet.
+        let replaced = bundle.exists();
+        if replaced {
+            std::fs::rename(&bundle, &old).map_err(|e| format!("Cannot replace {}: {e}", bundle.display()))?;
+        }
+        let undo = |staging: &std::path::Path| {
+            let _ = std::fs::rename(&bundle, &new);
+            if replaced {
+                let _ = std::fs::rename(&old, &bundle);
+            }
+            let _ = std::fs::remove_dir_all(staging);
+        };
         if let Err(err) = std::fs::rename(&new, &bundle) {
-            let _ = std::fs::rename(&old, &bundle);
-            let _ = std::fs::remove_dir_all(&staging);
+            undo(&staging);
             return Err(format!("Cannot install the update: {err}"));
         }
         // The old bundle and the staging folder go once the new one is open.
@@ -174,12 +206,24 @@ fn stage(download: &std::path::Path) -> Result<(), String> {
             .stderr(std::process::Stdio::null())
             .spawn();
         if let Err(err) = started {
-            let _ = std::fs::rename(&bundle, &new);
-            let _ = std::fs::rename(&old, &bundle);
-            let _ = std::fs::remove_dir_all(&staging);
+            undo(&staging);
             return Err(format!("Cannot start the restart helper: {err}"));
         }
-        Ok(())
+        Ok(moved.then(|| parent.to_path_buf()))
+    }
+}
+
+/// Whether a folder can be written to (the staging folder's name, so a
+/// leftover from an earlier update counts as yes).
+#[cfg(not(windows))]
+fn writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".den-update");
+    match std::fs::create_dir(&probe) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir(&probe);
+            true
+        }
+        Err(err) => err.kind() == std::io::ErrorKind::AlreadyExists,
     }
 }
 
@@ -222,11 +266,24 @@ fn offer(release: Release, window: &mut Window, cx: &mut App) {
 fn install(release: Release, window: &mut Window, cx: &mut App) {
     crate::toast::push(window, format!("Downloading den {}…", release.version), cx);
     let handle = window.window_handle();
+    let version = release.version.clone();
     cx.spawn(async move |cx| {
         let result = cx.background_spawn(async move { download(&release).and_then(|file| stage(&file)) }).await;
         _ = handle.update(cx, |_, window, cx| match result {
             // Quitting saves every session; the restart waits for this process.
-            Ok(()) => cx.quit(),
+            Ok(None) => cx.quit(),
+            Ok(Some(dir)) => {
+                let text = format!(
+                    "den was running from a read-only place (the disk image, or macOS's copy of a downloaded app), so den {version} went to {}. It opens from there now; this copy can go.",
+                    dir.display()
+                );
+                window.open_alert_dialog(cx, move |dialog, _, _| {
+                    dialog.title("Installed to Applications").description(text.clone()).ok_text("Quit and Open").show_cancel(false).on_ok(|_, _, cx| {
+                        cx.quit();
+                        true
+                    })
+                });
+            }
             Err(err) => crate::toast::push(window, err, cx),
         });
     })

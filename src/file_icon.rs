@@ -2,7 +2,10 @@
 //! (MIT, from microsoft/vscode extensions/theme-seti). `seti.ttf` is the icon
 //! font (den's seti.woff unpacked; GPUI loads TrueType) and `seti.json` maps
 //! file names, extensions and language ids to a glyph and a colour, with
-//! lighter-theme colours of its own.
+//! lighter-theme colours of its own. The font has an empty `m` (and space)
+//! added: GPUI on macOS measures text with `m` and will not load a font
+//! without one, falling back to the system font, which has no glyph for the
+//! icons' private-use characters (boxes with question marks).
 
 use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
 
