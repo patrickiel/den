@@ -72,6 +72,16 @@ actions!(
         FocusRight,
         FocusUp,
         FocusDown,
+        OpenFolderInNewWindow,
+        SaveLayout,
+        ResetLayout,
+        CheckForUpdates,
+        NewAgent,
+        Minimize,
+        Zoom,
+        HideApp,
+        HideOthers,
+        ShowAll,
         Quit,
     ]
 );
@@ -117,26 +127,57 @@ fn start_folder() -> PathBuf {
     cwd.unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The menu bar on macOS: the app needs one for Cmd+Q and for the standard
-/// look; the keys come from the bindings above.
+/// The menu bar on macOS, which stands for the title bar's menu button
+/// there: everything that menu has, and what every Mac app's has. The keys
+/// shown come from the bindings above.
 fn set_menus(cx: &mut App) {
+    use gpui_kit::component::input;
     let menu = |name: &str, items: Vec<MenuItem>| Menu { name: name.to_string().into(), items, disabled: false };
-    cx.set_menus(vec![
-        menu("den", vec![MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit den", Quit)]),
+    let mut menus = vec![
+        menu(
+            "den",
+            vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Hide den", HideApp),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
+                MenuItem::action("Quit den", Quit),
+            ],
+        ),
         menu(
             "File",
             vec![
                 MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::action("Open Folder in New Window…", OpenFolderInNewWindow),
                 MenuItem::action("Open Files…", OpenFiles),
                 MenuItem::separator(),
-                MenuItem::action("New Terminal", NewTerminal),
-                MenuItem::action("New Browser", NewBrowser),
-                MenuItem::separator(),
                 MenuItem::action("Save", SaveFile),
-                MenuItem::action("Format Document", FormatDocument),
                 MenuItem::separator(),
                 MenuItem::action("Close Tab", CloseTab),
                 MenuItem::action("Close Group", CloseGroup),
+            ],
+        ),
+        // The system's actions where a native view (a browser tab, a file
+        // dialog) has the focus; den's text fields and terminals otherwise.
+        menu(
+            "Edit",
+            vec![
+                MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Format Document", FormatDocument),
+                MenuItem::action("Find in Files", FocusSearch),
+                MenuItem::action("Replace in Files", ReplaceInFiles),
             ],
         ),
         menu(
@@ -149,12 +190,48 @@ fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
+                MenuItem::action("Save Layout…", SaveLayout),
+                MenuItem::action("Reset Layout", ResetLayout),
                 MenuItem::separator(),
                 MenuItem::action("Next Tab", NextTab),
                 MenuItem::action("Previous Tab", PrevTab),
             ],
         ),
-    ]);
+        menu(
+            "Terminal",
+            vec![
+                MenuItem::action("New Terminal", NewTerminal),
+                MenuItem::action("New Browser", NewBrowser),
+                MenuItem::action("Claude Code", NewAgent),
+            ],
+        ),
+    ];
+    // The commands of the extensions this start runs, each by its extension.
+    let commands = extensions::commands(cx);
+    if !commands.is_empty() {
+        let items = commands
+            .into_iter()
+            .map(|(extension, name, command)| MenuItem::action(format!("{name}: {}", command.title), extensions::RunCommand { extension, command: command.id }))
+            .collect();
+        menus.push(menu("Extensions", items));
+    }
+    // Named "Window", AppKit lists the open windows in it.
+    menus.push(menu("Window", vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)]));
+    cx.set_menus(menus);
+}
+
+/// The menu bar's actions on the window in front.
+fn on_window_actions(cx: &mut App) {
+    fn in_front(cx: &mut App, run: fn(&mut Window)) {
+        if let Some(window) = cx.active_window() {
+            _ = window.update(cx, |_, window, _| run(window));
+        }
+    }
+    cx.on_action(|_: &Minimize, cx: &mut App| in_front(cx, |window| window.minimize_window()));
+    cx.on_action(|_: &Zoom, cx: &mut App| in_front(cx, |window| window.zoom_window()));
+    cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+    cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
 }
 
 /// Started from the Finder or the Dock, a Mac app gets the system's bare
@@ -274,6 +351,12 @@ fn main() {
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
             if ui::COMMAND_KEY {
+                cx.bind_keys([
+                    KeyBinding::new("cmd-m", Minimize, None),
+                    KeyBinding::new("cmd-h", HideApp, None),
+                    KeyBinding::new("alt-cmd-h", HideOthers, None),
+                ]);
+                on_window_actions(cx);
                 set_menus(cx);
             }
 

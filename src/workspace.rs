@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use crate::pane::AlertKind;
 use gpui_kit::component::notification::{Notification, NotificationType};
 use crate::{
-    CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FormatDocument, NewBrowser, FocusLeft, FocusRight, FocusScm, FocusSearch, FocusUp, NewTerminal,
-    NextTab, OpenFiles, OpenFolder, OpenSettings, PrevTab, ReplaceInFiles, SplitDown, SplitRight,
+    CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FormatDocument, NewAgent, NewBrowser, FocusLeft, FocusRight, FocusScm, FocusSearch,
+    FocusUp, NewTerminal, NextTab, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab, ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight,
     defaults::{Defaults, GroupDefault, Kind},
     backend::watch,
     diff::DiffPanel,
@@ -1311,6 +1311,13 @@ impl Workspace {
         cx.notify();
     }
 
+    /// A terminal running the coding agent's preset (a plain shell without one).
+    fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let program = Settings::get(cx).presets.iter().find(|p| p.agent).map(|p| p.command.clone());
+        let agent = program.is_some();
+        self.open_terminal(None, program, agent, window, cx)
+    }
+
     /// A terminal running `program` (`None` for a plain shell), a coding
     /// agent's or not: in `group` when a group's button asked, else where
     /// its kind goes.
@@ -1800,7 +1807,7 @@ impl Workspace {
             Button::new(id)
                 .small()
                 .icon(Icon::new(icon))
-                .tooltip(tooltip)
+                .tooltip(crate::ui::key_label(tooltip))
                 // Highlighted, not filled: the primary colour is the change count's.
                 .ghost()
                 .selected(active)
@@ -1824,8 +1831,10 @@ impl Workspace {
                 h_flex()
                     .flex_1()
                     .gap_1()
-                    .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.app_menu(cx)))
-                    .child(separator())
+                    // On macOS these menus are in the menu bar (`set_menus`).
+                    .when(!crate::ui::COMMAND_KEY, |this| {
+                        this.child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.app_menu(cx))).child(separator())
+                    })
                     .child(
                         h_flex()
                             .gap_1()
@@ -1888,7 +1897,7 @@ impl Workspace {
                                 .small()
                                 .ghost()
                                 .icon(Icon::new(IconName::Settings))
-                                .tooltip("Settings (Ctrl+,)")
+                                .tooltip(crate::ui::key_label("Settings (Ctrl+,)"))
                                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(false, window, cx))),
                         ),
                 ),
@@ -2001,11 +2010,7 @@ impl Workspace {
                     .label("TERMINAL")
                     .item(item("New Terminal", "Ctrl+Shift+T", |this, window, cx| this.open_terminal(None, None, false, window, cx)))
                     .item(item("New Browser", "Ctrl+Shift+B", |this, window, cx| this.open_browser(None, None, window, cx)))
-                    .item(item("Claude Code", "", |this, window, cx| {
-                        let program = Settings::get(cx).presets.iter().find(|p| p.agent).map(|p| p.command.clone());
-                        let agent = program.is_some();
-                        this.open_terminal(None, program, agent, window, cx)
-                    }))
+                    .item(item("Claude Code", "", Self::open_agent))
                     // The running extensions' commands, each by its extension.
                     .when(!commands.is_empty(), |mut menu| {
                         menu = menu.separator().label("EXTENSIONS");
@@ -2038,7 +2043,7 @@ impl Workspace {
             .small()
             .label(name)
             .dropdown_caret(true)
-            .tooltip("Switch session (Ctrl+Shift+O opens a folder)")
+            .tooltip(crate::ui::key_label("Switch session (Ctrl+Shift+O opens a folder)"))
             .dropdown_menu(move |menu, _, cx| recent_menu(this.clone(), root.clone(), menu, cx))
     }
 
@@ -2093,6 +2098,7 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
             .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
+            .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
@@ -2260,6 +2266,10 @@ impl Render for Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.prompt_open_folder(false, window, cx)))
+            .on_action(cx.listener(|this, _: &OpenFolderInNewWindow, window, cx| this.prompt_open_folder(true, window, cx)))
+            .on_action(cx.listener(|this, _: &SaveLayout, window, cx| this.prompt_save_preset(window, cx)))
+            .on_action(cx.listener(|this, _: &ResetLayout, _, cx| this.reset_layout(cx)))
+            .on_action(cx.listener(|_, _: &CheckForUpdates, window, cx| crate::update::check_in_window(true, window, cx)))
             .on_action(cx.listener(|this, _: &FocusExplorer, window, cx| this.focus_view(SidebarView::Explorer, window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_view(SidebarView::Search, window, cx)))
             .on_action(cx.listener(|this, _: &ReplaceInFiles, window, cx| {

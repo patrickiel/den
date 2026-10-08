@@ -982,6 +982,11 @@ impl Render for TerminalPanel {
                 this.copy(cx);
             }))
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
+            // The menu bar's Edit > Copy and Paste (macOS).
+            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                this.copy(cx);
+            }))
+            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
                 this.term.scroll_display(Scroll::PageUp);
                 cx.notify();

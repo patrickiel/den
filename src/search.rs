@@ -371,7 +371,7 @@ impl SearchView {
         Button::new(id)
             .xsmall()
             .icon(Icon::new(icon))
-            .tooltip(tooltip)
+            .tooltip(crate::ui::key_label(tooltip))
             .map(|button| if on { button.primary() } else { button.ghost() })
             .on_click(cx.listener(move |this, _, _, cx| {
                 flip(this);
