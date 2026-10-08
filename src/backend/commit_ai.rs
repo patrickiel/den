@@ -29,6 +29,9 @@ const MAX_UNTRACKED_PREVIEWS: usize = 150;
 const STAT_LINES: usize = 150;
 const HUGE_FILE_LINES: usize = 2000;
 pub const STYLE_FILE: &str = ".den/commit-style.md";
+/// The status while the model reads the prompt and writes, until its first
+/// words arrive: the view animates it rather than showing it as is.
+pub const WRITING: &str = "Writing…";
 const DIFF_SLOT: &str = "{{diff}}";
 
 const MAP_SYSTEM: &str = "You summarize one part of a code change. Reply with 2 to 6 terse bullet points (\"- ...\") saying what changed and, if evident, why. Name concrete features, functions or files. No introduction, no conclusion.";
@@ -601,7 +604,7 @@ fn attempt(
             changes.entries.len()
         )
     };
-    status("Writing…".into());
+    status(WRITING.into());
     let mut raw = String::new();
     let result = ai::chat(config, body(final_messages(style, &user), OUTPUT_TOKENS, 0.2), cancel, |piece| {
         raw.push_str(piece);

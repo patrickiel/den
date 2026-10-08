@@ -40,6 +40,17 @@ impl Default for GroupButtons {
     }
 }
 
+/// How a diff lays its sides out, as VS Code's Diff View menu: inline,
+/// side by side, or side by side until the view is too narrow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiffLayout {
+    #[default]
+    Automatic,
+    Inline,
+    SideBySide,
+}
+
 /// Commit with nothing staged: ask whether to stage everything and commit
 /// it, always do, or never (commit nothing), as VS Code and den do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +122,7 @@ pub struct Settings {
     pub tab_close_button: bool,
     /// Ctrl+S formats the file first (Format Document's formatter).
     pub format_on_save: bool,
+    pub diff_layout: DiffLayout,
     pub smart_commit: SmartCommit,
     pub group_buttons: GroupButtons,
     /// den's tab-strip buttons were taken over once.
@@ -191,6 +203,7 @@ impl Default for Settings {
             scrollback: 10_000,
             tab_close_button: true,
             format_on_save: false,
+            diff_layout: DiffLayout::Automatic,
             smart_commit: SmartCommit::Ask,
             group_buttons: GroupButtons::default(),
             imported_den_buttons: false,

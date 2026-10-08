@@ -1,5 +1,5 @@
 //! Diff tabs, as in den: a change clicked in Source Control opens read-only,
-//! side by side. `name (Working Tree)` compares the file on disk with the
+//! side by side (one column, inline, when the view is narrow). `name (Working Tree)` compares the file on disk with the
 //! index, `name (Index)` the index with HEAD. The header's button (or
 //! Ctrl+Enter) opens the file itself.
 
@@ -17,6 +17,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     highlighter::{HighlightTheme, SyntaxHighlighter},
+    menu::{DropdownMenu as _, PopupMenuItem},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -26,13 +27,17 @@ use similar::{ChangeTag, TextDiff};
 use crate::{
     backend::git,
     pane::{Pane, PaneEvent},
-    settings::Settings,
+    settings::{DiffLayout, Settings},
 };
 
 pub const DIFF: &str = "Diff";
 
 /// The line numbers' column on each side.
 const GUTTER: Pixels = px(48.);
+
+/// Narrower than this, the two sides become one column, as VS Code's
+/// `diffEditor.renderSideBySideInlineBreakpoint`.
+const INLINE_BELOW: Pixels = px(900.);
 
 actions!(diff, [OpenDiffedFile]);
 
@@ -149,6 +154,28 @@ fn highlight_lines(text: &str, language: &str, theme: &HighlightTheme) -> Vec<Li
         .collect()
 }
 
+/// The inline view's lines, as (row, side): each run of changed rows reads
+/// as its removed lines (side 0) then its added ones (side 1); an unchanged
+/// row is one line, read from the new side.
+pub fn inline_lines(rows: &[Row]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut ix = 0;
+    while ix < rows.len() {
+        if rows[ix].left_kind == Side::Same {
+            out.push((ix, 1));
+            ix += 1;
+            continue;
+        }
+        let start = ix;
+        while ix < rows.len() && rows[ix].left_kind != Side::Same {
+            ix += 1;
+        }
+        out.extend((start..ix).filter(|&row| rows[row].left.is_some()).map(|row| (row, 0)));
+        out.extend((start..ix).filter(|&row| rows[row].right.is_some()).map(|row| (row, 1)));
+    }
+    out
+}
+
 /// Both sides' text: a commit's parent and the commit, HEAD and the index
 /// (staged), or the index and the file. A side with no such file is empty
 /// (added, deleted); one git cannot read is the error shown instead.
@@ -191,6 +218,8 @@ pub struct DiffPanel {
     /// A commit's change instead: the commit, its parent, the path before.
     commit: Option<CommitRevs>,
     rows: Vec<Row>,
+    /// The rows as one column, for the inline view.
+    inline: Vec<(usize, usize)>,
     /// Each side's syntax colours, by line number - 1.
     styles: [Vec<LineStyles>; 2],
     error: Option<SharedString>,
@@ -201,6 +230,8 @@ pub struct DiffPanel {
     /// How far each side (left, right) is scrolled sideways, as in VS Code
     /// where the two editors scroll across on their own.
     h_scroll: [Pixels; 2],
+    /// The Diff View setting, as of the last render.
+    layout: DiffLayout,
     /// Each side's longest line, in characters.
     widest: [usize; 2],
     /// A character's width in the editor font; set as the view renders.
@@ -234,6 +265,7 @@ impl DiffPanel {
             staged,
             commit,
             rows: Vec::new(),
+            inline: Vec::new(),
             styles: Default::default(),
             error: None,
             focus_handle: cx.focus_handle(),
@@ -241,6 +273,7 @@ impl DiffPanel {
             ruler_grab: None,
             h_scroll: [px(0.); 2],
             widest: [0; 2],
+            layout: DiffLayout::Automatic,
             char_width: px(8.),
             list_bounds: Default::default(),
             h_grab: None,
@@ -294,6 +327,7 @@ impl DiffPanel {
                 match loaded {
                     Ok((rows, styles, widest)) => {
                         this.error = None;
+                        this.inline = inline_lines(&rows);
                         this.rows = rows;
                         this.styles = styles;
                         this.widest = widest;
@@ -301,6 +335,7 @@ impl DiffPanel {
                     Err(err) => {
                         this.error = Some(err.into());
                         this.rows = Vec::new();
+                        this.inline = Vec::new();
                         this.styles = Default::default();
                         this.widest = [0; 2];
                     }
@@ -310,17 +345,42 @@ impl DiffPanel {
         }));
     }
 
+    /// Whether the view is too narrow for two sides.
+    fn is_narrow(&self) -> bool {
+        let width = self.list_bounds.get().size.width;
+        width > px(0.) && width < INLINE_BELOW
+    }
+
+    /// Whether the sides show as one column, the removed lines above the
+    /// added ones: as set, or (automatic) when the view is narrow.
+    fn is_inline(&self) -> bool {
+        match self.layout {
+            DiffLayout::Inline => true,
+            DiffLayout::SideBySide => false,
+            DiffLayout::Automatic => self.is_narrow(),
+        }
+    }
+
+    /// How many sides scroll across on their own: one inline.
+    fn sides(&self) -> usize {
+        if self.is_inline() { 1 } else { 2 }
+    }
+
     /// How far `side` can scroll across: its longest line past the room
     /// beside the line numbers.
     fn max_h_scroll(&self, side: usize) -> Pixels {
         let room = self.h_track(side).1;
-        (self.char_width * (self.widest[side] + 2) as f32 - room).max(px(0.))
+        let widest = if self.is_inline() { self.widest[0].max(self.widest[1]) } else { self.widest[side] };
+        (self.char_width * (widest + 2) as f32 - room).max(px(0.))
     }
 
     /// A side's scrollbar track, under its text (not its line numbers): its
     /// left edge and width.
     fn h_track(&self, side: usize) -> (Pixels, Pixels) {
         let bounds = self.list_bounds.get();
+        if self.is_inline() {
+            return (bounds.left() + GUTTER * 2., (bounds.size.width - GUTTER * 2.).max(px(0.)));
+        }
         let half = (bounds.size.width - px(1.)) / 2.;
         (bounds.left() + (half + px(1.)) * side as f32 + GUTTER, (half - GUTTER).max(px(0.)))
     }
@@ -356,7 +416,7 @@ impl DiffPanel {
         let theme = cx.theme();
         let (thumb_color, active_color) = (theme.foreground.opacity(0.2), theme.foreground.opacity(0.35));
         let origin = self.list_bounds.get().left();
-        div().children((0..2).filter(|&side| self.max_h_scroll(side) > px(0.)).map(|side| {
+        div().children((0..self.sides()).filter(|&side| self.max_h_scroll(side) > px(0.)).map(|side| {
             let (left, room) = self.h_track(side);
             let (thumb_left, thumb_width) = self.h_thumb(side);
             let held = matches!(self.h_grab, Some((s, _)) if s == side);
@@ -405,18 +465,37 @@ impl DiffPanel {
         let line_height = px(Settings::get(cx).editor_font_size * 1.4);
         let h_scroll = self.h_scroll;
         let styles = &self.styles;
-        let half = |line: &Option<(usize, String)>, kind: Side, side: usize| {
-            let bg = match kind {
-                Side::Removed => theme.red.opacity(0.18),
-                Side::Added => theme.green.opacity(0.18),
-                Side::Gap => theme.muted.opacity(0.3),
-                Side::Same => transparent_black(),
-            };
-            h_flex()
+        let background = |kind: Side| match kind {
+            Side::Removed => theme.red.opacity(0.18),
+            Side::Added => theme.green.opacity(0.18),
+            Side::Gap => theme.muted.opacity(0.3),
+            Side::Same => transparent_black(),
+        };
+        let number = |line: Option<&(usize, String)>| {
+            div()
+                .w(GUTTER)
+                .flex_none()
+                .pr_2()
+                .text_right()
+                .text_color(theme.muted_foreground)
+                .child(line.map(|(n, _)| n.to_string()).unwrap_or_default())
+        };
+        // A line's text, coloured as the `colours` side's, scrolled across
+        // as the `scroll` side.
+        let text = |line: Option<&(usize, String)>, colours: usize, scroll: usize| {
+            div()
                 .flex_1()
                 .min_w_0()
+                .overflow_hidden()
+                .child(div().ml(-h_scroll[scroll]).when_some(line, |el, (n, text)| {
+                    let highlights = styles[colours].get(n - 1).cloned().unwrap_or_default();
+                    el.child(StyledText::new(text.clone()).with_highlights(highlights))
+                }))
+        };
+        let strip = |kind: Side, side: usize| {
+            h_flex()
                 .h_full()
-                .bg(bg)
+                .bg(background(kind))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 // Sideways (Shift+wheel, a touchpad) moves only this side.
@@ -427,25 +506,32 @@ impl DiffPanel {
                         cx.stop_propagation();
                     }
                 }))
-                .child(
-                    div()
-                        .w(GUTTER)
-                        .flex_none()
-                        .pr_2()
-                        .text_right()
-                        .text_color(theme.muted_foreground)
-                        .child(line.as_ref().map(|(n, _)| n.to_string()).unwrap_or_default()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(div().ml(-h_scroll[side]).when_some(line.as_ref(), |el, (n, text)| {
-                            let highlights = styles[side].get(n - 1).cloned().unwrap_or_default();
-                            el.child(StyledText::new(text.clone()).with_highlights(highlights))
-                        })),
-                )
+        };
+        if self.is_inline() {
+            return range
+                .filter_map(|ix| {
+                    let &(row, side) = self.inline.get(ix)?;
+                    let row = self.rows.get(row)?;
+                    let (kind, line) = if side == 0 { (row.left_kind, &row.left) } else { (row.right_kind, &row.right) };
+                    let (old, new) = match kind {
+                        Side::Same => (row.left.as_ref(), row.right.as_ref()),
+                        Side::Removed => (line.as_ref(), None),
+                        _ => (None, line.as_ref()),
+                    };
+                    Some(
+                        strip(kind, 0)
+                            .h(line_height)
+                            .w_full()
+                            .child(number(old))
+                            .child(number(new))
+                            .child(text(line.as_ref(), side, 0))
+                            .into_any_element(),
+                    )
+                })
+                .collect();
+        }
+        let half = |line: &Option<(usize, String)>, kind: Side, side: usize| {
+            strip(kind, side).flex_1().min_w_0().child(number(line.as_ref())).child(text(line.as_ref(), side, side))
         };
         range
             .filter_map(|ix| {
@@ -518,13 +604,16 @@ impl Render for DiffPanel {
             None => ("Index".into(), "Working Tree".into()),
         };
         let font_size = px(Settings::get(cx).editor_font_size);
+        self.layout = Settings::get(cx).diff_layout;
+        let automatic = format!("Automatic (Currently {})", if self.is_narrow() { "Inline" } else { "Side by Side" });
         let text = window.text_system();
         let font_id = text.resolve_font(&font(theme.mono_font_family.clone()));
         self.char_width = text.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
         // The longest lines or the view may have changed since last scrolled.
-        for side in 0..2 {
+        for side in 0..self.sides() {
             self.h_scroll[side] = self.h_scroll[side].min(self.max_h_scroll(side));
         }
+        let count = if self.is_inline() { self.inline.len() } else { self.rows.len() };
         let list_bounds = self.list_bounds.clone();
         let this = cx.weak_entity();
         let path = self.path.clone();
@@ -551,6 +640,27 @@ impl Render for DiffPanel {
                     .border_color(theme.border)
                     .text_color(theme.muted_foreground)
                     .child(div().flex_1().child(format!("{} — {left} ↔ {right}", self.rel)))
+                    .child(
+                        Button::new("diff-more")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Ellipsis))
+                            .tooltip("More Actions")
+                            .dropdown_menu(move |menu, window, cx| {
+                                let automatic = automatic.clone();
+                                menu.submenu("Diff View", window, cx, move |menu, _, cx| {
+                                    let current = Settings::get(cx).diff_layout;
+                                    let item = |label: SharedString, layout: DiffLayout| {
+                                        PopupMenuItem::new(label)
+                                            .checked(current == layout)
+                                            .on_click(move |_, _, cx| Settings::update(cx, |s| s.diff_layout = layout))
+                                    };
+                                    menu.item(item("Inline".into(), DiffLayout::Inline))
+                                        .item(item("Side by Side".into(), DiffLayout::SideBySide))
+                                        .item(item(automatic.clone().into(), DiffLayout::Automatic))
+                                })
+                            }),
+                    )
                     .child(
                         Button::new("open-file")
                             .ghost()
@@ -585,7 +695,7 @@ impl Render for DiffPanel {
                             .text_size(font_size)
                             .child(
                                 {
-                                    let mut list = uniform_list("diff-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
+                                    let mut list = uniform_list("diff-rows", count, cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
                                         .track_scroll(&self.scroll)
                                         .size_full();
                                     // Sideways is each side's own, not the list's
@@ -596,7 +706,16 @@ impl Render for DiffPanel {
                             )
                             .child(
                                 canvas(
-                                    move |area, _, _| list_bounds.set(area),
+                                    {
+                                        let this = this.clone();
+                                        move |area, _, cx| {
+                                            // Across the breakpoint, lay the rows out again.
+                                            let narrow = |width: Pixels| width > px(0.) && width < INLINE_BELOW;
+                                            if narrow(list_bounds.replace(area).size.width) != narrow(area.size.width) {
+                                                _ = this.update(cx, |_, cx| cx.notify());
+                                            }
+                                        }
+                                    },
                                     // A drag goes on outside the bar: the
                                     // window keeps the mouse while it's down.
                                     move |_, _, window, _| {
@@ -655,17 +774,25 @@ impl DiffPanel {
     fn render_ruler(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (red, green, view_color) = (theme.red, theme.green, theme.foreground.opacity(0.12));
-        let total = self.rows.len().max(1);
-        let marks: Vec<(usize, bool, bool)> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, row)| {
-                let removed = row.left_kind == Side::Removed;
-                let added = row.right_kind == Side::Added;
-                (removed || added).then_some((ix, removed, added))
-            })
-            .collect();
+        let marks: Vec<(usize, bool, bool)> = if self.is_inline() {
+            self.inline
+                .iter()
+                .enumerate()
+                .filter(|(_, (row, _))| self.rows[*row].left_kind != Side::Same)
+                .map(|(ix, &(_, side))| (ix, side == 0, side == 1))
+                .collect()
+        } else {
+            self.rows
+                .iter()
+                .enumerate()
+                .filter_map(|(ix, row)| {
+                    let removed = row.left_kind == Side::Removed;
+                    let added = row.right_kind == Side::Added;
+                    (removed || added).then_some((ix, removed, added))
+                })
+                .collect()
+        };
+        let total = if self.is_inline() { self.inline.len() } else { self.rows.len() }.max(1);
         let scroll = self.scroll.clone();
         let this = cx.weak_entity();
         let bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> = Default::default();
@@ -755,7 +882,14 @@ impl DiffPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{HighlightTheme, Side, highlight_lines, rows};
+    use super::{HighlightTheme, Side, highlight_lines, inline_lines, rows};
+
+    #[test]
+    fn inline_puts_removed_lines_above_added() {
+        let rows = rows("a\nb\nc\n", "a\nB\nB2\nc\n");
+        // a; b removed; B, B2 added; c.
+        assert_eq!(inline_lines(&rows), vec![(0, 1), (1, 0), (1, 1), (2, 1), (3, 1)]);
+    }
 
     #[test]
     fn replaced_lines_sit_side_by_side_with_gaps() {

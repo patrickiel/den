@@ -86,6 +86,85 @@ impl Group {
 
 const MESSAGE_PLACEHOLDER: &str = "Message (Ctrl+Enter to commit)";
 
+/// What the placeholder types while the model reads the changes.
+const QUIPS: &[&str] = &[
+    "Reading your diff…",
+    "Squinting at the whitespace changes…",
+    "Deciding between feat and fix…",
+    "Pretending to understand the regex…",
+    "Resisting the urge to write \"wip\"…",
+    "Asking the rubber duck…",
+    "Finding a verb in the imperative…",
+    "Blaming nobody in particular…",
+    "Counting the semicolons…",
+    "Polishing the summary line…",
+    "Not writing \"fix stuff\"…",
+    "Not writing \"misc changes\"…",
+    "Not writing \"asdf\"…",
+    "Avoiding \"final_final_v2\"…",
+    "Keeping it under 72 characters…",
+    "Choosing a scope…",
+    "Is it a refactor if it still works?",
+    "Wondering whether this was a chore…",
+    "Following the plus signs…",
+    "Mourning the minus signs…",
+    "Admiring your variable names…",
+    "Forgiving your variable names…",
+    "Reading the TODOs you left…",
+    "Tracing the call graph…",
+    "Following a lifetime or two…",
+    "Making peace with the borrow checker…",
+    "Unwrapping the unwraps…",
+    "Measuring the blast radius…",
+    "Reading between the hunks…",
+    "Spotting the actual change among the renames…",
+    "Ignoring the lockfile…",
+    "Skimming the generated code…",
+    "Looking for the bug you fixed…",
+    "Looking for the bug you added…",
+    "Guessing what you meant…",
+    "Finding a word for it…",
+    "Finding a better word for it…",
+    "Choosing an emoji… just kidding…",
+    "Writing for whoever runs git blame next…",
+    "Writing for future you…",
+    "Making it bisect-friendly…",
+    "Thinking in imperative mood…",
+    "Add. Fix. Remove. Rename. Hmm…",
+    "Turning a diff into a sentence…",
+    "Condensing it all into one line…",
+    "Leaving out \"and also\"…",
+    "Deciding if this deserves bullet points…",
+    "Sharpening the pencil…",
+    "Feeding paper into the typewriter…",
+    "Clacking keys…",
+    "Ding! New line…",
+    "Hunting for the right key…",
+    "Brewing coffee for the model…",
+    "Warming up the neurons…",
+    "Consulting the weights…",
+    "Thinking, slowly but surely…",
+    "Doing the math on the tokens…",
+    "Crunching your changes…",
+    "Reading every line, honestly…",
+    "Squinting at long lines…",
+    "Pondering your indentation…",
+    "Counting the files you touched…",
+    "Remembering what changed and why…",
+    "Asking why, then how…",
+    "Writing the why, not just the what…",
+    "Leaving the novel for the PR description…",
+    "Skipping \"various improvements\"…",
+    "Drafting… redrafting…",
+    "Crossing out the first draft…",
+    "Checking the spelling…",
+    "Removing a trailing period…",
+    "Making the reviewer smile…",
+    "Making it make sense…",
+    "Almost there, probably…",
+    "Committing to a commit message…",
+];
+
 pub struct ScmView {
     repo: Entity<Repo>,
     message: Entity<TextareaState>,
@@ -95,6 +174,8 @@ pub struct ScmView {
     /// Generate Commit Message while it runs: how to stop it. What it does
     /// shows as the message box's placeholder.
     generating: Option<crate::backend::http::Cancel>,
+    /// Types quips into the placeholder while the model thinks.
+    typewriter: Option<Task<()>>,
     /// Commits expanded to their files, with the files once loaded.
     expanded: HashMap<String, Option<(Option<String>, Vec<git::CommitFile>)>>,
     /// What a commit changed, for its hover card: `None` while it loads.
@@ -127,6 +208,7 @@ impl ScmView {
             commits_open: true,
             commits_height: COMMITS_HEIGHT,
             generating: None,
+            typewriter: None,
             expanded: Default::default(),
             stats: Default::default(),
             avatars: Default::default(),
@@ -705,6 +787,7 @@ impl ScmView {
         use crate::backend::ai;
         if let Some(cancel) = self.generating.take() {
             cancel.cancel();
+            self.typewriter = None;
             self.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
             return cx.notify();
         }
@@ -780,15 +863,22 @@ impl ScmView {
                     match update {
                         Update::Status(text) => {
                             if this.generating.is_some() {
-                                this.message.update(cx, |input, cx| input.set_placeholder(text, window, cx));
+                                this.typewriter = None;
+                                if text == commit_ai::WRITING {
+                                    this.typewriter = Some(this.type_quips(window, cx));
+                                } else {
+                                    this.message.update(cx, |input, cx| input.set_placeholder(text, window, cx));
+                                }
                             }
                         }
                         Update::Text(text) => {
                             if this.generating.is_some() {
+                                this.typewriter = None;
                                 this.message.update(cx, |input, cx| input.set_value(text, window, cx));
                             }
                         }
                         Update::Done(result) => {
+                            this.typewriter = None;
                             let stopped = this.generating.take().is_none();
                             this.message.update(cx, |input, cx| input.set_placeholder(MESSAGE_PLACEHOLDER, window, cx));
                             match result {
@@ -806,6 +896,49 @@ impl ScmView {
             }
         })
         .detach();
+    }
+
+    /// Type quips into the message box's placeholder one letter at a time,
+    /// erase them and type the next, until the task is dropped. Each run
+    /// shuffles them anew.
+    fn type_quips(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        use std::time::{Duration, SystemTime};
+        let message = self.message.clone();
+        let mut seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        let mut quips: Vec<&str> = QUIPS.to_vec();
+        for i in (1..quips.len()).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            quips.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+        cx.spawn_in(window, async move |_, cx| {
+            let executor = cx.background_executor().clone();
+            let show = |text: String, cx: &mut AsyncWindowContext| cx.update(|window, cx| message.update(cx, |input, cx| input.set_placeholder(text, window, cx))).is_ok();
+            for quip in quips.iter().cycle() {
+                let chars: Vec<char> = quip.chars().collect();
+                for n in 1..=chars.len() {
+                    if !show(chars[..n].iter().collect::<String>() + "_", cx) {
+                        return;
+                    }
+                    executor.timer(Duration::from_millis(45)).await;
+                }
+                for blink in 0..6 {
+                    let caret = if blink % 2 == 0 { "" } else { "_" };
+                    if !show(format!("{quip}{caret}"), cx) {
+                        return;
+                    }
+                    executor.timer(Duration::from_millis(350)).await;
+                }
+                for n in (0..chars.len()).rev() {
+                    if !show(chars[..n].iter().collect::<String>() + "_", cx) {
+                        return;
+                    }
+                    executor.timer(Duration::from_millis(15)).await;
+                }
+                executor.timer(Duration::from_millis(250)).await;
+            }
+        })
     }
 
     /// Expand a commit to its files (loaded in the background), or fold it.
