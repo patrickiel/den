@@ -18,12 +18,12 @@
 // builds in to check downloads. Global TAURI_SIGNING_* variables are ignored: they may belong to
 // another app. NSIS comes from Tauri's tool cache (%LOCALAPPDATA%\tauri\NSIS) or PATH.
 //
-// The Mac build joins the release afterwards. On a Mac with the same signing key, check the
-// release's tag out and run
+// The Mac build joins the release afterwards: .github/workflows/mac.yml runs when the release is
+// published and, on a Mac with the same signing key, so does
 //   node scripts/release.ts --attach
-// which builds den.app (scripts/bundle-macos.sh), packs it as den_<version>_aarch64.app.tar.gz,
-// signs it, uploads it to the release and adds its entry to latest.json. Until then a Mac den
-// reports the release as not yet built for it.
+// at the release's tag. Either builds den.app (scripts/bundle-macos.sh), packs it as
+// den_<version>_aarch64.app.tar.gz, signs it, uploads it to the release and adds its entry to
+// latest.json. Until then a Mac den reports the release as not yet built for it.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
