@@ -45,8 +45,8 @@ Settings and app state are kept in `%APPDATA%\den\`. Each project's layout is ke
 
 ### macOS (Apple Silicon)
 
-1. Download `den_<version>_aarch64.app.tar.gz` from the [latest release](https://github.com/patrickiel/den/releases/latest) and double-click it to unpack `den.app`.
-2. Move `den.app` to Applications. den is signed ad hoc, not notarized (there is no Apple Developer ID behind it), so the first start needs one extra step: right-click `den.app`, choose **Open** and confirm, or run `xattr -d com.apple.quarantine /Applications/den.app`. Updates den installs itself need neither.
+1. Download `den_<version>_aarch64.dmg` from the [latest release](https://github.com/patrickiel/den/releases/latest), open it and drag `den` onto the Applications folder.
+2. den is signed ad hoc, not notarized (there is no Apple Developer ID behind it), so the first start needs one extra step: right-click `den.app`, choose **Open** and confirm, or run `xattr -d com.apple.quarantine /Applications/den.app`. Updates den installs itself need neither. (The `.app.tar.gz` next to the disk image is what the updater downloads.)
 3. Open den, pick a project folder, and click the **Claude Code** button on the tab strip (or open a plain terminal).
 
 Git comes with the Xcode Command Line Tools (`xcode-select --install`) or Homebrew. Browser tabs use the WebKit that ships with macOS. Started from the Finder or the Dock, den takes your login shell's `PATH` over, so `claude`, `pnpm` and the formatters it runs are the ones your terminal sees.

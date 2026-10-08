@@ -1,8 +1,8 @@
 # Builds a release for both platforms. scripts/release.ts bumps the version,
 # tags it, makes a draft release with the notes and starts this with the tag;
-# it builds and signs the Windows installer and the Mac app archive, adds
-# them and the updater manifest (latest.json) to the release, and publishes
-# it. Until then the previous release stays the latest, so updates never see
+# it builds and signs the Windows installer and the Mac app archive (plus a
+# disk image of the app for downloads), adds them and the updater manifest
+# (latest.json) to the release, and publishes it. Until then the previous release stays the latest, so updates never see
 # a half-built one.
 #
 # Started from main (not by the tag) on purpose: GitHub only shares caches
@@ -73,6 +73,13 @@ jobs:
             $asset = "den_${version}_aarch64.app.tar.gz"
             sh scripts/bundle-macos.sh $version
             tar -czf "dist/$asset" -C target/release den.app
+            # The archive is for the updater; people get a disk image: open it,
+            # drag den onto the Applications link.
+            mkdir -p dist/dmg
+            cp -R target/release/den.app dist/dmg/
+            ln -s /Applications dist/dmg/Applications
+            hdiutil create -volname den -srcfolder dist/dmg -ov -format UDZO "dist/den_${version}_aarch64.dmg"
+            rm -rf dist/dmg
           }
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The updater checks this signature against packaging/updater.pub.
