@@ -1,7 +1,7 @@
 // Release: Claude reads the changes since the last `v*` tag, picks the semver bump by
 // scripts/release-scale.md and writes the release notes. The script bumps the version in
-// Cargo.toml (and the lockfile), commits, tags, pushes and makes a draft GitHub release with the
-// notes. The tag starts .github/workflows/release.yml, which builds and signs the Windows
+// Cargo.toml (and the lockfile), commits, tags, pushes, makes a draft GitHub release with the
+// notes and starts .github/workflows/release.yml with the tag, which builds and signs the Windows
 // installer and the Mac app, adds them and latest.json (the updater's manifest) to the release
 // and publishes it.
 //
@@ -240,6 +240,8 @@ async function main(): Promise<void> {
   // A draft: the workflow adds the builds and publishes it, so the previous release stays the
   // latest until this one is whole.
   const ghArgs = ["release", "create", tag, "--repo", REPO, "--title", `den ${tag}`, "--notes-file", notesFile, "--draft", "--verify-tag"];
+  // Started from main rather than by the tag, so its dependency cache carries over between releases.
+  const workflowArgs = ["workflow", "run", "release.yml", "--repo", REPO, "--ref", BRANCH, "-f", `tag=${tag}`];
 
   try {
     if (version !== current) setVersion(version);
@@ -249,11 +251,14 @@ async function main(): Promise<void> {
     run("git", ["push", "origin", BRANCH]);
     run("git", ["push", "origin", tag]);
     run("gh", ghArgs);
+    run("gh", workflowArgs);
   } catch (e) {
+    const quote = (args: string[]) => args.map((a) => (/[\s\\]/.test(a) ? `"${a}"` : a)).join(" ");
     fail(
       `${(e as Error).message}. Steps before it are done; finish with:\n`
       + `  git push origin ${BRANCH} ${tag}\n`
-      + `  gh ${ghArgs.map((a) => (/[\s\\]/.test(a) ? `"${a}"` : a)).join(" ")}`,
+      + `  gh ${quote(ghArgs)}\n`
+      + `  gh ${quote(workflowArgs)}`,
     );
   }
   console.log(`\n✓ den ${tag} tagged; the release workflow builds and publishes it:`);

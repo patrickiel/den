@@ -1,9 +1,13 @@
 # Builds a release for both platforms. scripts/release.ts bumps the version,
-# tags it and makes a draft release with the notes; the tag starts this, which
-# builds and signs the Windows installer and the Mac app archive, adds them
-# and the updater manifest (latest.json) to the release, and publishes it.
-# Until then the previous release stays the latest, so updates never see a
-# half-built one.
+# tags it, makes a draft release with the notes and starts this with the tag;
+# it builds and signs the Windows installer and the Mac app archive, adds
+# them and the updater manifest (latest.json) to the release, and publishes
+# it. Until then the previous release stays the latest, so updates never see
+# a half-built one.
+#
+# Started from main (not by the tag) on purpose: GitHub only shares caches
+# within a ref or from the default branch, so this way each run reuses the
+# compiled dependencies of the last one and builds den's crates only.
 #
 # Secrets: DEN_SIGNING_KEY holds the updater's private key file (the one
 # packaging/updater.pub belongs to), DEN_SIGNING_KEY_PASSWORD its password if
@@ -13,8 +17,6 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -25,7 +27,7 @@ permissions:
   contents: write
 
 env:
-  TAG: ${{ inputs.tag || github.ref_name }}
+  TAG: ${{ inputs.tag }}
 
 jobs:
   build:
@@ -41,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
