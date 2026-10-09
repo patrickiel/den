@@ -184,28 +184,39 @@ pub enum Hints {
     Tabs,
 }
 
-/// The number the keys reach something by, over it: big over a group, small
-/// over a tab. The target dims under a translucent black wash, and the number
-/// sits in it in a faded foreground, so the hints read without shouting.
-fn number_badge(n: usize, big: bool, cx: &App) -> impl IntoElement {
-    let theme = cx.theme();
+/// The number Focus Group reaches a group (or a tile) by, over it, `alpha`
+/// in: the target dims under a faint black wash, and the number sits in it
+/// in a faded foreground, so the hints read without shouting.
+fn group_number(n: usize, alpha: f32, cx: &App) -> impl IntoElement {
     div()
         .absolute()
         .inset_0()
         .flex()
         .items_center()
         .justify_center()
-        .bg(black().alpha(if big { 0.4 } else { 0.55 }))
-        .text_color(theme.foreground.alpha(0.6))
+        .bg(black().alpha(0.22 * alpha))
+        .text_color(cx.theme().foreground.alpha(0.5 * alpha))
         .font_weight(FontWeight::BOLD)
-        .map(|badge| {
-            if big {
-                badge.text_size(px(96.)).line_height(px(104.))
-            } else {
-                badge.text_xs().line_height(px(16.))
-            }
-        })
+        .text_size(px(96.))
+        .line_height(px(104.))
         .child(n.to_string())
+}
+
+/// The number Open Tab reaches a tab by, over its label.
+fn tab_number(n: usize, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div().absolute().inset_0().flex().items_center().justify_center().child(
+        div()
+            .bg(theme.primary)
+            .text_color(theme.primary_foreground)
+            .font_weight(FontWeight::BOLD)
+            .opacity(0.85)
+            .rounded(px(4.))
+            .px_1p5()
+            .text_xs()
+            .line_height(px(16.))
+            .child(n.to_string()),
+    )
 }
 
 /// A tab's flashing border, `alpha` strong. The tab clips its content to its
@@ -643,9 +654,11 @@ impl Workspace {
         let primary = theme.primary;
         // Its number for Focus Group, while the keys ask for them (none past
         // the commands there are); tiled, the numbers are the tiles'.
-        let number = (self.hints == Some(Hints::Groups) && !tiled)
-            .then(|| self.tree.groups().iter().position(|g| *g == id).map(|ix| ix + 1).filter(|n| *n <= 8))
-            .flatten();
+        let number = self
+            .hints_alpha(window)
+            .filter(|(hints, _)| *hints == Hints::Groups && !tiled)
+            .and_then(|(_, alpha)| self.tree.groups().iter().position(|g| *g == id).map(|ix| (ix + 1, alpha)))
+            .filter(|(n, _)| *n <= 8);
         let flash = self.flash_alpha(Flash::Group(id), window);
 
         let content = div()
@@ -682,7 +695,7 @@ impl Workspace {
             })
             .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Group(id)))
             // Over the pane's content, as the drop overlay is.
-            .when_some(number, |this, n| this.child(deferred(number_badge(n, true, cx)).with_priority(1)))
+            .when_some(number, |this, (n, alpha)| this.child(deferred(group_number(n, alpha, cx)).with_priority(1)))
             .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)));
 
         // No frame of its own: the lines between groups are the handles. The
@@ -722,7 +735,7 @@ impl Workspace {
     fn render_tiles(&self, tabs: &[PaneId], active: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let (primary, border, tab_bar) = (theme.primary, theme.border, theme.tab_bar);
-        let numbered = self.hints.is_some();
+        let numbered = self.hints_alpha(window).map(|(_, alpha)| alpha);
         let area = self.tile_area.get().unwrap_or_else(|| window.viewport_size());
         let columns = tile_columns(tabs.len(), f32::from(area.width) / f32::from(area.height).max(1.));
         self.tile_columns.set(columns);
@@ -739,7 +752,7 @@ impl Workspace {
                     let ix = row * columns + col;
                     let is_active = ix == active;
                     let pane = self.panes.get(&pane_id);
-                    let number = (numbered && ix < 8).then_some(ix + 1);
+                    let number = numbered.filter(|_| ix < 8).map(|alpha| (ix + 1, alpha));
                     let flash = self.flash_alpha(Flash::Tab(pane_id), window);
                     let caption = h_flex()
                         .flex_none()
@@ -787,7 +800,7 @@ impl Workspace {
                         .child(div().relative().flex_1().min_h_0().w_full().when_some(pane, |this, pane| {
                             this.child(pane.view().cached(StyleRefinement::default().absolute().size_full()))
                         }))
-                        .when_some(number, |this, n| this.child(deferred(number_badge(n, true, cx)).with_priority(1)))
+                        .when_some(number, |this, (n, alpha)| this.child(deferred(group_number(n, alpha, cx)).with_priority(1)))
                         .when_some(flash, |this, alpha| {
                             this.child(deferred(div().absolute().inset_0().rounded(px(4.)).border_2().border_color(primary.alpha(alpha))).with_priority(1))
                         })
@@ -854,7 +867,7 @@ impl Workspace {
                                 })
                                 .child(div().max_w(px(220.)).truncate().when(preview, |this| this.italic()).child(label.clone()))
                                 .when(dirty, |this| this.child("●"))
-                                .when_some(number, |this, n| this.child(number_badge(n, false, cx)))
+                                .when_some(number, |this, n| this.child(tab_number(n, cx)))
                                 .when_some(flash, |this, alpha| this.child(tab_flash(alpha, cx))),
                         )
                         .when(close_buttons, |tab| tab.suffix(

@@ -303,6 +303,11 @@ pub struct Workspace {
     /// The numbers shown over the groups or the active group's tabs while
     /// the modifiers of their commands are held (Ctrl+1…8 numbers the groups).
     pub(crate) hints: Option<Hints>,
+    /// When `hints` last changed: the group numbers fade in from then, or
+    /// out, over `HINT_FADE`.
+    hints_at: std::time::Instant,
+    /// The numbers fading out, once their modifiers are let go.
+    hints_gone: Option<Hints>,
     /// Counts the changes of the modifiers: the numbers come after a short
     /// hold, when the modifiers did not change meanwhile.
     hint_seq: u64,
@@ -440,6 +445,8 @@ impl Workspace {
             drop_hint: None,
             held: Modifiers::none(),
             hints: None,
+            hints_at: std::time::Instant::now(),
+            hints_gone: None,
             hint_seq: 0,
             flash: None,
             maximized: None,
@@ -1171,6 +1178,47 @@ impl Workspace {
         Some(1. - t * t)
     }
 
+    /// Shows `wanted`'s numbers, or takes the shown ones away, fading: a
+    /// change mid-fade carries on from where the fade stands.
+    fn set_hints(&mut self, wanted: Option<Hints>) {
+        if wanted == self.hints {
+            return;
+        }
+        let fade = HINT_FADE.as_secs_f32();
+        let t = (self.hints_at.elapsed().as_secs_f32() / fade).min(1.);
+        let (shown, alpha) = match (self.hints, self.hints_gone) {
+            (Some(hints), _) => (Some(hints), t),
+            (None, Some(hints)) => (Some(hints), (1. - t).max(0.)),
+            (None, None) => (None, 0.),
+        };
+        let from = match wanted {
+            Some(_) if wanted == shown => alpha,
+            Some(_) => 0.,
+            None => 1. - alpha,
+        };
+        self.hints_gone = self.hints.filter(|_| wanted.is_none());
+        self.hints = wanted;
+        self.hints_at = std::time::Instant::now() - Duration::from_secs_f32(from * fade);
+    }
+
+    /// The numbers shown and how far in they are, `None` when there are
+    /// none; keeps the frames coming while they fade.
+    pub(crate) fn hints_alpha(&self, window: &Window) -> Option<(Hints, f32)> {
+        let t = self.hints_at.elapsed().as_secs_f32() / HINT_FADE.as_secs_f32();
+        let (hints, alpha) = match (self.hints, self.hints_gone) {
+            (Some(hints), _) => (hints, t.min(1.)),
+            (None, Some(hints)) => (hints, 1. - t),
+            (None, None) => return None,
+        };
+        if alpha <= 0. {
+            return None;
+        }
+        if t < 1. {
+            window.request_animation_frame();
+        }
+        Some((hints, alpha))
+    }
+
     /// The modifiers changed: Ctrl (Cmd on macOS) held a moment numbers the
     /// groups, Alt (Ctrl) the active group's tabs, as their commands' keys
     /// are set. A moment, so a quick Ctrl+S does not flash the numbers.
@@ -1190,14 +1238,15 @@ impl Workspace {
             None
         };
         if wanted != self.hints {
-            self.hints = None;
+            self.set_hints(None);
             if wanted.is_some() {
                 let seq = self.hint_seq;
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(HINT_DELAY).await;
+                    let delay = if wanted == Some(Hints::Groups) { GROUP_HINT_DELAY } else { HINT_DELAY };
+                    cx.background_executor().timer(delay).await;
                     _ = this.update(cx, |this, cx| {
                         if this.hint_seq == seq {
-                            this.hints = wanted;
+                            this.set_hints(wanted);
                             cx.notify();
                         }
                     });
@@ -2277,7 +2326,8 @@ impl Workspace {
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 // A click is not the keys' way about: the numbers go (and
                 // those left behind when the keys' release went to a browser).
-                if this.hints.take().is_some() {
+                if this.hints.is_some() {
+                    this.set_hints(None);
                     cx.notify();
                 }
                 if let MouseButton::Navigate(direction) = event.button {
@@ -2397,6 +2447,10 @@ const FLOAT_GRAB: Point<Pixels> = Point { x: px(80.), y: px(52.) };
 const FLASH: Duration = Duration::from_millis(700);
 /// How long the modifiers are held before the numbers show.
 const HINT_DELAY: Duration = Duration::from_millis(150);
+/// The groups' numbers wait longer: Ctrl is held for many a shortcut.
+const GROUP_HINT_DELAY: Duration = Duration::from_millis(400);
+/// How long the group numbers take to fade in or out.
+const HINT_FADE: Duration = Duration::from_millis(180);
 
 /// `bounds` moved (and shrunk if need be) to lie inside `area`.
 fn fit(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
