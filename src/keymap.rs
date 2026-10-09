@@ -94,6 +94,16 @@ pub fn keys_for(action: &dyn Action, cx: &App) -> Option<String> {
     commands(cx).iter().find(|c| c.action.partial_eq(action)).and_then(|c| c.shown.first().cloned())
 }
 
+/// The modifiers held for `action`'s keys: those of its first binding that
+/// is one keystroke (Ctrl, of Ctrl+1); `None` without one, or when they
+/// are a bare key.
+pub fn modifiers_of(action: &dyn Action, cx: &App) -> Option<Modifiers> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let modifiers = keymap.bindings_for_action(action).find(|b| b.keystrokes().len() == 1).map(|b| *b.keystrokes()[0].modifiers());
+    modifiers.filter(Modifiers::modified)
+}
+
 /// `text (keys)`, for a tooltip; `text` alone when `action` has no keys.
 pub fn with_keys(text: &str, action: &dyn Action, cx: &App) -> String {
     match keys_for(action, cx) {
@@ -343,6 +353,10 @@ fn den_commands() -> Vec<Command> {
         let (windows, mac) = (format!("ctrl-{n}"), format!("cmd-{n}"));
         list.push(command(&format!("den.focusGroup{n}"), &format!("View: Focus Group {n}"), FocusGroup(n), &[&windows], &[&mac]));
     }
+    // The Nth pinned preset on the tab strips; no keys until the user sets some.
+    for n in 1..=9 {
+        list.push(command(&format!("den.openPreset{n}"), &format!("Terminal: Open Preset {n}"), OpenPreset(n), &[], &[]));
+    }
     list.extend([
         command("den.focusLeft", "View: Focus Group on the Left", FocusLeft, &["ctrl-k ctrl-left"], &["cmd-k cmd-left"]),
         command("den.focusRight", "View: Focus Group on the Right", FocusRight, &["ctrl-k ctrl-right"], &["cmd-k cmd-right"]),
@@ -494,8 +508,9 @@ mod tests {
         // Elsewhere they are den's.
         assert!(run(&keymap, "ctrl-o", None).0.unwrap().partial_eq(&crate::OpenFiles));
         assert!(run(&keymap, "ctrl-w", None).0.unwrap().partial_eq(&crate::CloseTab));
-        // The terminal's own Ctrl+V, and keys with Shift, stay commands.
+        // The terminal's own Ctrl+V, keys with Shift, and Ctrl+digit stay commands.
         assert!(run(&keymap, "ctrl-v", terminal).0.unwrap().partial_eq(&crate::terminal::Paste));
+        assert!(run(&keymap, "ctrl-1", terminal).0.unwrap().partial_eq(&crate::FocusGroup(1)));
         assert!(run(&keymap, "ctrl-shift-w", terminal).0.unwrap().partial_eq(&crate::CloseTab));
         // Ctrl+K waits for the chord's second key.
         assert!(matches!(run(&keymap, "ctrl-k", terminal), (None, true)));

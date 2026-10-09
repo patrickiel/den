@@ -229,7 +229,7 @@ impl Tree {
         }
     }
 
-    /// Whether `id` is the root of a window (drawn without a container's frame).
+    /// Whether `id` is the root of a window (the main one or a floating one).
     pub fn is_root(&self, id: NodeId) -> bool {
         self.roots().any(|root| root.id() == id)
     }
@@ -350,18 +350,6 @@ impl Tree {
             }
         });
         found
-    }
-
-    /// The splits from the root down to the one holding `id`, outermost first.
-    pub fn ancestors(&self, id: NodeId) -> Vec<NodeId> {
-        let mut chain = Vec::new();
-        let mut at = id;
-        while let Some((parent, _)) = self.parent_of(at) {
-            chain.push(parent);
-            at = parent;
-        }
-        chain.reverse();
-        chain
     }
 
     /// Whether `inner` is `outer` or lies inside it.

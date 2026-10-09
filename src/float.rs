@@ -1,4 +1,4 @@
-//! A floating window: a group or a container moved out of the main window,
+//! A floating window: a group (or a window's whole root) moved out of the main window,
 //! as VS Code's auxiliary windows. It draws its part of the workspace's tree
 //! (the panes stay the workspace's and keep running) under a title bar of its
 //! own, without a sidebar. Closing it moves what it holds back into the main

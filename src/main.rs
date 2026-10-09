@@ -103,6 +103,11 @@ pub struct OpenTab(pub usize);
 #[action(namespace = den, no_json)]
 pub struct FocusGroup(pub usize);
 
+/// Open the pinned preset at this place on the tab strips, counted from 1.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, Action)]
+#[action(namespace = den, no_json)]
+pub struct OpenPreset(pub usize);
+
 /// A window on the session for `root`, at `bounds` (centred when `None`).
 pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut App) {
     let bounds = bounds.unwrap_or_else(|| Bounds::centered(None, size(px(1400.), px(900.)), cx));
@@ -111,7 +116,6 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
         window_min_size: Some(size(px(640.), px(400.))),
         ..TitleBar::window_options()
     };
-    let title = format!("den — {}", root.display());
     extensions::broadcast(den_extension::events::WORKSPACE_OPENED, serde_json::json!({ "root": root }), cx);
     let Ok((window, workspace)) = gpui_kit::open_window(options, cx, {
         let root = root.clone();
@@ -119,13 +123,33 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
     }) else {
         return;
     };
-    extensions::window_opened(root, workspace.downgrade(), window, cx);
     window
-        .update(cx, |_, window, _| {
+        .update(cx, |_, window, cx| {
             window.activate_window();
-            window.set_window_title(&title);
+            workspace_opened(root, workspace, window, cx);
         })
         .ok();
+}
+
+/// Turn `window` to the session for `root` in its place: the window stays as
+/// it is (its bounds, maximised or not), only its content changes.
+pub fn switch_workspace(root: PathBuf, window: &mut Window, cx: &mut App) {
+    extensions::broadcast(den_extension::events::WORKSPACE_OPENED, serde_json::json!({ "root": root }), cx);
+    let mut workspace = None;
+    window.replace_root(cx, |window, cx| {
+        let view = cx.new(|cx| workspace::Workspace::new(root.clone(), window, cx));
+        workspace = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    if let Some(workspace) = workspace {
+        workspace_opened(root, workspace, window, cx);
+    }
+}
+
+/// A workspace now in `window`: named in the title, known to the extensions.
+fn workspace_opened(root: PathBuf, workspace: Entity<workspace::Workspace>, window: &mut Window, cx: &mut App) {
+    window.set_window_title(&format!("den — {}", root.display()));
+    extensions::window_opened(root, workspace.downgrade(), window.window_handle(), cx);
 }
 
 /// The folder to open with none given. Started from a shell, that shell's
@@ -315,6 +339,7 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<NavigateForward>,
         forward::<OpenTab>,
         forward::<FocusGroup>,
+        forward::<OpenPreset>,
         forward::<extensions::RunCommand>,
     ];
     for register in forwarded {

@@ -1077,11 +1077,18 @@ impl ScmView {
             .hover(|this| this.bg(theme.list_hover))
             .when(open, |this| this.bg(theme.list_active))
             .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
-            .child(div().flex_1().min_w_0().truncate().child(commit.subject.clone()))
+            // The author follows the subject, as VS Code's graph lists them;
+            // the age is on the hover card.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .child(div().min_w_0().truncate().child(commit.subject.clone()))
+                    .child(div().flex_none().max_w(px(90.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone())),
+            )
             .children(commit.refs.iter().map(|r| ref_badge(r, lane_color)))
             .when(commit.detached_head, |this| this.child(head_badge(theme.muted_foreground)))
-            .child(div().flex_none().max_w(px(90.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone()))
-            .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(git::age(commit.date, now)))
             .on_click(cx.listener({
                 let hash = hash.clone();
                 move |this, _, _, cx| this.toggle_commit(hash.clone(), cx)

@@ -37,7 +37,7 @@ use crate::{
     float::FloatWindow,
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
-    layout_view::{Drop, Dragged, DropHint, Zones},
+    layout_view::{Drop, Dragged, DropHint, Flash, Hints, Zones},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::{Refresh, Repo},
@@ -295,10 +295,18 @@ pub struct Workspace {
     pub(crate) active_group: NodeId,
     /// The preview tab (italic), replaced by the next file opened as a preview.
     pub(crate) preview: Option<PaneId>,
-    /// Where a dragged tab, group or container would land.
+    /// Where a dragged tab or group would land.
     pub(crate) drop_hint: Option<DropHint>,
-    /// Alt is down: the split buttons split down instead of right.
-    pub(crate) alt_held: bool,
+    /// The modifiers down: Alt turns the split buttons to splitting down.
+    pub(crate) held: Modifiers,
+    /// The numbers shown over the groups or the active group's tabs while
+    /// the modifiers of their commands are held (Ctrl+1…8 numbers the groups).
+    pub(crate) hints: Option<Hints>,
+    /// Counts the changes of the modifiers: the numbers come after a short
+    /// hold, when the modifiers did not change meanwhile.
+    hint_seq: u64,
+    /// The group or tab the keys last went to, and when: its border flashes.
+    flash: Option<(Flash, std::time::Instant)>,
     /// Tabs whose program wanted the user while they looked elsewhere.
     pub(crate) attention: std::collections::HashSet<PaneId>,
     /// The main window, and each floating window by its float's id.
@@ -421,7 +429,10 @@ impl Workspace {
             active_group,
             preview: None,
             drop_hint: None,
-            alt_held: false,
+            held: Modifiers::none(),
+            hints: None,
+            hint_seq: 0,
+            flash: None,
             attention: Default::default(),
             window: window.window_handle(),
             float_windows: HashMap::new(),
@@ -696,8 +707,8 @@ impl Workspace {
     }
 
     /// Take `node` out of the tree, with what follows from that: the
-    /// defaults of a container that collapsed move on, and the active group
-    /// stays a group. False for the root, which has nowhere to go.
+    /// defaults follow collapsed splits, and the active group stays a group.
+    /// False for the root, which has nowhere to go.
     fn detach(&mut self, node: NodeId) -> bool {
         let detached = self.tree.detach(node);
         if let Some((_, remap)) = &detached {
@@ -705,21 +716,6 @@ impl Workspace {
         }
         self.fix_active_group();
         detached.is_some()
-    }
-
-    /// Close a container with every group and tab in it.
-    pub(crate) fn close_container(&mut self, node: NodeId, cx: &mut Context<Self>) {
-        let groups = self.tree.groups_under(node);
-        for &group in &groups {
-            for pane in self.tree.tabs(group).to_vec() {
-                self.forget_pane(pane, cx);
-            }
-        }
-        if !self.detach(node) {
-            // The root has nowhere to go: close its groups one by one.
-            groups.into_iter().for_each(|group| self.close_group(group, cx));
-        }
-        self.changed(cx);
     }
 
     /// The tab `group` shows has been seen: its attention mark goes.
@@ -803,7 +799,7 @@ impl Workspace {
         }
     }
 
-    /// A new empty group beside `node` (a group, a container or the root).
+    /// A new empty group beside `node` (a group or the root).
     pub(crate) fn split(&mut self, node: NodeId, side: Side, cx: &mut Context<Self>) {
         if let Some(group) = self.tree.split(node, side) {
             self.set_active_group(group, cx);
@@ -817,12 +813,12 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn set_default(&mut self, node: NodeId, container: bool, kind: Option<Kind>, cx: &mut Context<Self>) {
-        self.defaults.set(&self.tree, node, container, kind);
+    pub(crate) fn set_default(&mut self, group: NodeId, kind: Option<Kind>, cx: &mut Context<Self>) {
+        self.defaults.set(group, kind);
         self.changed(cx);
     }
 
-    /// Move a group or container beside `target`.
+    /// Move a group beside `target`.
     pub(crate) fn move_node(&mut self, node: NodeId, target: NodeId, side: Side, cx: &mut Context<Self>) {
         if let Some(remap) = self.tree.move_node(node, target, side) {
             self.defaults.prune(&self.tree, &remap);
@@ -896,8 +892,8 @@ impl Workspace {
         });
     }
 
-    /// Move a group or container into a new window: at `bounds` (on screen),
-    /// or centred.
+    /// Move a group (or a window's whole root) into a new window: at `bounds`
+    /// (on screen), or centred.
     pub(crate) fn float_node(&mut self, node: NodeId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
         // The main window's groups, all empty, have nothing to take along.
         if node == self.tree.root.id() && self.tree.root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
@@ -1068,7 +1064,7 @@ impl Workspace {
                     .gap_1()
                     .px_2()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .children(self.container_actions(root_id, "window", !root.is_group(), cx))
+                    .children(self.root_actions(root_id, "window", !root.is_group(), cx))
                     .child(
                         Button::new("float-dock")
                             .small()
@@ -1096,6 +1092,7 @@ impl Workspace {
         let Some(ix) = tabs.iter().position(|p| *p == current) else { return };
         let next = tabs[(ix as isize + step).rem_euclid(tabs.len() as isize) as usize];
         self.show_pane(next, true, window, cx);
+        self.flash(Flash::Tab(next), cx);
     }
 
     /// Alt+1…9 (Ctrl on macOS): the active group's tab there, counted from
@@ -1105,6 +1102,7 @@ impl Workspace {
         let pane = if n == 0 { tabs.last() } else { tabs.get(n - 1) };
         if let Some(pane) = pane.copied() {
             self.show_pane(pane, true, window, cx);
+            self.flash(Flash::Tab(pane), cx);
         }
     }
 
@@ -1115,6 +1113,64 @@ impl Workspace {
         if let Some(pane) = self.tree.active_tab(group) {
             self.focus_pane(pane, window, cx);
         }
+        self.flash(Flash::Group(group), cx);
+    }
+
+    /// Flash the border of the group or tab the keys went to, so the eye
+    /// finds it.
+    fn flash(&mut self, target: Flash, cx: &mut Context<Self>) {
+        self.flash = Some((target, std::time::Instant::now()));
+        cx.notify();
+    }
+
+    /// How strong `target`'s flash is now, `None` when it is not flashing;
+    /// keeps the frames coming while it is.
+    pub(crate) fn flash_alpha(&self, target: Flash, window: &Window) -> Option<f32> {
+        let (_, started) = self.flash.filter(|(flashed, _)| *flashed == target)?;
+        let t = started.elapsed().as_secs_f32() / FLASH.as_secs_f32();
+        if t >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        // Full at first, fading faster towards the end.
+        Some(1. - t * t)
+    }
+
+    /// The modifiers changed: Ctrl (Cmd on macOS) held a moment numbers the
+    /// groups, Alt (Ctrl) the active group's tabs, as their commands' keys
+    /// are set. A moment, so a quick Ctrl+S does not flash the numbers.
+    fn modifiers_changed(&mut self, modifiers: Modifiers, cx: &mut Context<Self>) {
+        if self.held == modifiers {
+            return;
+        }
+        self.held = modifiers;
+        self.hint_seq += 1;
+        let wanted = if !modifiers.modified() {
+            None
+        } else if Some(modifiers) == crate::keymap::modifiers_of(&crate::FocusGroup(1), cx) {
+            Some(Hints::Groups)
+        } else if Some(modifiers) == crate::keymap::modifiers_of(&crate::OpenTab(1), cx) {
+            Some(Hints::Tabs)
+        } else {
+            None
+        };
+        if wanted != self.hints {
+            self.hints = None;
+            if wanted.is_some() {
+                let seq = self.hint_seq;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(HINT_DELAY).await;
+                    _ = this.update(cx, |this, cx| {
+                        if this.hint_seq == seq {
+                            this.hints = wanted;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        cx.notify();
     }
 
     // -- Opening things ------------------------------------------------------
@@ -1359,6 +1415,17 @@ impl Workspace {
         self.open_terminal(None, program, agent, window, cx)
     }
 
+    /// Open Preset 1…9 (no keys by default): the `n`th pinned preset, as the
+    /// tab strips show them, in the group its kind goes to.
+    fn open_preset(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(preset) = n.checked_sub(1).and_then(|ix| Settings::get(cx).presets.iter().filter(|p| p.pinned).nth(ix).cloned()) else { return };
+        if preset.browser {
+            self.open_browser(None, Some(preset.command), window, cx);
+        } else {
+            self.open_terminal(None, Some(preset.command), preset.agent, window, cx);
+        }
+    }
+
     /// A terminal running `program` (`None` for a plain shell), a coding
     /// agent's or not: in `group` when a group's button asked, else where
     /// its kind goes.
@@ -1506,7 +1573,7 @@ impl Workspace {
     /// tabs, as den does: a group of Claude Code tabs gets another Claude
     /// Code; a mix, or a shell among them, a shell.
     pub(crate) fn open_more(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-        match self.defaults.effective(&self.tree, group) {
+        match self.defaults.get(group) {
             Some(Kind::Files) => return self.explorer.update(cx, |explorer, cx| explorer.new_file(window, cx)),
             Some(Kind::Terminals) => return self.open_terminal(Some(group), None, false, window, cx),
             Some(Kind::Agents) => {
@@ -1615,11 +1682,6 @@ impl Workspace {
         self.confirm_discard(panes, move |this, _, cx| this.close_group(group, cx), window, cx);
     }
 
-    pub(crate) fn request_close_container(&mut self, node: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-        let panes = self.tree.groups_under(node).iter().flat_map(|&group| self.tree.tabs(group).to_vec()).collect();
-        self.confirm_discard(panes, move |this, _, cx| this.close_container(node, cx), window, cx);
-    }
-
     /// Open `root` as a session: in this window (saving this one first), or a new one.
     fn open_session(&mut self, root: PathBuf, new_window: bool, window: &mut Window, cx: &mut Context<Self>) {
         let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
@@ -1632,8 +1694,9 @@ impl Workspace {
             panes,
             move |this, window, cx| {
                 this.save_session(cx);
-                crate::open_workspace(root.clone(), Some(window.bounds()), cx);
-                window.remove_window();
+                // Once this workspace is out of its update: the switch drops it.
+                let root = root.clone();
+                window.defer(cx, move |window, cx| crate::switch_workspace(root, window, cx));
             },
             window,
             cx,
@@ -1679,6 +1742,7 @@ impl Workspace {
         if let Some(pane) = self.tree.active_tab(group) {
             self.focus_pane(pane, window, cx);
         }
+        self.flash(Flash::Group(group), cx);
     }
 
     // -- Presets -------------------------------------------------------------
@@ -1946,8 +2010,8 @@ impl Workspace {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .children(self.extension_buttons(cx))
                         .child(layout_button)
-                        // The outermost container's actions, called the workspace's.
-                        .children(self.container_actions(root_node, "workspace", root_is_split, cx))
+                        // The root's actions, called the workspace's.
+                        .children(self.root_actions(root_node, "workspace", root_is_split, cx))
                         .child(separator())
                         .child(
                             Button::new("settings")
@@ -2148,17 +2212,17 @@ impl Workspace {
             // looked at, wherever the pointer is (before a group takes the
             // press as a click into it).
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                // A click is not the keys' way about: the numbers go (and
+                // those left behind when the keys' release went to a browser).
+                if this.hints.take().is_some() {
+                    cx.notify();
+                }
                 if let MouseButton::Navigate(direction) = event.button {
                     cx.stop_propagation();
                     this.navigate(direction == NavigationDirection::Back, window, cx);
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                if this.alt_held != event.modifiers.alt {
-                    this.alt_held = event.modifiers.alt;
-                    cx.notify();
-                }
-            }))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(false, window, cx)))
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
@@ -2181,6 +2245,7 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|this, action: &crate::OpenTab, window, cx| this.open_tab_at(action.0, window, cx)))
             .on_action(cx.listener(|this, action: &crate::FocusGroup, window, cx| this.focus_group_at(action.0, window, cx)))
+            .on_action(cx.listener(|this, action: &crate::OpenPreset, window, cx| this.open_preset(action.0, window, cx)))
             .on_action(cx.listener(|this, _: &crate::NavigateBack, window, cx| this.navigate(true, window, cx)))
             .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| this.navigate(false, window, cx)))
             .on_action(cx.listener(|_, _: &crate::ShowCommands, window, cx| crate::keymap::open_palette(window, cx)))
@@ -2260,6 +2325,10 @@ fn display_at(grab: Point<Pixels>, cx: &App) -> Option<std::rc::Rc<dyn PlatformD
 /// Where the pointer is in a window popped out by a drag: on its tab strip,
 /// as if it had been picked up there.
 const FLOAT_GRAB: Point<Pixels> = Point { x: px(80.), y: px(52.) };
+/// How long the border of a group or tab the keys went to flashes.
+const FLASH: Duration = Duration::from_millis(700);
+/// How long the modifiers are held before the numbers show.
+const HINT_DELAY: Duration = Duration::from_millis(150);
 
 /// `bounds` moved (and shrunk if need be) to lie inside `area`.
 fn fit(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {

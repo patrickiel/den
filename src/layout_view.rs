@@ -1,21 +1,19 @@
 //! Drawing the layout tree, and dragging things around in it.
 //!
 //! Splits lay their children out with a handle between each pair to resize
-//! them; every split but the outermost is a container, drawn as a tray with a
-//! header holding its actions (default menu, split, flip), and dragged by it.
-//! A group is a tab strip over the shown tab's content; the strip ends in the
-//! group's actions (default, terminal presets, split, menu), and grabbing it
-//! anywhere but on a tab drags the whole group.
+//! them, and draw nothing of their own: nested splits show as one flat
+//! arrangement of groups. A group is a tab strip over the shown tab's
+//! content; the strip ends in the group's actions (default, terminal presets,
+//! split, menu), and grabbing it anywhere but on a tab drags the whole group.
 //!
 //! Drops: a tab onto a group's middle joins it, onto a side starts a group
-//! beside it; a group or container onto a group's side or a container's
-//! header goes beside that; anything into the band along the edge of the
-//! whole area goes beside everything.
+//! beside it; a group onto another group's side goes beside that; anything
+//! into the band along the edge of the whole area goes beside everything.
 //!
 //! Each window (the main one, and each floating one) draws its own part of the
-//! tree this way. A tab, group or container let go outside the window moves
-//! into a new floating window there, or into the session's window under the
-//! pointer, as VS Code's editors do.
+//! tree this way. A tab or group let go outside the window moves into a new
+//! floating window there, or into the session's window under the pointer, as
+//! VS Code's editors do.
 //!
 //! The window a drag starts in keeps the mouse until it is let go, so the
 //! others never see it pass. Each window records where its drop zones were
@@ -34,6 +32,8 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
     v_flex,
 };
+use gpui_kit::base::{resize_handle, ResizeHandleRenderer};
+use gpui_kit::component::resizable::resize_handle_appearance;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
 use crate::{
@@ -48,9 +48,6 @@ use crate::{
     workspace::Workspace,
 };
 
-const HEADER: f32 = 24.;
-const GUTTER: f32 = 4.;
-const HANDLE: f32 = 4.;
 /// How far in from the area's edges a drop goes beside everything.
 const EDGE_BAND: f32 = 28.;
 /// Below this share a split's child cannot be dragged smaller.
@@ -62,7 +59,7 @@ pub struct TabDrag {
     pub pane: PaneId,
 }
 
-/// A group (by its tab strip) or a container (by its header) being dragged.
+/// A group (by its tab strip) being dragged.
 #[derive(Clone)]
 pub struct GroupDrag {
     pub node: NodeId,
@@ -82,8 +79,6 @@ pub(crate) enum Zone {
     Area(NodeId),
     /// A group's content, below its tab strip.
     Group(NodeId),
-    /// A container's header.
-    Header(NodeId),
     /// A group's tab strip.
     Strip(NodeId),
     /// Tab `ix` on a group's strip.
@@ -106,8 +101,8 @@ fn zone_marker(zones: &Zones, float: Option<u64>, zone: Zone) -> impl IntoElemen
 
 /// The drop a drag at `at` would make among a window's `zones`, as the zones
 /// work it out for a drag inside that window: the edge bands first, then a
-/// tab strip (a tab goes before the tab it is over, or last), a group (a tab
-/// may join it), then a container's header (groups and containers only).
+/// tab strip (a tab goes before the tab it is over, or last), then a group (a
+/// tab may join it, a group goes beside it).
 pub(crate) fn hint_at(zones: &[(Zone, Bounds<Pixels>)], dragged: Dragged, at: Point<Pixels>) -> Option<DropHint> {
     let edge = zones.iter().find_map(|(zone, bounds)| match zone {
         Zone::Area(root) => edge_side(*bounds, at).map(|side| DropHint {
@@ -136,11 +131,6 @@ pub(crate) fn hint_at(zones: &[(Zone, Bounds<Pixels>)], dragged: Dragged, at: Po
                 }
                 (Zone::Group(group), Dragged::Tab(_)) => (group, center_or_side(bounds, at)),
                 (Zone::Group(group), Dragged::Node(_)) => (group, Drop::Side(nearest_side(bounds, at))),
-                (Zone::Header(node), Dragged::Node(_)) => {
-                    // The side is taken against the whole container, as below.
-                    let tray = Bounds::new(bounds.origin, size(bounds.size.width, bounds.size.height * 6.));
-                    (node, Drop::Side(nearest_side(tray, at)))
-                }
                 _ => return None,
             };
             Some(DropHint { target, drop, edge: false })
@@ -177,6 +167,60 @@ pub struct DropHint {
     pub drop: Drop,
     /// From the edge band: drawn over the whole area, not the target.
     pub edge: bool,
+}
+
+/// What the keys last went to, its border flashing in the primary colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flash {
+    Group(NodeId),
+    Tab(PaneId),
+}
+
+/// The numbers shown while the modifiers of the Focus Group or Open Tab
+/// commands are held: each group's, or each tab's in the active group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hints {
+    Groups,
+    Tabs,
+}
+
+/// The number the keys reach something by, over it: big over a group, small
+/// over a tab.
+fn number_badge(n: usize, big: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div().absolute().inset_0().flex().items_center().justify_center().child(
+        div()
+            .bg(theme.primary)
+            .text_color(theme.primary_foreground)
+            .font_weight(FontWeight::BOLD)
+            .opacity(0.85)
+            .map(|badge| {
+                if big {
+                    badge.rounded(px(16.)).px_8().py_2().text_size(px(96.)).line_height(px(104.))
+                } else {
+                    badge.rounded(px(4.)).px_1p5().text_xs().line_height(px(16.))
+                }
+            })
+            .child(n.to_string()),
+    )
+}
+
+/// A tab's flashing border, `alpha` strong. The tab clips its content to its
+/// inside, and this sits in the content, short of its edges: the border is
+/// painted along the clip instead, so it runs around the whole tab.
+fn tab_flash(alpha: f32, cx: &App) -> impl IntoElement {
+    let color = cx.theme().primary.alpha(alpha);
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, _| {
+            let bounds = window.content_mask().bounds;
+            window.paint_quad(quad(bounds, Corners::all(px(4.)), transparent_black(), Edges::all(px(2.)), color, BorderStyle::Solid));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// The side of `bounds` nearest the pointer, relative to its size.
@@ -233,6 +277,31 @@ fn drop_overlay(drop: Drop, cx: &App) -> impl IntoElement {
     .with_priority(2)
 }
 
+/// The kit's handle between two groups, its hairline tinted with a touch of
+/// the foreground so it also reads where the groups' tab strips meet: a theme
+/// may colour the strip with the border colour itself (den's dark theme does),
+/// and there the plain line vanished.
+fn group_divider() -> ResizeHandleRenderer {
+    let kit = resize_handle_appearance();
+    Rc::new(move |handle, window, cx| {
+        let line = kit(handle, window, cx)?;
+        let mut tint = cx.theme().foreground;
+        tint.a = 0.08;
+        Some(
+            div()
+                .relative()
+                .flex_none()
+                .map(|this| match handle.axis() {
+                    gpui::Axis::Horizontal => this.w(px(1.)).h_full(),
+                    gpui::Axis::Vertical => this.h(px(1.)).w_full(),
+                })
+                .child(line)
+                .child(div().absolute().inset_0().bg(tint))
+                .into_any_element(),
+        )
+    })
+}
+
 /// A flex child taking `share` of the space along the split.
 fn grow(element: Div, share: f32) -> Div {
     let mut element = element.flex_basis(px(0.)).flex_shrink_0();
@@ -277,16 +346,12 @@ impl Workspace {
         let remote = self.remote_drag.filter(|(over, _)| *over == float).map(|(_, at)| at);
         let remote_label = remote.and_then(|_| self.dragging).map(|dragged| match dragged {
             Dragged::Tab(pane) => self.panes.get(&pane).map_or_else(|| SharedString::from("Tab"), |pane| pane.label(cx)),
-            Dragged::Node(node) if self.tree.find(node).is_some_and(Node::is_group) => "Group".into(),
-            Dragged::Node(_) => "Container".into(),
+            Dragged::Node(_) => "Group".into(),
         });
         div()
             .id("groups")
             .relative()
             .size_full()
-            .p_1()
-            // The window's chrome, not the strip: tab bars stand out from it.
-            .bg(cx.theme().sidebar)
             // These run before the zones inside (capture order): the edge
             // bands win, and elsewhere the target starts empty for the zone
             // under the pointer to set.
@@ -405,8 +470,10 @@ impl Workspace {
         }
     }
 
-    // -- Splits and containers -----------------------------------------------
+    // -- Splits ------------------------------------------------------------------
 
+    /// A split's children along its axis, with a handle between each pair;
+    /// nothing of its own, so nested splits read as one arrangement.
     fn render_split(&self, id: NodeId, axis: Axis, children: &[Node], sizes: &[f32], window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let horizontal = axis == Axis::Horizontal;
         let mut body = if horizontal { h_flex() } else { v_flex() }
@@ -415,7 +482,7 @@ impl Workspace {
             .min_w_0()
             .min_h_0()
             .items_stretch()
-            .on_drag_move::<ResizeDrag>(cx.listener(move |this, event: &DragMoveEvent<ResizeDrag>, _, cx| {
+            .on_drag_move::<Rc<ResizeDrag>>(cx.listener(move |this, event: &DragMoveEvent<Rc<ResizeDrag>>, _, cx| {
                 let drag = event.drag(cx).clone();
                 if drag.split != id {
                     return;
@@ -431,108 +498,33 @@ impl Workspace {
                 this.changed(cx);
             }));
         for (ix, child) in children.iter().enumerate() {
-            if ix > 0 {
-                body = body.child(self.render_handle(id, ix - 1, horizontal, cx));
-            }
             let share = sizes.get(ix).copied().unwrap_or(1.0 / children.len() as f32);
             body = body.child(
                 grow(div(), share)
+                    // Not clipped: the handle's grip reaches over the child
+                    // before it, as the sidebar's does.
+                    .relative()
                     .min_w_0()
                     .min_h_0()
-                    .overflow_hidden()
-                    .child(self.render_node(child, window, cx)),
+                    .child(self.render_node(child, window, cx))
+                    // The line between this child and the one before: the
+                    // kit's own resize handle, as between the sidebar and the
+                    // groups, straddling the boundary.
+                    .when(ix > 0, |this| {
+                        this.child(
+                            resize_handle(SharedString::from(format!("split-handle-{id}-{ix}")), if horizontal { gpui::Axis::Horizontal } else { gpui::Axis::Vertical })
+                                .with_appearance(group_divider())
+                                .on_drag(ResizeDrag { split: id, ix: ix - 1 }, |_, _, _, cx| cx.new(|_| Nothing)),
+                        )
+                    }),
             );
         }
-
-        if self.tree.is_root(id) {
-            // A window's root holds every group in it and draws no frame.
-            return body.into_any_element();
-        }
-
-        let theme = cx.theme();
-        let current = self.defaults.own(id, true);
-        // A frame around its groups, not another surface: a faint line and
-        // barely a tint, so nesting shows as nested frames.
-        let frame = theme.muted_foreground.opacity(0.20);
-        let tray = theme.muted_foreground.opacity(0.04);
-        let hint = self.zone_overlay(id);
-        let hover_group = SharedString::from(format!("container-header-{id}"));
-
-        v_flex()
-            .id(("container", id))
-            .relative()
-            .size_full()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(frame)
-            .bg(tray)
-            .px(px(GUTTER))
-            .pb(px(GUTTER))
-            .child(
-                h_flex()
-                    .id(("container-header", id))
-                    // The header only: hovering a group inside must not
-                    // reveal the container's actions.
-                    .group(hover_group.clone())
-                    .relative()
-                    .flex_none()
-                    .h(px(HEADER))
-                    .gap_0p5()
-                    // The header is where a group or container drops beside
-                    // this container; the side is taken against the whole box.
-                    .on_drag_move::<GroupDrag>(cx.listener(move |this, event: &DragMoveEvent<GroupDrag>, _, cx| {
-                        if event.bounds.contains(&event.event.position) {
-                            let tray = Bounds::new(event.bounds.origin, size(event.bounds.size.width, event.bounds.size.height * 6.));
-                            this.zone_hint(id, Drop::Side(nearest_side(tray, event.event.position)), cx);
-                        }
-                    }))
-                    // The default button leads: its kind badge is state, so it
-                    // stays; with no kind it hides until the header is hovered.
-                    .child(
-                        div()
-                            .flex_none()
-                            .when(current.is_none(), |this| this.invisible().group_hover(hover_group.clone(), |this| this.visible()))
-                            .child(self.default_button(id, true, current, false, cx)),
-                    )
-                    // The rest of the header is the grip.
-                    .child(
-                        div()
-                            .id(("container-grip", id))
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .cursor_grab()
-                            .on_drag(GroupDrag { node: id }, |_, _, _, cx| cx.new(|_| DragLabel("Container".into()))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_0p5()
-                            .invisible()
-                            .group_hover(hover_group, |this| this.visible())
-                            .children(self.container_actions(id, "container", true, cx))
-                            .child(self.container_menu(id, cx)),
-                    )
-                    .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Header(id))),
-            )
-            .child(div().flex_1().min_h_0().child(body))
-            .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)))
-            .into_any_element()
+        body.into_any_element()
     }
 
-    fn render_handle(&self, split: NodeId, ix: usize, horizontal: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let hover = cx.theme().primary.opacity(0.5);
-        div()
-            .id(SharedString::from(format!("handle-{split}-{ix}")))
-            .flex_none()
-            .when(horizontal, |this| this.w(px(HANDLE)).h_full().cursor_col_resize())
-            .when(!horizontal, |this| this.h(px(HANDLE)).w_full().cursor_row_resize())
-            .hover(move |this| this.bg(hover))
-            .on_drag(ResizeDrag { split, ix }, |_, _, _, cx| cx.new(|_| Nothing))
-    }
-
-    /// Split and flip for a container, or the workspace when `node` is the
-    /// root (whose flip is offered only once it is a split).
-    pub(crate) fn container_actions(&self, node: NodeId, scope: &'static str, can_flip: bool, cx: &mut Context<Self>) -> Vec<Button> {
+    /// Split and flip for a window's root: the workspace, or a floating
+    /// window (whose flip is offered only once it is a split).
+    pub(crate) fn root_actions(&self, node: NodeId, scope: &'static str, can_flip: bool, cx: &mut Context<Self>) -> Vec<Button> {
         let mut buttons = vec![self.split_button(node, scope, false, cx)];
         if can_flip {
             buttons.push(
@@ -550,7 +542,7 @@ impl Workspace {
     /// One split button, as den's (and VS Code's): splits right, or down while
     /// Alt is held, its icon and tooltip following the key.
     pub(crate) fn split_button(&self, node: NodeId, scope: &'static str, small: bool, cx: &mut Context<Self>) -> Button {
-        let down = self.alt_held;
+        let down = self.held.alt;
         Button::new(("split", node))
             .map(|button| if small { button.small() } else { button.xsmall() })
             .ghost()
@@ -567,26 +559,23 @@ impl Workspace {
             }))
     }
 
-    /// The button that opens the default menu of a group or container. With a
-    /// kind set it shows that kind's icon, highlighted.
-    fn default_button(&self, node: NodeId, container: bool, current: Option<Kind>, small: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let scope = if container { "container" } else { "group" };
+    /// The button that opens a group's default menu. With a kind set it shows
+    /// that kind's icon, highlighted.
+    fn default_button(&self, group: NodeId, current: Option<Kind>, cx: &mut Context<Self>) -> impl IntoElement {
         let tooltip = match current {
-            Some(kind) => format!("Default {scope} for new {}", kind.label()),
-            None => format!("Make this {scope} the default for a kind of tab"),
+            Some(kind) => format!("Default group for new {}", kind.label()),
+            None => "Make this group the default for a kind of tab".to_string(),
         };
         let this = cx.weak_entity();
-        Button::new((if container { "container-default" } else { "group-default" }, node))
-            .map(|button| if small { button.small() } else { button.xsmall() })
+        Button::new(("group-default", group))
+            .small()
             .icon(Icon::new(current.map_or(IconName::SquareArrowDownRight, Kind::icon)))
             // Highlighted, not filled, as the sidebar's view buttons.
             .ghost()
             .selected(current.is_some())
             .tooltip(tooltip)
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu
-                    .check_side(MenuSide::Right)
-                    .label(format!("DEFAULT {} FOR", scope.to_uppercase()));
+                let mut menu = menu.check_side(MenuSide::Right).label("DEFAULT GROUP FOR");
                 for kind in Kind::ALL {
                     let this = this.clone();
                     menu = menu.item(
@@ -594,7 +583,7 @@ impl Workspace {
                             .icon(Icon::new(kind.icon()))
                             .checked(current == Some(kind))
                             .on_click(move |_, _, cx| {
-                                _ = this.update(cx, |this, cx| this.set_default(node, container, Some(kind), cx));
+                                _ = this.update(cx, |this, cx| this.set_default(group, Some(kind), cx));
                             }),
                     );
                 }
@@ -604,7 +593,7 @@ impl Workspace {
                         .icon(Icon::new(IconName::Minus))
                         .checked(current.is_none())
                         .on_click(move |_, _, cx| {
-                            _ = this.update(cx, |this, cx| this.set_default(node, container, None, cx));
+                            _ = this.update(cx, |this, cx| this.set_default(group, None, cx));
                         }),
                 )
             })
@@ -617,8 +606,15 @@ impl Workspace {
         let is_active = id == self.active_group;
         let shown = tabs.get(active).and_then(|pane| self.panes.get(pane)).cloned();
         let hint = self.zone_overlay(id);
-        let border = if is_active { theme.primary.opacity(0.7) } else { theme.border };
         let muted = theme.muted_foreground;
+        let tab_bar = theme.tab_bar;
+        let primary = theme.primary;
+        // Its number for Focus Group, while the keys ask for them (none past
+        // the commands there are).
+        let number = (self.hints == Some(Hints::Groups))
+            .then(|| self.tree.groups().iter().position(|g| *g == id).map(|ix| ix + 1).filter(|n| *n <= 8))
+            .flatten();
+        let flash = self.flash_alpha(Flash::Group(id), window);
 
         let content = div()
             .id(("group-body", id))
@@ -652,20 +648,34 @@ impl Workspace {
                 ),
             })
             .child(zone_marker(&self.zones, self.tree.float_of(id), Zone::Group(id)))
+            // Over the pane's content, as the drop overlay is.
+            .when_some(number, |this, n| this.child(deferred(number_badge(n, true, cx)).with_priority(1)))
             .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)));
 
+        // No frame of its own: the lines between groups are the handles. The
+        // active group is the one whose strip is not dimmed, as in VS Code.
         v_flex()
             .id(("group", id))
+            .relative()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(border)
             .overflow_hidden()
             .capture_any_mouse_down(cx.listener(move |this, _, _, cx| this.set_active_group(id, cx)))
-            .child(self.render_tab_strip(id, tabs, active, window, cx))
+            .child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    // Under the strip, so dimming fades its tabs and not its colour.
+                    .bg(tab_bar)
+                    .child(div().when(!is_active, |this| this.opacity(0.6)).child(self.render_tab_strip(id, tabs, active, window, cx))),
+            )
             .child(content)
+            // The keys came here: a border round the whole group, strip and
+            // all, fading out.
+            .when_some(flash, |this, alpha| {
+                this.child(deferred(div().absolute().inset_0().border_2().border_color(primary.alpha(alpha))).with_priority(1))
+            })
             .into_any_element()
     }
 
@@ -688,6 +698,9 @@ impl Workspace {
         // A drag from another window over this strip (see `hint_at`).
         let float = self.tree.float_of(group);
         let strip_hint = self.strip_hint(group);
+        // Open Tab's numbers, while the keys ask for them: the active
+        // group's tabs count 1…9, and 0 is the last.
+        let numbered = self.hints == Some(Hints::Tabs) && group == self.active_group;
         let tab_elements: Vec<Tab> = tabs
             .iter()
             .enumerate()
@@ -697,6 +710,13 @@ impl Workspace {
                 let label = pane.label(cx);
                 let dirty = pane.is_dirty(cx);
                 let preview = self.preview == Some(pane_id);
+                let number = match ix {
+                    _ if !numbered => None,
+                    0..=8 => Some(ix + 1),
+                    _ if ix + 1 == tabs.len() => Some(0),
+                    _ => None,
+                };
+                let flash = self.flash_alpha(Flash::Tab(pane_id), window);
                 Some(
                     Tab::new()
                         .when(strip_hint == Some(Some(ix)), |tab| tab.border_l_2().border_color(cx.theme().drag_border))
@@ -710,7 +730,9 @@ impl Workspace {
                                     this.child(div().size(px(7.)).rounded_full().flex_none().bg(cx.theme().warning))
                                 })
                                 .child(div().max_w(px(220.)).truncate().when(preview, |this| this.italic()).child(label.clone()))
-                                .when(dirty, |this| this.child("●")),
+                                .when(dirty, |this| this.child("●"))
+                                .when_some(number, |this, n| this.child(number_badge(n, false, cx)))
+                                .when_some(flash, |this, alpha| this.child(tab_flash(alpha, cx))),
                         )
                         .when(close_buttons, |tab| tab.suffix(
                             Button::new(("close-tab", pane_id))
@@ -750,36 +772,43 @@ impl Workspace {
             })
             .collect();
 
-        let current = self.defaults.own(group, false);
-        let actions = h_flex()
-            .h_full()
-            .flex_none()
-            .px_1()
-            .gap_0p5()
-            .bg(theme.tab_bar)
-            // The terminal presets, as den's preset buttons; a group that is the
-            // default of another kind does not get the buttons for this one.
-            .when(buttons.shell && self.defaults.allows(&self.tree, group, Kind::Terminals), |this| this.child(
+        let current = self.defaults.get(group);
+        // The buttons that open something here: the shell, the browser and
+        // the pinned presets; a group that is the default of another kind does
+        // not get the buttons for this one. A rule sets them apart from the
+        // buttons that act on the group itself.
+        let mut openers: Vec<AnyElement> = Vec::new();
+        if buttons.shell && self.defaults.allows(group, Kind::Terminals) {
+            openers.push(
                 Button::new(("group-shell", group))
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::SquareTerminal))
                     .tooltip(crate::keymap::with_keys("New Terminal", &crate::NewTerminal, cx))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(Some(group), None, false, window, cx))),
-            ))
-            .when(buttons.browser && self.defaults.allows(&self.tree, group, Kind::Browsers), |this| this.child(
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_terminal(Some(group), None, false, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        if buttons.browser && self.defaults.allows(group, Kind::Browsers) {
+            openers.push(
                 Button::new(("group-browser", group))
                     .small()
                     .ghost()
                     .icon(Icon::new(IconName::Globe))
                     .tooltip(crate::keymap::with_keys("New Browser", &crate::NewBrowser, cx))
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_browser(Some(group), None, window, cx))),
-            ))
-            .children(Settings::get(cx).presets.iter().enumerate().filter(|(_, preset)| {
-                preset.pinned && self.defaults.allows(&self.tree, group, preset.kind())
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_browser(Some(group), None, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        openers.extend(
+            Settings::get(cx).presets.iter().enumerate().filter(|(_, preset)| {
+                preset.pinned && self.defaults.allows(group, preset.kind())
             }).map(|(ix, preset)| {
                 let launch = preset.clone();
                 let name = preset.name.clone();
+                // Its place among the pinned presets is its Open Preset command's number.
+                let pinned = Settings::get(cx).presets.iter().take(ix).filter(|p| p.pinned).count() + 1;
+                let tooltip = crate::keymap::with_keys(&format!("{} ({})", preset.name, preset.command), &crate::OpenPreset(pinned), cx);
                 // Drag a preset's button onto another to put it there, as in den.
                 div()
                     .id(SharedString::from(format!("preset-slot-{group}-{ix}")))
@@ -801,7 +830,7 @@ impl Workspace {
                             .small()
                             .ghost()
                             .child(preset_badge(preset, cx))
-                            .tooltip(format!("{} ({})", preset.name, preset.command))
+                            .tooltip(tooltip)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if launch.browser {
                                     this.open_browser(Some(group), Some(launch.command.clone()), window, cx);
@@ -810,7 +839,20 @@ impl Workspace {
                                 }
                             })),
                     )
-            }))
+                    .into_any_element()
+            }),
+        );
+        let mut rule = theme.foreground;
+        rule.a = 0.25;
+        let actions = h_flex()
+            .h_full()
+            .flex_none()
+            .px_1()
+            .gap_0p5()
+            .bg(theme.tab_bar)
+            .when(!openers.is_empty(), |this| {
+                this.children(openers).child(div().flex_none().w(px(1.)).h_4().mx_0p5().bg(rule))
+            })
             .when(buttons.split, |this| this.child(self.split_button(group, "group", true, cx)))
             // An empty group closes with its own X, as in den (not the last one).
             .when(tabs.is_empty() && self.tree.groups().len() > 1, |this| {
@@ -830,8 +872,8 @@ impl Workspace {
             // strip does not grow when its first tab opens.
             .min_h(px(32.))
             .track_scroll(&handle)
-            // The group's default leads the strip, as the container's does its header.
-            .prefix(h_flex().h_full().flex_none().px_1().bg(cx.theme().tab_bar).child(self.default_button(group, false, current, true, cx)))
+            // The group's default leads the strip.
+            .prefix(h_flex().h_full().flex_none().px_1().bg(cx.theme().tab_bar).child(self.default_button(group, current, cx)))
             .children(tab_elements)
             .last_empty_space(
                 div()
@@ -989,38 +1031,12 @@ impl Workspace {
         menu.item(menu_action(this, "Move into Main Window", move |ws, _, cx| ws.dock_tab(pane, cx)).icon(Icon::new(IconName::Minimize)))
     }
 
-    /// The container's ⋮ menu.
-    fn container_menu(&self, node: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.weak_entity();
-        let floating = self.tree.float_of(node).is_some();
-        Button::new(("container-menu", node))
-            .xsmall()
-            .ghost()
-            .icon(Icon::new(IconName::EllipsisVertical))
-            .tooltip("Container")
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let item = |label: &'static str, action: fn(&mut Workspace, NodeId, &mut Window, &mut Context<Workspace>)| {
-                    let this = this.clone();
-                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        _ = this.update(cx, |this, cx| action(this, node, window, cx));
-                    })
-                };
-                menu.item(item("Add Group Right", |this, node, _, cx| this.split(node, Side::Right, cx)).icon(Icon::new(IconName::Columns2)))
-                    .item(item("Add Group Below", |this, node, _, cx| this.split(node, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
-                    .item(item("Flip Layout", |this, node, _, cx| this.flip(node, cx)).icon(Icon::new(IconName::RotateCw)))
-                    .separator()
-                    .map(|menu| window_items(menu, &this, node, floating))
-                    .separator()
-                    .item(item("Close Container", |this, node, window, cx| this.request_close_container(node, window, cx)))
-            })
-    }
-
     /// The group's ⋮ menu.
     fn group_menu(&self, group: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let floating = self.tree.float_of(group).is_some();
         // The kinds of tab this group takes: its menu lists only their buttons.
-        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| self.defaults.allows(&self.tree, group, *kind)).collect();
+        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| self.defaults.allows(group, *kind)).collect();
         Button::new(("group-menu", group))
             .small()
             .ghost()
@@ -1063,8 +1079,8 @@ fn path_items(menu: PopupMenu, this: &WeakEntity<Workspace>, path: &std::path::P
         )
 }
 
-/// Moving a group or container into a window of its own, or (in a floating
-/// window) back into the main one, as VS Code's editor groups.
+/// Moving a group into a window of its own, or (in a floating window) back
+/// into the main one, as VS Code's editor groups.
 fn window_items(menu: PopupMenu, this: &WeakEntity<Workspace>, node: NodeId, floating: bool) -> PopupMenu {
     let new_window = this.clone();
     let menu = menu.item(PopupMenuItem::new("Move into New Window").icon(Icon::new(IconName::ExternalLink)).on_click(move |_, _, cx| {
@@ -1128,10 +1144,9 @@ mod tests {
 
     #[test]
     fn drops_from_another_window_follow_its_zones() {
-        // Area 1 holds container 10 (header at the top) with groups 2 and 3 side by side.
+        // Area 1 holds groups 2 and 3 side by side, under their strips.
         let zones = [
             (Zone::Area(1), rect(0., 0., 1000., 600.)),
-            (Zone::Header(10), rect(40., 40., 920., 24.)),
             (Zone::Group(2), rect(40., 64., 460., 500.)),
             (Zone::Group(3), rect(500., 64., 460., 500.)),
         ];
@@ -1143,9 +1158,10 @@ mod tests {
         // A tab joins a group in its middle, or starts one beside it.
         assert_eq!(hint(tab, 270., 300.), Some(DropHint { target: 2, drop: Drop::Center, edge: false }));
         assert_eq!(hint(tab, 950., 300.), Some(DropHint { target: 3, drop: Drop::Side(Side::Right), edge: false }));
-        // A group never joins: beside the group, or the container by its header.
+        // A group never joins: it goes beside the group.
         assert!(matches!(hint(group, 270., 300.), Some(DropHint { target: 2, drop: Drop::Side(_), edge: false })));
-        assert_eq!(hint(group, 60., 50.), Some(DropHint { target: 10, drop: Drop::Side(Side::Left), edge: false }));
+        // Above the groups there is nothing to drop on.
+        assert_eq!(hint(group, 60., 50.), None);
         assert_eq!(hint(tab, 500., 50.), None);
     }
 

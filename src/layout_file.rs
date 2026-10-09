@@ -1,5 +1,5 @@
 //! The arrangement kept in the session folder itself, as den does: groups,
-//! containers, sizes, default groups and tabs go to `.den/layout.json`
+//! splits, sizes, default groups and tabs go to `.den/layout.json`
 //! whenever they change, and come back from there first, so the layout goes
 //! with the folder. A file that does not load is replaced on the next
 //! change.

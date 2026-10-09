@@ -1,10 +1,8 @@
-//! Default groups: a group or container can be the default for a kind of
-//! tab, and new tabs of that kind land there, whichever group is active.
+//! Default groups: a group can be the default for a kind of tab, and new tabs
+//! of that kind land there, whichever group is active.
 //!
-//! A group's own setting wins over its container's; setting a container
-//! replaces the settings inside it. Keyed by node ids, which the layout keeps
-//! stable, so a setting survives saves and every edit but the removal of its
-//! node; a container that collapses into one group hands its setting to it.
+//! Keyed by node ids, which the layout keeps stable, so a setting survives
+//! saves and every edit but the removal of its group.
 
 use std::collections::HashMap;
 
@@ -48,8 +46,6 @@ impl Kind {
 pub struct GroupDefault {
     pub kind: Kind,
     pub node: NodeId,
-    #[serde(default)]
-    pub container: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -74,28 +70,15 @@ impl Defaults {
         self.list.clear();
     }
 
-    /// The setting of exactly this group or container.
-    pub fn own(&self, node: NodeId, container: bool) -> Option<Kind> {
-        self.list
-            .iter()
-            .find(|d| d.node == node && d.container == container)
-            .map(|d| d.kind)
-    }
-
-    /// What a group follows: its own setting, else its nearest container's.
-    pub fn effective(&self, tree: &Tree, group: NodeId) -> Option<Kind> {
-        self.own(group, false).or_else(|| {
-            tree.ancestors(group)
-                .into_iter()
-                .rev()
-                .find_map(|split| self.own(split, true))
-        })
+    /// The kind `group` is the default for, if any.
+    pub fn get(&self, group: NodeId) -> Option<Kind> {
+        self.list.iter().find(|d| d.node == group).map(|d| d.kind)
     }
 
     /// Whether a new tab of `kind` may open in `group`: the group is not the
     /// default of another kind, and when `kind` has defaults it is one.
-    pub fn allows(&self, tree: &Tree, group: NodeId, kind: Kind) -> bool {
-        let own = self.effective(tree, group);
+    pub fn allows(&self, group: NodeId, kind: Kind) -> bool {
+        let own = self.get(group);
         let has_defaults = self.list.iter().any(|d| d.kind == kind);
         own.is_none_or(|own| own == kind) && (!has_defaults || own == Some(kind))
     }
@@ -104,11 +87,7 @@ impl Defaults {
     /// else the one of those used last, else the first. `None` when no
     /// group may take it.
     pub fn target(&self, tree: &Tree, kind: Kind, active: Option<NodeId>) -> Option<NodeId> {
-        let allowed: Vec<NodeId> = tree
-            .groups()
-            .into_iter()
-            .filter(|g| self.allows(tree, *g, kind))
-            .collect();
+        let allowed: Vec<NodeId> = tree.groups().into_iter().filter(|g| self.allows(*g, kind)).collect();
         active
             .into_iter()
             .chain(self.recent.iter().copied())
@@ -123,33 +102,21 @@ impl Defaults {
         }
     }
 
-    /// Set or clear the default of a group or container.
-    pub fn set(&mut self, tree: &Tree, node: NodeId, container: bool, kind: Option<Kind>) {
-        self.list.retain(|d| !(d.node == node && d.container == container));
+    /// Set or clear the default of a group.
+    pub fn set(&mut self, group: NodeId, kind: Option<Kind>) {
+        self.list.retain(|d| d.node != group);
         if let Some(kind) = kind {
-            if container {
-                self.list
-                    .retain(|d| d.node == node || !tree.contains(node, d.node));
-            }
-            self.list.push(GroupDefault { kind, node, container });
+            self.list.push(GroupDefault { kind, node: group });
         }
     }
 
     /// Bring the settings in line with the tree after an edit: follow
-    /// collapsed splits, hand a container's setting to the group it became,
-    /// and drop settings whose node is gone.
+    /// collapsed splits and drop settings whose group is gone.
     pub fn prune(&mut self, tree: &Tree, remap: &HashMap<NodeId, NodeId>) {
         let mut kept: Vec<GroupDefault> = Vec::new();
         for mut d in std::mem::take(&mut self.list) {
             d.node = resolve(remap, d.node);
-            match tree.find(d.node) {
-                None => continue,
-                Some(Node::Group { .. }) if d.container => d.container = false,
-                Some(Node::Split { .. }) if !d.container => continue,
-                _ => {}
-            }
-            // A group's own setting beats one handed down by a collapse.
-            if kept.iter().any(|k| k.node == d.node && k.container == d.container) {
+            if !tree.find(d.node).is_some_and(Node::is_group) || kept.iter().any(|k| k.node == d.node) {
                 continue;
             }
             kept.push(d);
@@ -191,56 +158,63 @@ mod tests {
     }
 
     #[test]
-    fn a_container_default_routes_to_its_groups() {
+    fn a_default_routes_its_kind_to_the_group() {
         let tree = tree();
         let mut defaults = Defaults::default();
-        defaults.set(&tree, 11, true, Some(Kind::Files));
+        defaults.set(2, Some(Kind::Files));
         assert_eq!(defaults.target(&tree, Kind::Files, Some(1)), Some(2));
-        assert!(!defaults.allows(&tree, 1, Kind::Files));
-        assert!(defaults.allows(&tree, 1, Kind::Terminals));
-        assert!(!defaults.allows(&tree, 3, Kind::Terminals));
+        assert!(!defaults.allows(1, Kind::Files));
+        assert!(defaults.allows(1, Kind::Terminals));
+        assert!(!defaults.allows(2, Kind::Terminals));
     }
 
     #[test]
-    fn a_groups_own_setting_beats_its_container() {
-        let tree = tree();
+    fn setting_a_group_again_replaces_its_kind() {
         let mut defaults = Defaults::default();
-        defaults.set(&tree, 11, true, Some(Kind::Files));
-        defaults.set(&tree, 3, false, Some(Kind::Terminals));
-        assert_eq!(defaults.effective(&tree, 3), Some(Kind::Terminals));
-        assert_eq!(defaults.effective(&tree, 2), Some(Kind::Files));
-        // Setting the container again replaces the settings inside it.
-        defaults.set(&tree, 11, true, Some(Kind::Agents));
-        assert_eq!(defaults.effective(&tree, 3), Some(Kind::Agents));
+        defaults.set(3, Some(Kind::Files));
+        defaults.set(3, Some(Kind::Agents));
+        assert_eq!(defaults.get(3), Some(Kind::Agents));
+        defaults.set(3, None);
+        assert_eq!(defaults.get(3), None);
     }
 
     #[test]
     fn the_last_used_allowed_group_wins() {
         let tree = tree();
         let mut defaults = Defaults::default();
-        defaults.set(&tree, 11, true, Some(Kind::Files));
+        defaults.set(2, Some(Kind::Files));
+        defaults.set(3, Some(Kind::Files));
         defaults.activate(3);
         defaults.activate(1);
         assert_eq!(defaults.target(&tree, Kind::Files, Some(1)), Some(3));
     }
 
     #[test]
-    fn a_collapsed_container_hands_its_setting_to_the_group() {
+    fn a_closed_groups_setting_goes() {
         let mut tree = tree();
         let mut defaults = Defaults::default();
-        defaults.set(&tree, 11, true, Some(Kind::Files));
+        defaults.set(3, Some(Kind::Files));
         let (_, remap) = tree.detach(3).unwrap();
         defaults.prune(&tree, &remap);
-        assert_eq!(defaults.own(2, false), Some(Kind::Files));
+        assert_eq!(defaults.get(3), None);
     }
 
     #[test]
-    fn settings_follow_moved_nodes() {
+    fn settings_follow_moved_groups() {
         let mut tree = tree();
         let mut defaults = Defaults::default();
-        defaults.set(&tree, 11, true, Some(Kind::Files));
-        let remap = tree.move_node(11, 1, Side::Left).unwrap();
+        defaults.set(3, Some(Kind::Files));
+        let remap = tree.move_node(3, 1, Side::Left).unwrap();
         defaults.prune(&tree, &remap);
-        assert_eq!(defaults.own(11, true), Some(Kind::Files));
+        assert_eq!(defaults.get(3), Some(Kind::Files));
+    }
+
+    #[test]
+    fn a_saved_container_setting_is_dropped() {
+        // Older layouts could make a container the default; those settings
+        // sit on a split now and go.
+        let tree = tree();
+        let defaults = Defaults::from_saved(vec![GroupDefault { kind: Kind::Files, node: 11 }, GroupDefault { kind: Kind::Agents, node: 1 }], &tree);
+        assert_eq!(defaults.saved(), vec![GroupDefault { kind: Kind::Agents, node: 1 }]);
     }
 }
