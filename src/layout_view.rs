@@ -185,24 +185,27 @@ pub enum Hints {
 }
 
 /// The number the keys reach something by, over it: big over a group, small
-/// over a tab.
+/// over a tab. The target dims under a translucent black wash, and the number
+/// sits in it in a faded foreground, so the hints read without shouting.
 fn number_badge(n: usize, big: bool, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    div().absolute().inset_0().flex().items_center().justify_center().child(
-        div()
-            .bg(theme.primary)
-            .text_color(theme.primary_foreground)
-            .font_weight(FontWeight::BOLD)
-            .opacity(0.85)
-            .map(|badge| {
-                if big {
-                    badge.rounded(px(16.)).px_8().py_2().text_size(px(96.)).line_height(px(104.))
-                } else {
-                    badge.rounded(px(4.)).px_1p5().text_xs().line_height(px(16.))
-                }
-            })
-            .child(n.to_string()),
-    )
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(black().alpha(if big { 0.4 } else { 0.55 }))
+        .text_color(theme.foreground.alpha(0.6))
+        .font_weight(FontWeight::BOLD)
+        .map(|badge| {
+            if big {
+                badge.text_size(px(96.)).line_height(px(104.))
+            } else {
+                badge.text_xs().line_height(px(16.))
+            }
+        })
+        .child(n.to_string())
 }
 
 /// A tab's flashing border, `alpha` strong. The tab clips its content to its
