@@ -377,7 +377,7 @@ This stages it as `<id>.pending`, the same way an install does. den can stay ope
 - every `host.log` line;
 - den's notes, such as a keybinding it couldn't read or a call for a window that isn't open.
 
-**A separate den for testing.** den keeps everything under `%APPDATA%\den`. Set `APPDATA` to another folder to run a den with its own extensions, settings and state, without touching your own:
+**A separate den for testing.** den keeps everything under `%APPDATA%\den`; a debug build of den itself uses `%APPDATA%\den-dev` (`node scripts/sideload.ts --dev <folder>` loads into that one). Set `APPDATA` to another folder to run a den with its own extensions, settings and state, without touching your own:
 
 ```powershell
 $env:APPDATA = "C:\temp\den-test"; & "path\to\den.exe" C:\some\project

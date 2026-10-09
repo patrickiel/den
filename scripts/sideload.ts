@@ -1,6 +1,6 @@
 // Build an extension and side-load it into den, which picks it up at its next start:
 //   node scripts/sideload.ts examples/hello-extension
-// Without a folder it offers the repository's extensions. It goes in as `<id>.pending`, as an
+// `--dev` loads it into a debug build of den, which keeps its own folder (`den-dev`). Without a folder it offers the repository's extensions. It goes in as `<id>.pending`, as an
 // install from the Extensions view does, so den can stay open (a loaded library stays locked
 // until den exits). Node runs the TypeScript directly (Node 22.18+).
 
@@ -11,12 +11,15 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 const ROOT = join(import.meta.dirname, "..");
+const DEV = process.argv.includes("--dev");
+const ARGS = process.argv.slice(2).filter((a) => a !== "--dev");
 
-/** den's data folder, as src/settings.rs picks it. */
+/** den's data folder, as src/settings.rs picks it (a debug build's with `--dev`). */
 function dataDir(): string {
-  if (process.platform === "win32") return join(process.env.APPDATA ?? "", "den");
-  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", "den");
-  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "den");
+  const name = DEV ? "den-dev" : "den";
+  if (process.platform === "win32") return join(process.env.APPDATA ?? "", name);
+  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", name);
+  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), name);
 }
 
 /** The library's file name, as Cargo names a cdylib crate called `id`. */
@@ -48,7 +51,7 @@ async function pickFolder(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const folder = process.argv[2] ?? (await pickFolder());
+  const folder = ARGS[0] ?? (await pickFolder());
   const manifestPath = join(folder, "extension.json");
   if (!existsSync(manifestPath)) throw new Error(`No extension.json in ${folder}`);
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

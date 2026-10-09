@@ -181,6 +181,24 @@ fn wsl_target(setting: &str, shell: &str, cwd: &Path) -> Option<Option<String>> 
     Some(target.or_else(wsl::default_distro))
 }
 
+/// Whether a preset's command is a shell (`wsl -d Ubuntu`, `bash`, `pwsh`):
+/// its terminal runs that in place of the default shell, not inside it, so
+/// it gets den's integration for that shell.
+pub fn is_shell(command: &str) -> bool {
+    let command = command.trim();
+    if cfg!(windows) && wsl::shell(command).is_some() {
+        return true;
+    }
+    !command.contains(char::is_whitespace)
+        && matches!(exe_name(command).to_lowercase().as_str(), "bash" | "zsh" | "fish" | "nu" | "sh" | "pwsh" | "powershell" | "cmd")
+}
+
+/// The title bash's usual prompt sets, as Ubuntu's `.bashrc` does:
+/// `me@host: ~/den` (or `me@host:~/den`).
+fn is_prompt_title(title: &str) -> bool {
+    title.split_once(':').is_some_and(|(who, _)| who.contains('@') && !who.contains(char::is_whitespace))
+}
+
 /// `pwsh` for `C:\…\pwsh.exe`.
 fn exe_name(path: &str) -> String {
     Path::new(path)
@@ -306,13 +324,19 @@ impl TerminalPanel {
         };
         let term = Term::new(config, &GridSize { columns, lines }, events.clone());
         let focus_handle = cx.focus_handle();
-        let shell = shell(&settings.shell);
-        let wsl = wsl_target(&settings.shell, &shell, &cwd);
+        // A preset that is a shell runs as the shell, with nothing to run first.
+        let own_shell = program.as_deref().is_some_and(is_shell);
+        let shell = match &program {
+            Some(program) if own_shell => program.trim().to_string(),
+            _ => shell(&settings.shell),
+        };
+        let wsl = wsl_target(if own_shell { &shell } else { &settings.shell }, &shell, &cwd);
+        let command = command.filter(|_| !own_shell);
         let shell_name = match &wsl {
             Some(distro) => distro.clone().unwrap_or_else(|| "wsl".into()),
             None => exe_name(&shell),
         };
-        let program_is_set = program.is_some();
+        let program_is_set = program.is_some() && !own_shell;
         let mut this = Self {
             focus_handle,
             cwd,
@@ -841,7 +865,9 @@ impl TerminalPanel {
     fn tab_label(&self, cx: &App) -> SharedString {
         if let Some(title) = &self.title {
             let title = title.trim();
-            if !title.is_empty() {
+            // A shell's own `me@host: ~/den` says nothing the tab needs: the
+            // shell's name instead, as for PowerShell.
+            if !title.is_empty() && !is_prompt_title(title) {
                 // PowerShell names its window after its executable; show the
                 // shell's name instead of the path.
                 if title.to_lowercase().ends_with(".exe") {
@@ -926,18 +952,26 @@ impl Pane for TerminalPanel {
     }
 
     /// The mark of the program running here, as den shows it: its preset's
-    /// icon, else a known CLI's logo; the terminal icon otherwise.
+    /// icon, else a known CLI's logo (WSL's for a WSL shell); the terminal
+    /// icon otherwise.
     fn icon_element(&self, cx: &App) -> Option<AnyElement> {
         let program = if self.program_running {
             self.program.clone()?
         } else if self.claude_session.is_some() || self.title.as_ref().is_some_and(|t| t.contains("Claude Code")) {
             "claude".to_string()
+        } else if let Some(shell) = self.program.as_ref().filter(|p| is_shell(p)) {
+            shell.clone()
+        } else if self.wsl.is_some() {
+            "wsl".to_string()
         } else {
             return None;
         };
         let settings = Settings::get(cx);
         if let Some(preset) = settings.presets.iter().find(|p| !p.browser && p.command.trim() == program.trim()) {
             return Some(crate::preset_icon::render(preset, preset.icon.as_deref(), 16., cx));
+        }
+        if wsl::shell(&program).is_some() {
+            return Some(crate::preset_icon::render(&crate::settings::Preset::new(program.clone(), program), None, 16., cx));
         }
         crate::preset_icon::has_program_logo(&program).then(|| {
             let preset = crate::settings::Preset { agent: true, pinned: false, ..crate::settings::Preset::new(program.clone(), program.clone()) };
@@ -955,7 +989,7 @@ impl Pane for TerminalPanel {
             "program": self.program,
             "agent": self.agent,
             // A shell brings its last screens back; a program redraws itself.
-            "scrollback": if self.program.is_none() && self.claude_session.is_none() { self.scrollback(500) } else { String::new() },
+            "scrollback": if self.program.as_deref().is_none_or(is_shell) && self.claude_session.is_none() { self.scrollback(500) } else { String::new() },
             // The Claude Code conversation to bring back, as den does.
             "resume": self.claude_session.as_ref().map(|session| agent::claude_resume(self.program.as_deref(), session.as_deref(), session.is_none())),
         })
@@ -985,9 +1019,13 @@ impl Render for TerminalPanel {
                 this.copy(cx);
             }))
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
-            // The menu bar's Edit > Copy and Paste (macOS).
+            // The menu bar's Edit > Copy and Paste (macOS). Elsewhere gpui binds
+            // Ctrl+C to this Copy too, before the key reaches `on_key_down`:
+            // with nothing selected it interrupts, as the key does.
             .on_action(cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
-                this.copy(cx);
+                if !this.copy(cx) && !crate::ui::COMMAND_KEY {
+                    this.input(b"\x03", cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
@@ -1030,7 +1068,20 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, GridSize, Listener, Processor, Term, tail_text};
+    use super::{Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text};
+
+    #[test]
+    fn prompt_titles() {
+        assert!(is_prompt_title("patri@Patrick-PC: /mnt/c/Users/patri") && is_prompt_title("me@box:~/den"));
+        assert!(!is_prompt_title("✳ Claude Code") && !is_prompt_title("vim: notes.md") && !is_prompt_title("Mail me@x: hi"));
+    }
+
+    #[test]
+    fn shell_presets() {
+        assert!(is_shell("bash") && is_shell("/opt/homebrew/bin/fish") && is_shell("pwsh.exe"));
+        assert!(!is_shell("claude") && !is_shell("bash ./run.sh") && !is_shell("pnpm dev"));
+        assert_eq!(is_shell("wsl -d Ubuntu"), cfg!(windows));
+    }
 
     #[test]
     fn scrollback_keeps_the_last_lines() {

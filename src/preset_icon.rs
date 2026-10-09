@@ -31,6 +31,7 @@ pub const LOGOS: &[(&str, &str, bool)] = &[
     ("kiro", "Kiro", true),
     ("junie", "Junie", true),
     ("openhands", "OpenHands", true),
+    ("linux", "Linux", false),
 ];
 
 /// The logo of each program that has one, by the command that runs it.
@@ -162,7 +163,13 @@ fn look(preset: &Preset, icon: Option<&str>) -> Look {
         return local_port(&preset.command).map_or_else(letter, Look::Port);
     }
     let command = preset.command.trim();
-    if command.is_empty() {
+    if cfg!(windows)
+        && crate::backend::wsl::shell(command).is_some()
+        && let Some(look) = logo_look("linux")
+    {
+        return look;
+    }
+    if command.is_empty() || crate::terminal::is_shell(command) {
         return Look::Glyph("presets/glyphs/terminal-window.svg".into());
     }
     let program = crate::backend::agent::program_of(command.split_whitespace().next().unwrap_or(command));

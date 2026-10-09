@@ -1331,7 +1331,7 @@ impl Workspace {
     pub(crate) fn open_settings_at(&mut self, section: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.new(|cx| SettingsPanel::new(window, cx));
         if let Some(section) = section {
-            view.read(cx).show_section(section);
+            view.update(cx, |view, _| view.show_section(section));
         }
         let viewport = window.viewport_size();
         let height = (viewport.height - px(140.)).max(px(320.));

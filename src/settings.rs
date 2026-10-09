@@ -182,6 +182,19 @@ impl Preset {
     }
 }
 
+/// Claude Code and Codex; on Windows with WSL installed, a shell in its
+/// default distribution too.
+pub fn default_presets() -> Vec<Preset> {
+    let mut presets = vec![
+        Preset { agent: true, ..Preset::new("Claude Code", "claude") },
+        Preset { agent: true, ..Preset::new("Codex", "codex") },
+    ];
+    if crate::backend::wsl::default_distro().is_some() {
+        presets.push(Preset::new("WSL", "wsl"));
+    }
+    presets
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -206,7 +219,7 @@ impl Default for Settings {
             ai_gpu: true,
             ai_system_prompt: crate::backend::ai::DEFAULT_COMMIT_STYLE.to_string(),
             ai_derive_style: true,
-            presets: vec![Preset { agent: true, ..Preset::new("Claude Code", "claude") }],
+            presets: default_presets(),
             notifications: true,
             notify_toast: true,
             notify_tab: true,
@@ -417,7 +430,19 @@ pub fn strip_verbatim(path: PathBuf) -> PathBuf {
 
 /// Where den keeps its files: `%APPDATA%\den` on Windows,
 /// `~/Library/Application Support/den` on macOS, `~/.config/den` elsewhere.
+/// A debug build keeps its own, `den-dev` beside it, so working on den
+/// neither reads nor changes the installed app's settings and state.
 pub(crate) fn data_dir() -> PathBuf {
+    app_dir(if cfg!(debug_assertions) { "den-dev" } else { "den" })
+}
+
+/// The installed app's folder, for downloads a debug build shares with it
+/// (the AI runtime and models, the formatters) rather than fetching again.
+pub(crate) fn download_dir() -> PathBuf {
+    app_dir("den")
+}
+
+fn app_dir(name: &str) -> PathBuf {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
@@ -426,7 +451,7 @@ pub(crate) fn data_dir() -> PathBuf {
     } else {
         std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|home| home.join(".config")))
     };
-    base.unwrap_or_else(|| PathBuf::from(".")).join("den")
+    base.unwrap_or_else(|| PathBuf::from(".")).join(name)
 }
 
 /// The most recent folder that still exists, read before the app starts.

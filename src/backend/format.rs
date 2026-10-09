@@ -513,7 +513,7 @@ pub fn kit_for(path: &Path) -> Option<&'static Kit> {
 }
 
 fn tools_dir() -> PathBuf {
-    crate::settings::data_dir().join("tools")
+    crate::settings::download_dir().join("tools")
 }
 
 /// dprint's cache (compiled plugins, the Prettier program), den's own.

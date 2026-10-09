@@ -34,6 +34,7 @@ static FILES: &[(&str, &[u8])] = &[
     ("presets/logos/junie-color.svg", include_bytes!("../assets/presets/logos/junie-color.svg")),
     ("presets/logos/openhands.svg", include_bytes!("../assets/presets/logos/openhands.svg")),
     ("presets/logos/openhands-color.svg", include_bytes!("../assets/presets/logos/openhands-color.svg")),
+    ("presets/logos/linux.svg", include_bytes!("../assets/presets/logos/linux.svg")),
     ("presets/glyphs/number-one.svg", include_bytes!("../assets/presets/glyphs/number-one.svg")),
     ("presets/glyphs/number-two.svg", include_bytes!("../assets/presets/glyphs/number-two.svg")),
     ("presets/glyphs/number-three.svg", include_bytes!("../assets/presets/glyphs/number-three.svg")),

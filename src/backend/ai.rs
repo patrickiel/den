@@ -124,7 +124,7 @@ pub struct AiConfig {
 }
 
 fn ai_dir() -> PathBuf {
-    crate::settings::data_dir().join("ai")
+    crate::settings::download_dir().join("ai")
 }
 
 fn runtime_dir() -> PathBuf {

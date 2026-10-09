@@ -208,11 +208,12 @@ pub fn normalize(keys: &str) -> String {
         .join(" ")
 }
 
-/// Keys in either notation as the platform shows them, or `None` when den
+/// Keys, in either notation, as keycaps, one list per keystroke of a chord; `None` when den
 /// can't read them.
-pub fn shown_keys(keys: &str, cx: &App) -> Option<String> {
+pub fn shown_caps(keys: &str, cx: &App) -> Option<Vec<Vec<String>>> {
     let binding = KeyBinding::load(&normalize(keys), Box::new(NoAction), None, false, None, cx.keyboard_mapper().as_ref()).ok()?;
-    (!binding.keystrokes().is_empty()).then(|| display(binding.keystrokes()))
+    let strokes = binding.keystrokes();
+    (!strokes.is_empty()).then(|| strokes.iter().map(|s| stroke_caps(s.modifiers(), key_name(s.key()))).collect())
 }
 
 /// Keystrokes as the platform shows them:`Ctrl+K Ctrl+S` on Windows,
@@ -222,6 +223,11 @@ pub fn display(strokes: &[KeybindingKeystroke]) -> String {
 }
 
 fn display_stroke(m: &Modifiers, key: &str) -> String {
+    stroke_caps(m, key_name(key)).join(if crate::ui::COMMAND_KEY { "" } else { "+" })
+}
+
+/// A key as the platform names it: `Enter`, `PageUp`, `T`; ↩ on macOS.
+fn key_name(key: &str) -> String {
     let mac = crate::ui::COMMAND_KEY;
     let named = match key {
         "enter" if mac => "↩",
@@ -250,24 +256,29 @@ fn display_stroke(m: &Modifiers, key: &str) -> String {
         "space" => "Space",
         _ => "",
     };
-    let key = if named.is_empty() { key.to_uppercase() } else { named.to_string() };
-    if mac {
+    if named.is_empty() { key.to_uppercase() } else { named.to_string() }
+}
+
+/// A keystroke's keycaps: on macOS one (`⇧⌘P`, as its menus write it), elsewhere
+/// one per key in VS Code's order, Ctrl+Shift+Alt+Win (`Ctrl`, `Shift`, `P`).
+fn stroke_caps(m: &Modifiers, key: String) -> Vec<String> {
+    if crate::ui::COMMAND_KEY {
         // Apple's order: ⌃⌥⇧⌘.
-        let mut out = String::new();
+        let mut cap = String::new();
         for (on, symbol) in [(m.control, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.platform, "⌘"), (m.function, "fn")] {
             if on {
-                out.push_str(symbol);
+                cap.push_str(symbol);
             }
         }
-        out + &key
+        vec![cap + &key]
     } else {
-        // VS Code's order: Ctrl+Shift+Alt+Win.
-        let mut parts: Vec<&str> = [(m.control, "Ctrl"), (m.shift, "Shift"), (m.alt, "Alt"), (m.platform, "Win"), (m.function, "Fn")]
+        let mut caps: Vec<String> = [(m.control, "Ctrl"), (m.shift, "Shift"), (m.alt, "Alt"), (m.platform, "Win"), (m.function, "Fn")]
             .into_iter()
-            .filter_map(|(on, name)| on.then_some(name))
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name.to_string())
             .collect();
-        parts.push(&key);
-        parts.join("+")
+        caps.push(key);
+        caps
     }
 }
 

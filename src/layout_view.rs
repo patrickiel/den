@@ -1019,6 +1019,8 @@ impl Workspace {
     fn group_menu(&self, group: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let floating = self.tree.float_of(group).is_some();
+        // The kinds of tab this group takes: its menu lists only their buttons.
+        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| self.defaults.allows(&self.tree, group, *kind)).collect();
         Button::new(("group-menu", group))
             .small()
             .ghost()
@@ -1038,7 +1040,7 @@ impl Workspace {
                     .map(|menu| window_items(menu, &this, group, floating))
                     .separator()
                     .item(item("Close Group", |this, group, window, cx| this.request_close_group(group, window, cx)));
-                group_buttons_menu(menu, cx)
+                group_buttons_menu(menu, &kinds, cx)
                     .separator()
                     .item(item("Edit Presets…", |this, _, window, cx| this.open_settings(true, window, cx)).icon(Icon::new(IconName::Settings)))
             })
@@ -1081,8 +1083,9 @@ fn window_items(menu: PopupMenu, this: &WeakEntity<Workspace>, node: NodeId, flo
 }
 
 /// The strip's buttons, checked when shown, as den's ⋮ menu lists them:
-/// the built-in ones and each preset (its pin).
-fn group_buttons_menu(menu: PopupMenu, cx: &App) -> PopupMenu {
+/// the built-in ones and each preset (its pin), those of `kinds` only, as
+/// the strip shows them.
+fn group_buttons_menu(menu: PopupMenu, kinds: &[Kind], cx: &App) -> PopupMenu {
     use crate::settings::GroupButtons;
     let settings = Settings::get(cx);
     let buttons = settings.group_buttons;
@@ -1092,10 +1095,10 @@ fn group_buttons_menu(menu: PopupMenu, cx: &App) -> PopupMenu {
     let mut menu = menu
         .separator()
         .label("BUTTONS")
-        .item(toggle("Shell", buttons.shell, |b| b.shell = !b.shell))
-        .item(toggle("Browser", buttons.browser, |b| b.browser = !b.browser))
+        .when(kinds.contains(&Kind::Terminals), |menu| menu.item(toggle("Shell", buttons.shell, |b| b.shell = !b.shell)))
+        .when(kinds.contains(&Kind::Browsers), |menu| menu.item(toggle("Browser", buttons.browser, |b| b.browser = !b.browser)))
         .item(toggle("Split", buttons.split, |b| b.split = !b.split));
-    for (ix, preset) in settings.presets.iter().enumerate() {
+    for (ix, preset) in settings.presets.iter().enumerate().filter(|(_, preset)| kinds.contains(&preset.kind())) {
         menu = menu.item(PopupMenuItem::new(preset.name.clone()).checked(preset.pinned).on_click(move |_, _, cx| {
             Settings::update(cx, |s| {
                 if let Some(preset) = s.presets.get_mut(ix) {

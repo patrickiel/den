@@ -18,6 +18,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     switch::Switch,
+    tab::TabBar,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -939,6 +940,10 @@ pub struct SettingsPanel {
     focus_handle: FocusHandle,
     /// Filters the settings as you type, as den's search does.
     search: Entity<InputState>,
+    /// Filters Keyboard Shortcuts the same way.
+    shortcuts_search: Entity<InputState>,
+    /// The Keyboard Shortcuts tab is showing rather than Settings.
+    shortcuts: bool,
     font_family: Entity<InputState>,
     shell: Entity<InputState>,
     browser_home: Entity<InputState>,
@@ -946,7 +951,7 @@ pub struct SettingsPanel {
     themes: Vec<crate::theme::Imported>,
     /// One name and one command field per preset, in the order of the list.
     preset_rows: Vec<(Entity<InputState>, Entity<InputState>, Vec<Subscription>)>,
-    /// The page: the general settings, then the presets, then Keyboard Shortcuts.
+    /// The Settings tab: the general settings, then the presets.
     scroll: ScrollHandle,
     /// The command whose new keys are being typed, if any.
     recording: Option<Recording>,
@@ -975,9 +980,15 @@ impl SettingsPanel {
                 .default_value(settings.shell.clone())
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
+        let shortcuts_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search keyboard shortcuts"));
         let browser_home = cx.new(|cx| InputState::new(window, cx).placeholder("https://www.google.com").default_value(settings.browser_home.clone()));
         let _subscriptions = vec![
             cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&shortcuts_search, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
@@ -1006,6 +1017,8 @@ impl SettingsPanel {
         Self {
             focus_handle: cx.focus_handle(),
             search,
+            shortcuts_search,
+            shortcuts: false,
             font_family,
             shell,
             browser_home,
@@ -1017,13 +1030,29 @@ impl SettingsPanel {
         }
     }
 
+    /// The search field of the tab showing.
     pub fn search_input(&self) -> Entity<InputState> {
-        self.search.clone()
+        if self.shortcuts { self.shortcuts_search.clone() } else { self.search.clone() }
     }
 
-    /// Scroll a part of the page to its top: 1 the presets, 2 Keyboard Shortcuts.
-    pub fn show_section(&self, section: usize) {
-        self.scroll.scroll_to_top_of_item(section);
+    /// Show the presets (1) at the top of Settings, or Keyboard Shortcuts (2).
+    pub fn show_section(&mut self, section: usize) {
+        if section == 2 {
+            self.shortcuts = true;
+        } else {
+            self.scroll.scroll_to_top_of_item(section);
+        }
+    }
+
+    /// Switch to Keyboard Shortcuts or back to Settings, into its search field.
+    fn show_shortcuts(&mut self, shortcuts: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shortcuts == shortcuts {
+            return;
+        }
+        self.shortcuts = shortcuts;
+        self.recording = None;
+        self.search_input().update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     /// Start taking the keys for command `id`.
@@ -1185,6 +1214,8 @@ impl SettingsPanel {
         let theme = cx.theme().clone();
         let presets = Settings::get(cx).presets.clone();
         let indices: Vec<usize> = presets.iter().enumerate().filter(|(_, p)| p.kind() == kind).map(|(ix, _)| ix).collect();
+        let defaults: Vec<Preset> = crate::settings::default_presets().into_iter().filter(|p| p.kind() == kind).collect();
+        let is_default = indices.iter().map(|&ix| &presets[ix]).eq(defaults.iter());
         let section = match kind {
             Kind::Agents => "agent",
             Kind::Browsers => "browser",
@@ -1280,19 +1311,31 @@ impl SettingsPanel {
                 )
             }))
             .child(
-                div().px_3().py_2().child(
-                    Button::new(SharedString::from(format!("preset-add-{section}")))
-                        .small()
-                        .outline()
-                        .icon(Icon::new(IconName::Plus))
-                        .label("Add Preset")
-                        .on_click(move |_, _, cx| {
-                            Settings::update(cx, |s| {
-                                let name = if agents { "New agent" } else if browsers { "New page" } else { "New preset" };
-                                s.presets.push(Preset { agent: agents, browser: browsers, ..Preset::new(name, "") })
-                            })
-                        }),
-                ),
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("preset-add-{section}")))
+                            .small()
+                            .outline()
+                            .icon(Icon::new(IconName::Plus))
+                            .label("Add Preset")
+                            .on_click(move |_, _, cx| {
+                                Settings::update(cx, |s| {
+                                    let name = if agents { "New agent" } else if browsers { "New page" } else { "New preset" };
+                                    s.presets.push(Preset { agent: agents, browser: browsers, ..Preset::new(name, "") })
+                                })
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("preset-reset-{section}")))
+                            .small()
+                            .ghost()
+                            .label("Reset to Defaults")
+                            .disabled(is_default)
+                            .on_click(move |_, window, cx| confirm_reset_presets(kind, section, window, cx)),
+                    ),
             )
     }
 }
@@ -1682,7 +1725,7 @@ impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_preset_rows(window, cx);
         let settings = Settings::get(cx).clone();
-        let words: Vec<String> = self.search.read(cx).value().to_lowercase().split_whitespace().map(str::to_string).collect();
+        let words: Vec<String> = self.search_input().read(cx).value().to_lowercase().split_whitespace().map(str::to_string).collect();
         FILTER.with(|filter| *filter.borrow_mut() = (words, "", 0));
 
         let sidebar = h_flex()
@@ -1701,206 +1744,216 @@ impl Render for SettingsPanel {
             |_| {},
         );
 
-        let body = v_flex()
-            .id("settings")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(
-                v_flex()
-                    .w_full()
-                    .px_2()
-                    .child(section_title("Appearance", cx))
-                    .child(setting_row("Theme", "Colours of the whole window.", self.render_theme_menu(&settings, cx), cx))
-                    .child(setting_row(
-                        "Sidebar position",
-                        "Which side of the groups the Explorer, Search, Source Control and Extensions sit on.",
-                        sidebar,
-                        cx,
+        let body = if self.shortcuts {
+            v_flex()
+                .id("shortcuts")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px_2()
+                .pb_4()
+                .when(!filtering(), |this| {
+                    this.child(div().pb_2().text_xs().text_color(cx.theme().muted_foreground).child(
+                        "Point at a command to change its keys. In a terminal, a plain Ctrl+letter goes to the program running there.",
                     ))
-                    .child(section_title("Editor", cx))
-                    .child(setting_row("Font family", "Editor and terminal font; empty for the theme's monospace font.", div().w(px(260.)).child(Input::new(&self.font_family).small()), cx))
-                    .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
-                    .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
-                    .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
-                    .child(toggle(
-                        "Format on save",
-                        format!(
-                            "Saving formats the file first, with the formatter {} uses: an installed one, else one den downloaded.",
-                            crate::keymap::with_keys("Format Document", &crate::FormatDocument, cx)
-                        ),
-                        "format-on-save",
-                        settings.format_on_save,
-                        |s, v| s.format_on_save = v,
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Downloaded formatters",
-                        "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
-                        render_formatters(),
-                        cx,
-                    ))
-                    .child(section_title("Source Control", cx))
-                    .child(setting_row(
-                        "Commit with nothing staged",
-                        "Ask whether to stage every change and commit it, always do, or never (commit nothing).",
-                        h_flex()
-                            .gap_1()
-                            .child(choice("smart-ask", "Ask", crate::settings::SmartCommit::Ask, settings.smart_commit, |s, v| s.smart_commit = v))
-                            .child(choice("smart-always", "Always", crate::settings::SmartCommit::Always, settings.smart_commit, |s, v| s.smart_commit = v))
-                            .child(choice("smart-never", "Never", crate::settings::SmartCommit::Never, settings.smart_commit, |s, v| s.smart_commit = v)),
-                        cx,
-                    ))
-                    .child(section_title("AI", cx))
-                    .child(setting_row(
-                        "Model",
-                        "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder). Add your own GGUF model by link or file.",
-                        self.render_ai_model(&settings, cx),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Runtime",
-                        "llama.cpp, which runs the model (about 100 MB); downloaded again on next use when removed.",
-                        if crate::backend::ai::runtime_downloaded() {
-                            Button::new("ai-runtime-remove")
-                                .small()
-                                .ghost()
-                                .icon(Icon::new(IconName::Trash))
-                                .label("Remove")
-                                .on_click(cx.listener(|_, _, window, cx| {
-                                    if let Err(err) = crate::backend::ai::remove_runtime() {
-                                        crate::toast::push(window, format!("Could not remove the AI runtime: {err}"), cx);
-                                    }
-                                    cx.notify();
-                                }))
-                                .into_any_element()
-                        } else {
-                            div().text_xs().text_color(cx.theme().muted_foreground).child("not downloaded").into_any_element()
-                        },
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Context size",
-                        "Tokens the model reads at once; bigger fits larger changes in one go but needs more memory.",
-                        stepper(
-                            "ai-ctx",
-                            format!("{}K", settings.ai_context_size / 1024),
-                            px(64.),
-                            |s, up| s.ai_context_size = if up { (s.ai_context_size * 2).min(131_072) } else { (s.ai_context_size / 2).max(2048) },
-                            |_| {},
-                        ),
-                        cx,
-                    ))
-                    .child(toggle("Use the GPU", "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.", "ai-gpu", settings.ai_gpu, |s, v| s.ai_gpu = v, cx))
-                    .child(toggle("Style from history", "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).", "ai-derive", settings.ai_derive_style, |s, v| s.ai_derive_style = v, cx))
-                    .child(section_title("Tabs", cx))
-                    .child(toggle("Close buttons", "Show a close button on each tab (a middle-click closes a tab either way).", "tab-close", settings.tab_close_button, |s, v| s.tab_close_button = v, cx))
-                    .child(section_title("Notifications", cx))
-                    .child(toggle("Notifications", "When a terminal's program wants you (an agent finished or waits for input, a bell) while you look at another tab or window.", "notifications", settings.notifications, |s, v| s.notifications = v, cx))
-                    .child(toggle("Toast", "A message in the window's corner; click it to go to the tab.", "notify-toast", settings.notify_toast, |s, v| s.notify_toast = v, cx))
-                    .child(toggle("Tab mark", "A dot on the tab until you look at it.", "notify-tab", settings.notify_tab, |s, v| s.notify_tab = v, cx))
-                    .child(toggle("Sound", "A sound for a finished turn or a question, picked below.", "notify-sound", settings.notify_sound, |s, v| s.notify_sound = v, cx))
-                    .child(toggle(if crate::ui::COMMAND_KEY { "Dock" } else { "Taskbar" }, if crate::ui::COMMAND_KEY { "Bounce the Dock icon while the window is in the background." } else { "Flash the taskbar button while the window is in the background." }, "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
-                    .child(setting_row(
-                        "Tab strip buttons",
-                        "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu.",
-                        h_flex()
-                            .gap_1()
-                            .child(strip_toggle("strip-shell", "Shell", settings.group_buttons.shell, |b| b.shell = !b.shell))
-                            .child(strip_toggle("strip-browser", "Browser", settings.group_buttons.browser, |b| b.browser = !b.browser))
-                            .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split)),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Sounds",
-                        "For a finished turn, and for a question or a permission. Click ▶ to hear one.",
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(sound_picker("sound-done", "Done", settings.notify_sound_done.clone(), |s, v| s.notify_sound_done = v))
-                            .child(sound_picker("sound-input", "Input", settings.notify_sound_input.clone(), |s, v| s.notify_sound_input = v)),
-                        cx,
-                    ))
-                    .child(setting_row(
-                        "Volume",
-                        "Of the notification sounds.",
-                        stepper(
-                            "volume",
-                            format!("{}%", settings.notify_volume),
-                            px(48.),
-                            |s, up| s.notify_volume = if up { (s.notify_volume + 10).min(100) } else { s.notify_volume.saturating_sub(10) },
-                            |cx| {
-                                let s = Settings::get(cx);
-                                crate::sound::play_named(&s.notify_sound_done, s.notify_volume);
-                            },
-                        ),
-                        cx,
-                    ))
-                    .child(section_title("Terminal", cx))
-                    .child(setting_row("Shell", "For new terminals; wsl or wsl -d Ubuntu for a WSL shell. Left empty, a folder inside WSL opens its terminals there. TERM_SHELL in the environment overrides the automatic choice.", div().w(px(260.)).child(Input::new(&self.shell).small()), cx))
-                    .child(setting_row(
-                        "Scrollback",
-                        "Lines a terminal keeps above the screen, for new terminals.",
-                        stepper(
-                            "scrollback",
-                            settings.scrollback.to_string(),
-                            px(64.),
-                            |s, up| s.scrollback = if up { (s.scrollback + 1000).min(200_000) } else { s.scrollback.saturating_sub(1000).max(1000) },
-                            |_| {},
-                        ),
-                        cx,
-                    )),
-            )
-            // Second, so the group menu's Edit Presets can scroll to them.
-            .child(
-                v_flex()
-                    .w_full()
-                    .px_2()
-                    .pb_4()
-                    .child(preset_section(
-                        "Terminal Presets",
-                        "Programs a tab-strip button starts in a new terminal: a dev server, a script. The plain shell has its own button.",
-                        self.render_presets(Kind::Terminals, cx),
-                        cx,
-                    ))
-                    .child(preset_section(
-                        "Agent Presets",
-                        "Coding agents, started in a shell like terminal presets but opening where agents go, so a group can be the default for agents apart from terminals. Pinned presets get their own button; click a preset's mark for another colour.",
-                        self.render_presets(Kind::Agents, cx),
-                        cx,
-                    ))
-                    .child(section_title("Browser", cx))
-                    .child(setting_row("Home page", "The page a new browser tab opens.", div().w(px(260.)).child(Input::new(&self.browser_home).small()), cx))
-                    .child(preset_section(
-                        "Browser Presets",
-                        "Pages a tab-strip button opens in a new browser tab: a dev server, docs. The plain browser has its own button.",
-                        self.render_presets(Kind::Browsers, cx),
-                        cx,
-                    )),
-            )
-            // Third, so Keyboard Shortcuts can scroll to it.
-            .child(
-                v_flex()
-                    .w_full()
-                    .px_2()
-                    .pb_4()
-                    .child(section_title("Keyboard Shortcuts", cx))
-                    .when(!filtering(), |this| {
-                        this.child(div().pb_1().text_xs().text_color(cx.theme().muted_foreground).child(
-                            "VS Code's keys by default. Click the pencil and type the new keys (two for a chord, such as Ctrl+K Ctrl+S), then Enter. \
-                             In a terminal, a plain Ctrl+letter goes to the program running there. The changes are in settings.json under keybindings.",
+                })
+                .child(self.render_shortcuts(&settings, cx))
+        } else {
+            v_flex()
+                .id("settings")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(
+                    v_flex()
+                        .w_full()
+                        .px_2()
+                        .child(section_title("Appearance", cx))
+                        .child(setting_row("Theme", "Colours of the whole window.", self.render_theme_menu(&settings, cx), cx))
+                        .child(setting_row(
+                            "Sidebar position",
+                            "Which side of the groups the Explorer, Search, Source Control and Extensions sit on.",
+                            sidebar,
+                            cx,
                         ))
-                    })
-                    .child(self.render_shortcuts(&settings, cx)),
-            );
+                        .child(section_title("Editor", cx))
+                        .child(setting_row("Font family", "Editor and terminal font; empty for the theme's monospace font.", div().w(px(260.)).child(Input::new(&self.font_family).small()), cx))
+                        .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
+                        .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
+                        .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
+                        .child(toggle(
+                            "Format on save",
+                            format!(
+                                "Saving formats the file first, with the formatter {} uses: an installed one, else one den downloaded.",
+                                crate::keymap::with_keys("Format Document", &crate::FormatDocument, cx)
+                            ),
+                            "format-on-save",
+                            settings.format_on_save,
+                            |s, v| s.format_on_save = v,
+                            cx,
+                        ))
+                        .child(setting_row(
+                            "Downloaded formatters",
+                            "Formatters den downloaded into its data folder because they were not installed. A removed one is offered again the next time Format Document needs it.",
+                            render_formatters(),
+                            cx,
+                        ))
+                        .child(section_title("Source Control", cx))
+                        .child(setting_row(
+                            "Commit with nothing staged",
+                            "Ask whether to stage every change and commit it, always do, or never (commit nothing).",
+                            h_flex()
+                                .gap_1()
+                                .child(choice("smart-ask", "Ask", crate::settings::SmartCommit::Ask, settings.smart_commit, |s, v| s.smart_commit = v))
+                                .child(choice("smart-always", "Always", crate::settings::SmartCommit::Always, settings.smart_commit, |s, v| s.smart_commit = v))
+                                .child(choice("smart-never", "Never", crate::settings::SmartCommit::Never, settings.smart_commit, |s, v| s.smart_commit = v)),
+                            cx,
+                        ))
+                        .child(section_title("AI", cx))
+                        .child(setting_row(
+                            "Model",
+                            "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder). Add your own GGUF model by link or file.",
+                            self.render_ai_model(&settings, cx),
+                            cx,
+                        ))
+                        .child(setting_row(
+                            "Runtime",
+                            "llama.cpp, which runs the model (about 100 MB); downloaded again on next use when removed.",
+                            if crate::backend::ai::runtime_downloaded() {
+                                Button::new("ai-runtime-remove")
+                                    .small()
+                                    .ghost()
+                                    .icon(Icon::new(IconName::Trash))
+                                    .label("Remove")
+                                    .on_click(cx.listener(|_, _, window, cx| {
+                                        if let Err(err) = crate::backend::ai::remove_runtime() {
+                                            crate::toast::push(window, format!("Could not remove the AI runtime: {err}"), cx);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
+                            } else {
+                                div().text_xs().text_color(cx.theme().muted_foreground).child("not downloaded").into_any_element()
+                            },
+                            cx,
+                        ))
+                        .child(setting_row(
+                            "Context size",
+                            "Tokens the model reads at once; bigger fits larger changes in one go but needs more memory.",
+                            stepper(
+                                "ai-ctx",
+                                format!("{}K", settings.ai_context_size / 1024),
+                                px(64.),
+                                |s, up| s.ai_context_size = if up { (s.ai_context_size * 2).min(131_072) } else { (s.ai_context_size / 2).max(2048) },
+                                |_| {},
+                            ),
+                            cx,
+                        ))
+                        .child(toggle("Use the GPU", "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.", "ai-gpu", settings.ai_gpu, |s, v| s.ai_gpu = v, cx))
+                        .child(toggle("Style from history", "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).", "ai-derive", settings.ai_derive_style, |s, v| s.ai_derive_style = v, cx))
+                        .child(section_title("Tabs", cx))
+                        .child(toggle("Close buttons", "Show a close button on each tab (a middle-click closes a tab either way).", "tab-close", settings.tab_close_button, |s, v| s.tab_close_button = v, cx))
+                        .child(section_title("Notifications", cx))
+                        .child(toggle("Notifications", "When a terminal's program wants you (an agent finished or waits for input, a bell) while you look at another tab or window.", "notifications", settings.notifications, |s, v| s.notifications = v, cx))
+                        .child(toggle("Toast", "A message in the window's corner; click it to go to the tab.", "notify-toast", settings.notify_toast, |s, v| s.notify_toast = v, cx))
+                        .child(toggle("Tab mark", "A dot on the tab until you look at it.", "notify-tab", settings.notify_tab, |s, v| s.notify_tab = v, cx))
+                        .child(toggle("Sound", "A sound for a finished turn or a question, picked below.", "notify-sound", settings.notify_sound, |s, v| s.notify_sound = v, cx))
+                        .child(toggle(if crate::ui::COMMAND_KEY { "Dock" } else { "Taskbar" }, if crate::ui::COMMAND_KEY { "Bounce the Dock icon while the window is in the background." } else { "Flash the taskbar button while the window is in the background." }, "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
+                        .child(setting_row(
+                            "Tab strip buttons",
+                            "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu.",
+                            h_flex()
+                                .gap_1()
+                                .child(strip_toggle("strip-shell", "Shell", settings.group_buttons.shell, |b| b.shell = !b.shell))
+                                .child(strip_toggle("strip-browser", "Browser", settings.group_buttons.browser, |b| b.browser = !b.browser))
+                                .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split)),
+                            cx,
+                        ))
+                        .child(setting_row(
+                            "Sounds",
+                            "For a finished turn, and for a question or a permission. Click ▶ to hear one.",
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(sound_picker("sound-done", "Done", settings.notify_sound_done.clone(), |s, v| s.notify_sound_done = v))
+                                .child(sound_picker("sound-input", "Input", settings.notify_sound_input.clone(), |s, v| s.notify_sound_input = v)),
+                            cx,
+                        ))
+                        .child(setting_row(
+                            "Volume",
+                            "Of the notification sounds.",
+                            stepper(
+                                "volume",
+                                format!("{}%", settings.notify_volume),
+                                px(48.),
+                                |s, up| s.notify_volume = if up { (s.notify_volume + 10).min(100) } else { s.notify_volume.saturating_sub(10) },
+                                |cx| {
+                                    let s = Settings::get(cx);
+                                    crate::sound::play_named(&s.notify_sound_done, s.notify_volume);
+                                },
+                            ),
+                            cx,
+                        ))
+                        .child(section_title("Terminal", cx))
+                        .child(setting_row("Shell", "For new terminals; wsl or wsl -d Ubuntu for a WSL shell. Left empty, a folder inside WSL opens its terminals there. TERM_SHELL in the environment overrides the automatic choice.", div().w(px(260.)).child(Input::new(&self.shell).small()), cx))
+                        .child(setting_row(
+                            "Scrollback",
+                            "Lines a terminal keeps above the screen, for new terminals.",
+                            stepper(
+                                "scrollback",
+                                settings.scrollback.to_string(),
+                                px(64.),
+                                |s, up| s.scrollback = if up { (s.scrollback + 1000).min(200_000) } else { s.scrollback.saturating_sub(1000).max(1000) },
+                                |_| {},
+                            ),
+                            cx,
+                        )),
+                )
+                // Second, so the group menu's Edit Presets can scroll to them.
+                .child(
+                    v_flex()
+                        .w_full()
+                        .px_2()
+                        .pb_4()
+                        .child(preset_section(
+                            "Terminal Presets",
+                            "Programs a tab-strip button starts in a new terminal: a dev server, a script. The plain shell has its own button.",
+                            self.render_presets(Kind::Terminals, cx),
+                            cx,
+                        ))
+                        .child(preset_section(
+                            "Agent Presets",
+                            "Coding agents, started in a shell like terminal presets but opening where agents go, so a group can be the default for agents apart from terminals. Pinned presets get their own button; click a preset's mark for another colour.",
+                            self.render_presets(Kind::Agents, cx),
+                            cx,
+                        ))
+                        .child(section_title("Browser", cx))
+                        .child(setting_row("Home page", "The page a new browser tab opens.", div().w(px(260.)).child(Input::new(&self.browser_home).small()), cx))
+                        .child(preset_section(
+                            "Browser Presets",
+                            "Pages a tab-strip button opens in a new browser tab: a dev server, docs. The plain browser has its own button.",
+                            self.render_presets(Kind::Browsers, cx),
+                            cx,
+                        )),
+                )
+        };
         let empty = FILTER.with(|filter| filter.borrow().2 == 0) && filtering();
+        let this = cx.weak_entity();
+        let tabs = TabBar::new("settings-tabs")
+            .underline()
+            .px_2()
+            .selected_index(self.shortcuts as usize)
+            .child("Settings")
+            .child("Keyboard Shortcuts")
+            .on_click(move |ix, window, cx| _ = this.update(cx, |this, cx| this.show_shortcuts(*ix == 1, window, cx)));
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
             .gap_2()
-            .child(div().flex_none().px_2().child(Input::new(&self.search).small()))
-            .when(empty, |this| this.child(div().px_2().py_4().text_sm().text_color(cx.theme().muted_foreground).child("No settings match.")))
+            .child(div().flex_none().child(tabs))
+            .child(div().flex_none().px_2().child(Input::new(&self.search_input()).small()))
+            .when(empty, |this| this.child(div().px_2().py_4().text_sm().text_color(cx.theme().muted_foreground).child(if self.shortcuts { "No shortcuts match." } else { "No settings match." })))
             .child(body)
     }
 }
@@ -1976,18 +2029,64 @@ fn set_keys(id: &str, change: impl FnOnce(&mut Vec<String>), cx: &mut App) {
 /// One command's row in Keyboard Shortcuts, read before the controls are made.
 struct ShortcutRow {
     id: String,
-    title: SharedString,
-    description: SharedString,
-    /// Each key as the platform shows it; `None` for one den can't read.
-    keys: Vec<(String, Option<String>)>,
+    /// The heading it is listed under (`File`), from its title.
+    category: SharedString,
+    /// Its title without the category.
+    name: SharedString,
+    /// Where it works when not everywhere (`In a terminal`).
+    context: &'static str,
+    /// The other commands with one of its keys, where it works.
+    clashes: Vec<String>,
+    /// Each key with its keycaps, a list per keystroke; `None` for keys den
+    /// can't read.
+    keys: Vec<(String, Option<Vec<Vec<String>>>)>,
     changed: bool,
 }
 
+/// The theme's colours a shortcut row uses, read once.
+#[derive(Clone, Copy)]
+struct ShortcutColors {
+    border: Hsla,
+    cap: Hsla,
+    muted: Hsla,
+    hover: Hsla,
+    ring: Hsla,
+    danger: Hsla,
+    warning: Hsla,
+    primary: Hsla,
+}
+
+/// Keys as keycaps: `Ctrl` + `Shift` + `P`, a chord's keystrokes apart.
+fn keycaps(strokes: &[Vec<String>], colors: ShortcutColors) -> Div {
+    let cap = |label: &str| {
+        div()
+            .h(px(20.))
+            .min_w(px(20.))
+            .px_1p5()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .border_1()
+            .border_b_2()
+            .border_color(colors.border)
+            .bg(colors.cap)
+            .text_xs()
+            .child(label.to_string())
+    };
+    h_flex().gap_2().children(strokes.iter().map(|stroke| {
+        h_flex().gap_0p5().items_center().children(stroke.iter().enumerate().flat_map(|(ix, key)| {
+            let plus = (ix > 0).then(|| div().text_xs().text_color(colors.muted).child("+").into_any_element());
+            plus.into_iter().chain([cap(key).into_any_element()])
+        }))
+    }))
+}
+
 impl SettingsPanel {
-    /// Every command with its keys: change, remove or reset them, as VS
-    /// Code's Keyboard Shortcuts do.
+    /// Every command with its keys, by category: point at one to change,
+    /// remove or reset its keys, as in VS Code's Keyboard Shortcuts.
     fn render_shortcuts(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
-        use crate::keymap::{context_label, normalize, shown_keys};
+        use crate::keymap::{context_label, normalize, shown_caps};
         let commands = crate::keymap::commands(cx);
         let keys_of = |c: &crate::keymap::Command| settings.keybindings.get(&c.id).unwrap_or(&c.defaults).clone();
         // Which commands each key runs, where it works, to tell of a key bound twice.
@@ -2000,89 +2099,177 @@ impl SettingsPanel {
         let mut rows = Vec::new();
         for command in commands {
             let keys = keys_of(command);
-            let mut about = vec![command.id.clone()];
-            if let Some(context) = command.context {
-                about.push(context_label(context).to_string());
-            }
-            let mut others: Vec<&str> = keys.iter().flat_map(|k| owners[&(command.context, normalize(k))].iter().copied()).filter(|t| *t != command.title).collect();
-            others.sort_unstable();
-            others.dedup();
-            if !others.is_empty() {
-                about.push(format!("same keys as {}", others.join(", ")));
-            }
-            let keys: Vec<(String, Option<String>)> = keys.into_iter().map(|k| (k.clone(), shown_keys(&k, cx))).collect();
-            let shown = keys.iter().filter_map(|(_, s)| s.clone()).collect::<Vec<_>>().join(" ");
+            let mut clashes: Vec<String> = keys
+                .iter()
+                .flat_map(|k| owners[&(command.context, normalize(k))].iter())
+                .filter(|t| **t != command.title)
+                .map(|t| t.to_string())
+                .collect();
+            clashes.sort_unstable();
+            clashes.dedup();
+            let keys: Vec<_> = keys.into_iter().map(|k| (k.clone(), shown_caps(&k, cx))).collect();
+            // Searched as written and as shown: `ctrl+shift+p`, `Ctrl+Shift+P`.
+            let shown = keys.iter().filter_map(|(_, caps)| caps.as_ref()).flatten().map(|stroke| stroke.join("+")).collect::<Vec<_>>().join(" ");
             let raw = keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(" ");
-            let description = about.join(" · ");
-            if passes(&[&command.title, &description, &shown, &raw]) {
-                rows.push(ShortcutRow { id: command.id.clone(), title: command.title.clone().into(), description: description.into(), keys, changed: settings.keybindings.contains_key(&command.id) });
+            let context = command.context.map_or("", context_label);
+            if passes(&[&command.title, &command.id, context, &shown, &raw]) {
+                let (category, name) = command.title.split_once(": ").unwrap_or(("General", &command.title));
+                rows.push(ShortcutRow {
+                    id: command.id.clone(),
+                    category: category.to_string().into(),
+                    name: name.to_string().into(),
+                    context,
+                    clashes,
+                    keys,
+                    changed: settings.keybindings.contains_key(&command.id),
+                });
             }
         }
 
         let theme = cx.theme();
-        let (border, muted, danger, ring) = (theme.border, theme.muted_foreground, theme.danger, theme.ring);
-        let chip = move |label: SharedString| h_flex().h(px(22.)).px_1p5().gap_0p5().items_center().rounded(px(4.)).border_1().border_color(border).text_xs().child(label);
+        let colors = ShortcutColors {
+            border: theme.border,
+            cap: theme.secondary,
+            muted: theme.muted_foreground,
+            hover: theme.list_hover,
+            ring: theme.ring,
+            danger: theme.danger,
+            warning: theme.warning,
+            primary: theme.primary,
+        };
         let mut list = v_flex().w_full();
-        for row_data in rows {
-            let ShortcutRow { id, title, description, keys, changed } = row_data;
-            let recording = self.recording.as_ref().filter(|r| r.id == id);
-            let control = if let Some(recording) = recording {
-                let typed = recording.strokes.iter().map(|s| shown_keys(s, cx).unwrap_or_else(|| s.clone())).collect::<Vec<_>>().join(" ");
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(chip(if typed.is_empty() { "Type the keys…".into() } else { typed.into() }).border_color(ring))
-                    .child(div().text_xs().text_color(muted).child("Enter keeps them, Esc cancels"))
-                    .into_any_element()
-            } else {
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .flex_wrap()
-                    .justify_end()
-                    .children(keys.into_iter().enumerate().map(|(ix, (raw, shown))| {
-                        let id = id.clone();
-                        let label = match shown {
-                            Some(shown) => chip(shown.into()),
-                            None => chip(format!("{raw}?").into()).text_color(danger),
-                        };
-                        label.child(
-                            Button::new(SharedString::from(format!("key-{id}-{ix}-remove")))
-                                .xsmall()
-                                .ghost()
-                                .icon(Icon::new(IconName::X))
-                                .tooltip("Remove these keys")
-                                .on_click(move |_, _, cx| set_keys(&id, |list| _ = (ix < list.len()).then(|| list.remove(ix)), cx)),
-                        )
-                    }))
-                    .child(
-                        Button::new(SharedString::from(format!("key-{id}-change")))
-                            .xsmall()
-                            .ghost()
-                            .icon(Icon::new(IconName::Pencil))
-                            .tooltip("Change the keys")
-                            .on_click(cx.listener({
-                                let id = id.clone();
-                                move |this, _, window, cx| this.record(id.clone(), window, cx)
-                            })),
-                    )
-                    .when(changed, |this| {
-                        let id = id.clone();
-                        this.child(
-                            Button::new(SharedString::from(format!("key-{id}-reset")))
-                                .xsmall()
-                                .ghost()
-                                .icon(Icon::new(IconName::RotateCcw))
-                                .tooltip("Back to the default keys")
-                                .on_click(move |_, _, cx| Settings::update(cx, |s| _ = s.keybindings.remove(&id))),
-                        )
-                    })
-                    .into_any_element()
-            };
-            list = list.child(row(title, description, div().max_w(px(360.)).child(control), cx));
+        let mut category = SharedString::default();
+        for row in rows {
+            if row.category != category {
+                category = row.category.clone();
+                list = list.child(div().pt_3().pb_1().px_2().text_xs().font_weight(FontWeight::MEDIUM).text_color(colors.muted).child(category.clone()));
+            }
+            list = list.child(self.shortcut_row(row, colors, cx));
         }
         list
     }
+
+    fn shortcut_row(&self, row: ShortcutRow, colors: ShortcutColors, cx: &mut Context<Self>) -> Stateful<Div> {
+        let ShortcutRow { id, name, context, clashes, keys, changed, .. } = row;
+        let group = SharedString::from(format!("shortcut-{id}"));
+        let on_hover = |element: Div| element.invisible().group_hover(group.clone(), |this| this.visible());
+        let recording = self.recording.as_ref().filter(|r| r.id == id);
+
+        let about = h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .items_center()
+            .child(div().flex_none().text_sm().child(name))
+            .when(changed, |this| this.child(div().flex_none().text_xs().text_color(colors.primary).child("Modified")))
+            .when(!context.is_empty(), |this| this.child(div().flex_none().text_xs().text_color(colors.muted).child(context)))
+            .when(!clashes.is_empty(), |this| {
+                this.child(div().min_w_0().truncate().text_xs().text_color(colors.warning).child(format!("Same keys as {}", clashes.join(", "))))
+            })
+            // The id settings.json knows it by.
+            .child(on_hover(div().min_w_0().truncate().text_xs().text_color(colors.muted).child(id.clone())));
+
+        let keys_side = if let Some(recording) = recording {
+            let typed: Vec<Vec<String>> = recording.strokes.iter().filter_map(|s| crate::keymap::shown_caps(s, cx)).flatten().collect();
+            h_flex()
+                .flex_none()
+                .gap_3()
+                .items_center()
+                .child(div().text_xs().text_color(colors.muted).child("Enter to keep, Esc to cancel"))
+                .child(if typed.is_empty() { div().text_xs().child("Type the keys…") } else { keycaps(&typed, colors) })
+        } else {
+            let remove = |ix: usize| {
+                let id = id.clone();
+                Button::new(SharedString::from(format!("key-{id}-{ix}-remove")))
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(IconName::X))
+                    .tooltip("Remove these keys")
+                    .on_click(move |_, _, cx| set_keys(&id, |list| _ = (ix < list.len()).then(|| list.remove(ix)), cx))
+            };
+            let actions = h_flex()
+                .gap_0p5()
+                .child(
+                    Button::new(SharedString::from(format!("key-{id}-change")))
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(IconName::Pencil))
+                        .tooltip("Change the keys")
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, window, cx| this.record(id.clone(), window, cx)
+                        })),
+                )
+                .when(changed, |this| {
+                    let id = id.clone();
+                    this.child(
+                        Button::new(SharedString::from(format!("key-{id}-reset")))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::RotateCcw))
+                            .tooltip("Back to the default keys")
+                            .on_click(move |_, _, cx| Settings::update(cx, |s| _ = s.keybindings.remove(&id))),
+                    )
+                });
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .items_center()
+                .when(keys.is_empty(), |this| this.child(div().px_2().text_xs().text_color(colors.muted).child("No keys")))
+                .children(keys.into_iter().enumerate().map(|(ix, (raw, caps))| {
+                    let binding = match caps {
+                        Some(caps) => keycaps(&caps, colors),
+                        None => div().text_xs().text_color(colors.danger).child(format!("{raw} (not read)")),
+                    };
+                    h_flex().items_center().child(binding).child(on_hover(div().child(remove(ix))))
+                }))
+                .child(on_hover(actions))
+        };
+
+        h_flex()
+            .id(SharedString::from(format!("shortcut-row-{id}")))
+            .group(group.clone())
+            .w_full()
+            .min_h(px(34.))
+            .px_2()
+            .gap_4()
+            .rounded(px(4.))
+            .items_center()
+            .map(|this| match recording {
+                Some(_) => this.border_1().border_color(colors.ring).bg(colors.hover),
+                None => this.hover(|this| this.bg(colors.hover)),
+            })
+            // A double click changes the keys, as in VS Code.
+            .on_click(cx.listener({
+                let id = id.clone();
+                move |this, event: &ClickEvent, window, cx| {
+                    if event.click_count() == 2 {
+                        this.record(id.clone(), window, cx);
+                    }
+                }
+            }))
+            .child(about)
+            .child(keys_side)
+    }
+}
+
+/// Ask, then put a section's presets (`kind`) back to den's defaults; the
+/// other sections' stay as they are.
+fn confirm_reset_presets(kind: Kind, section: &'static str, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::WindowExt as _;
+    window.open_alert_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Reset Presets")
+            .description(format!("Replace your {section} presets with den's defaults? Presets you added are removed."))
+            .show_cancel(true)
+            .on_ok(move |_, _, cx| {
+                Settings::update(cx, |s| {
+                    s.presets.retain(|p| p.kind() != kind);
+                    s.presets.extend(crate::settings::default_presets().into_iter().filter(|p| p.kind() == kind));
+                });
+                true
+            })
+    });
 }
 
 fn preset_section(title: &'static str, description: &'static str, list: Div, cx: &App) -> Div {
