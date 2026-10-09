@@ -343,7 +343,6 @@ fn den_commands() -> Vec<Command> {
         command("den.splitDown", "View: Split Down", SplitDown, &["ctrl-k ctrl-\\", "ctrl-shift--"], &["cmd-k cmd-\\", "cmd-shift--"]),
         command("den.toggleMaximizeGroup", "View: Toggle Maximize Group", ToggleMaximizeGroup, &["ctrl-k ctrl-m"], &["cmd-k cmd-m"]),
         command("den.toggleGroupTiles", "View: Toggle Group Tiles (Every Tab at Once)", ToggleGroupTiles, &["ctrl-k ctrl-t"], &["cmd-k cmd-t"]),
-        command("den.showAllTabs", "View: Show All Tabs as Tiles", ShowAllTabs, &["ctrl-k ctrl-p"], &["cmd-k cmd-p"]),
         command("den.nextTab", "View: Next Tab", NextTab, &["ctrl-tab", "ctrl-pagedown"], &["ctrl-tab", "cmd-alt-right", "cmd-shift-]", "ctrl-pagedown"]),
         command("den.previousTab", "View: Previous Tab", PrevTab, &["ctrl-shift-tab", "ctrl-pageup"], &["ctrl-shift-tab", "cmd-alt-left", "cmd-shift-[", "ctrl-pageup"]),
     ];

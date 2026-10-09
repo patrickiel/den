@@ -38,7 +38,7 @@ use crate::{
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
     layout_view::{Drop, Dragged, DropHint, Flash, Hints, Zones},
-    overlays::{Maximized, Overview, PaintedRef},
+    overlays::{Maximized, PaintedRef},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::{Refresh, Repo},
@@ -310,8 +310,6 @@ pub struct Workspace {
     flash: Option<(Flash, std::time::Instant)>,
     /// A group drawn over its window's body, sidebar and all (`overlays.rs`).
     pub(crate) maximized: Option<Maximized>,
-    /// Every tab as a tile, over one window's body.
-    pub(crate) overview: Option<Overview>,
     /// Where the windows' bodies and the maximized group's slot were painted.
     pub(crate) painted: PaintedRef,
     /// Tabs whose program wanted the user while they looked elsewhere.
@@ -445,7 +443,6 @@ impl Workspace {
             hint_seq: 0,
             flash: None,
             maximized: None,
-            overview: None,
             painted: PaintedRef::default(),
             attention: Default::default(),
             window: window.window_handle(),
@@ -1494,7 +1491,7 @@ impl Workspace {
     fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         // A page stays live: only a drag or a dialog hides it (menus and
         // toasts may be drawn under it).
-        let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.overview_shown(float);
+        let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
         // Under a maximized group, the other groups' pages are out of sight;
         // in one maximized as tiles, every page is in sight.
         let maximized = self.maximized.as_ref().filter(|m| self.tree.float_of(m.group) == float);
@@ -1991,13 +1988,6 @@ impl Workspace {
             .icon(Icon::new(IconName::LayoutDashboard))
             .tooltip("Layouts")
             .dropdown_menu(move |menu, _, cx| layouts_menu(this.clone(), menu, cx));
-        let overview_button = Button::new("overview")
-            .small()
-            .ghost()
-            .icon(Icon::new(IconName::LayoutGrid))
-            .tooltip(crate::keymap::with_keys("Show All Tabs", &crate::ShowAllTabs, cx))
-            .selected(self.overview_shown(None))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_overview(window, cx)));
 
         // As in den: the sidebar views on the left, the session in the middle,
         // the layout and the workspace's split and flip, then settings, on the
@@ -2069,7 +2059,6 @@ impl Workspace {
                         .gap_1()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .children(self.extension_buttons(cx))
-                        .child(overview_button)
                         .child(layout_button)
                         // The root's actions, called the workspace's.
                         .children(self.root_actions(root_node, "workspace", root_is_split, cx))
@@ -2296,7 +2285,6 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
             .on_action(cx.listener(|this, _: &crate::ToggleMaximizeGroup, window, cx| this.toggle_maximize(this.active_group, false, window, cx)))
             .on_action(cx.listener(|this, _: &crate::ToggleGroupTiles, window, cx| this.toggle_maximize(this.active_group, true, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::ShowAllTabs, window, cx| this.toggle_overview(window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if let Some(pane) = this.tree.active_tab(this.active_group) {
                     this.request_close_pane(pane, window, cx);
