@@ -1808,8 +1808,21 @@ impl Workspace {
         self.changed(cx);
     }
 
+    /// Keep the arrangement as a named preset: the groups, splits, terminals
+    /// and defaults, not the files that happened to be open in it.
     fn save_preset(&mut self, name: String, cx: &mut Context<Self>) {
-        let Ok(layout) = serde_json::to_value(self.dump_state(cx)) else { return };
+        let mut state = self.dump_state(cx);
+        let mut tree = Tree::with_floats(state.root, state.floats);
+        state.panes.retain(|id, pane| {
+            let file = pane.kind == crate::panels::FILE || pane.kind == crate::diff::DIFF;
+            if file {
+                tree.remove_tab(*id);
+            }
+            !file
+        });
+        state.root = tree.root;
+        state.floats = tree.floats;
+        let Ok(layout) = serde_json::to_value(state) else { return };
         let layout = crate::layout_file::shareable(&layout, &self.root);
         AppState::update(cx, |state| match state.presets.iter_mut().find(|p| p.name == name) {
             Some(preset) => preset.layout = layout,
