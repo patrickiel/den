@@ -236,18 +236,6 @@ fn tail_text(term: &Term<Listener>, lines: usize, columns: usize, max: usize) ->
     lines[lines.len().saturating_sub(max)..].join("\n")
 }
 
-/// `text` without the blank lines den put after `restored` to push it into
-/// the scrollback (see `TerminalPanel::new`): the console's first prompt
-/// follows the restored text directly, as it would have in one session.
-fn without_padding(text: &str, restored: Option<&str>) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let restored: Vec<&str> = restored.map(|r| r.lines().collect()).unwrap_or_default();
-    // The restored text, or what is left of it, heads `text`.
-    let kept = (0..=lines.len().min(restored.len())).rev().find(|&n| lines[..n] == restored[restored.len() - n..]).unwrap_or(0);
-    let padding = lines[kept..].iter().take_while(|line| line.trim().is_empty()).count();
-    lines[..kept].iter().chain(&lines[kept + padding..]).copied().collect::<Vec<_>>().join("\n")
-}
-
 impl Dimensions for GridSize {
     fn total_lines(&self) -> usize {
         self.lines
@@ -290,8 +278,6 @@ pub struct TerminalPanel {
     cell: Size<Pixels>,
     /// Where the grid starts in the window, from the last layout.
     origin: Point<Pixels>,
-    /// The text brought back from the last session, heading the scrollback.
-    restored: Option<String>,
     selecting: bool,
     /// The link under the pointer while Ctrl is held: its screen row and columns.
     hover_link: Option<(usize, Range<usize>)>,
@@ -369,7 +355,6 @@ impl TerminalPanel {
             lines,
             cell: size(px(8.), px(17.)),
             origin: Point::default(),
-            restored: None,
             selecting: false,
             hover_link: None,
             link_cache: None,
@@ -387,13 +372,10 @@ impl TerminalPanel {
             _reader: None,
         };
         if let Some(history) = history.filter(|h| !h.trim().is_empty()) {
-            // Then enough new lines to push it into the scrollback, where the
-            // console's first screen clear does not reach; `scrollback` drops
-            // them again, so they do not pile up over restarts.
-            let history = history.trim_end().to_string();
-            let text = format!("{}\r\n{}", history.replace('\n', "\r\n"), "\r\n".repeat(lines));
+            // The console asks where the cursor is and paints from that row
+            // down, so the shell's first prompt follows the text directly.
+            let text = format!("{}\r\n", history.trim_end().replace('\n', "\r\n"));
             this.parser.advance(&mut this.term, text.as_bytes());
-            this.restored = Some(history);
         }
         let weak = cx.weak_entity();
         cx.global_mut::<Terminals>().0.insert(this.hook_id, weak);
@@ -862,10 +844,9 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    /// The last `max` lines of output as plain text, trailing blank lines
-    /// dropped, and the padding after the restored text with them.
+    /// The last `max` lines of output as plain text, trailing blank lines dropped.
     pub(crate) fn scrollback(&self, max: usize) -> String {
-        without_padding(&tail_text(&self.term, self.lines, self.columns, max), self.restored.as_deref())
+        tail_text(&self.term, self.lines, self.columns, max)
     }
 
     /// The folder the shell is in, as its prompt last reported.
@@ -1087,7 +1068,7 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text, without_padding};
+    use super::{Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text};
 
     #[test]
     fn prompt_titles() {
@@ -1112,19 +1093,5 @@ mod tests {
         }
         assert_eq!(tail_text(&term, 5, 20, 3), "line 997\nline 998\nline 999");
         assert_eq!(tail_text(&term, 5, 20, 2000).lines().count(), 1000);
-    }
-
-    #[test]
-    fn padding_after_the_restored_text_is_dropped() {
-        let restored = "PS C:\\den> ls\nmain.rs\n\nPS C:\\den>";
-        let padded = format!("{restored}\n{}PS C:\\den> echo hi\nhi\n\nPS C:\\den>", "\n".repeat(30));
-        assert_eq!(without_padding(&padded, Some(restored)), "PS C:\\den> ls\nmain.rs\n\nPS C:\\den>\nPS C:\\den> echo hi\nhi\n\nPS C:\\den>");
-        // Only its tail still saved: the padding follows that tail.
-        let tail = format!("PS C:\\den>\n{}PS C:\\den> echo hi", "\n".repeat(30));
-        assert_eq!(without_padding(&tail, Some(restored)), "PS C:\\den>\nPS C:\\den> echo hi");
-        // Nothing of it left, or nothing restored: blank lines stay.
-        assert_eq!(without_padding("a\n\nb", Some(restored)), "a\n\nb");
-        assert_eq!(without_padding("a\n\nb", None), "a\n\nb");
-        assert_eq!(without_padding(restored, Some(restored)), restored);
     }
 }
