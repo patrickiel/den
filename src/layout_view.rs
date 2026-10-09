@@ -604,7 +604,7 @@ impl Workspace {
     /// that kind's icon, highlighted.
     fn default_button(&self, group: NodeId, current: Option<Kind>, cx: &mut Context<Self>) -> impl IntoElement {
         let tooltip = match current {
-            Some(kind) => format!("Default group for new {}", kind.label()),
+            Some(kind) => format!("Home for new {}", kind.label()),
             None => "Make this group the default for a kind of tab".to_string(),
         };
         let this = cx.weak_entity();
@@ -616,7 +616,7 @@ impl Workspace {
             .selected(current.is_some())
             .tooltip(tooltip)
             .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu.check_side(MenuSide::Right).label("DEFAULT GROUP FOR");
+                let mut menu = menu.check_side(MenuSide::Right).label("HOME FOR");
                 for kind in Kind::ALL {
                     let this = this.clone();
                     menu = menu.item(
