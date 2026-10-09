@@ -845,7 +845,7 @@ impl TerminalPanel {
     }
 
     /// The last `max` lines of output as plain text, trailing blank lines dropped.
-    fn scrollback(&self, max: usize) -> String {
+    pub(crate) fn scrollback(&self, max: usize) -> String {
         tail_text(&self.term, self.lines, self.columns, max)
     }
 

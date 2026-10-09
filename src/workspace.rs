@@ -38,6 +38,7 @@ use crate::{
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
     layout_view::{Drop, Dragged, DropHint, Flash, Hints, Zones},
+    overlays::{Maximized, Overview, PaintedRef},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::{Refresh, Repo},
@@ -307,11 +308,17 @@ pub struct Workspace {
     hint_seq: u64,
     /// The group or tab the keys last went to, and when: its border flashes.
     flash: Option<(Flash, std::time::Instant)>,
+    /// A group drawn over its window's body, sidebar and all (`overlays.rs`).
+    pub(crate) maximized: Option<Maximized>,
+    /// Every tab as a tile, over one window's body.
+    pub(crate) overview: Option<Overview>,
+    /// Where the windows' bodies and the maximized group's slot were painted.
+    pub(crate) painted: PaintedRef,
     /// Tabs whose program wanted the user while they looked elsewhere.
     pub(crate) attention: std::collections::HashSet<PaneId>,
     /// The main window, and each floating window by its float's id.
     window: AnyWindowHandle,
-    float_windows: HashMap<u64, AnyWindowHandle>,
+    pub(crate) float_windows: HashMap<u64, AnyWindowHandle>,
     /// The group last active in each window (`None` for the main one), for
     /// coming back to that window.
     last_active: HashMap<Option<u64>, NodeId>,
@@ -433,6 +440,9 @@ impl Workspace {
             hints: None,
             hint_seq: 0,
             flash: None,
+            maximized: None,
+            overview: None,
+            painted: PaintedRef::default(),
             attention: Default::default(),
             window: window.window_handle(),
             float_windows: HashMap::new(),
@@ -531,6 +541,7 @@ impl Workspace {
             .or_else(|| tree.groups().first().copied())
             .unwrap_or(tree.root.id());
         self.tree = tree;
+        self.maximized = None;
         self.last_active.clear();
         self.history.clear();
         self.note_visit();
@@ -571,6 +582,10 @@ impl Workspace {
     /// After every edit of the arrangement: redraw, open or close floating
     /// windows to match, and save.
     pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
+        // The maximized group closed: nothing is maximized.
+        if self.maximized_group().is_some_and(|group| !self.tree.find(group).is_some_and(Node::is_group)) {
+            self.maximized = None;
+        }
         self.note_visit();
         cx.notify();
         self.sync_floats(cx);
@@ -583,6 +598,14 @@ impl Workspace {
         self.seen(group, cx);
         if self.tree.find(group).is_some_and(Node::is_group) {
             self.last_active.insert(self.tree.float_of(group), group);
+            // Another group of the maximized group's window takes over: the
+            // maximized one shrinks back, so what is active can be seen.
+            if let Some(maximized) = self.maximized_group()
+                && maximized != group
+                && self.tree.float_of(maximized) == self.tree.float_of(group)
+            {
+                self.restore_group(cx);
+            }
         }
         if self.active_group != group && self.tree.find(group).is_some_and(Node::is_group) {
             self.active_group = group;
@@ -1051,7 +1074,8 @@ impl Workspace {
     }
 
     /// A floating window's content: a title bar and its groups.
-    pub(crate) fn render_float(&self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_float(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.settle_overlays();
         self.sync_browsers(Some(id), window, cx);
         let Some(root) = self.tree.window_root(Some(id)) else { return Empty.into_any_element() };
         let root_id = root.id();
@@ -1081,7 +1105,7 @@ impl Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(title_bar)
-            .child(div().flex_1().min_h_0().child(groups))
+            .child(div().flex_1().min_h_0().relative().child(groups).child(self.render_overlays(Some(id), window, cx)))
             .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
             .into_any_element()
     }
@@ -1108,6 +1132,14 @@ impl Workspace {
 
     /// Ctrl+1…8 (Cmd on macOS): the group there in the layout, counted from 1.
     fn focus_group_at(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // With a group shown as tiles, the numbers are its tiles'.
+        if let Some(tiled) = self.tiled_group() {
+            if let Some(pane) = n.checked_sub(1).and_then(|ix| self.tree.tabs(tiled).get(ix).copied()) {
+                self.show_pane(pane, true, window, cx);
+                self.flash(Flash::Tab(pane), cx);
+            }
+            return;
+        }
         let Some(group) = n.checked_sub(1).and_then(|ix| self.tree.groups().get(ix).copied()) else { return };
         self.set_active_group(group, cx);
         if let Some(pane) = self.tree.active_tab(group) {
@@ -1456,13 +1488,20 @@ impl Workspace {
     fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         // A page stays live: only a drag or a dialog hides it (menus and
         // toasts may be drawn under it).
-        let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
+        let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx) || self.overview_shown(float);
+        // Under a maximized group, the other groups' pages are out of sight;
+        // in one maximized as tiles, every page is in sight.
+        let maximized = self.maximized.as_ref().filter(|m| self.tree.float_of(m.group) == float);
         for (id, browser) in self.panes_of::<crate::browser::BrowserPanel>() {
             let Some(group) = self.tree.group_of(id) else { continue };
             if self.tree.float_of(group) != float {
                 continue;
             }
-            let showing = self.tree.active_tab(group) == Some(id);
+            let showing = match maximized {
+                Some(m) if m.group != group => false,
+                Some(m) if m.tiles => true,
+                _ => self.tree.active_tab(group) == Some(id),
+            };
             browser.read(cx).set_shown(showing && !covered);
         }
     }
@@ -1737,6 +1776,14 @@ impl Workspace {
 
     /// Alt+arrows: the group next to the active one, and its shown tab.
     fn focus_group(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        // With a group shown as tiles, the keys go between its tiles.
+        if self.tiled_group().is_some() {
+            if let Some(pane) = self.tile_beside(side) {
+                self.show_pane(pane, true, window, cx);
+                self.flash(Flash::Tab(pane), cx);
+            }
+            return;
+        }
         let Some(group) = self.tree.neighbor(self.active_group, side) else { return };
         self.set_active_group(group, cx);
         if let Some(pane) = self.tree.active_tab(group) {
@@ -1938,6 +1985,13 @@ impl Workspace {
             .icon(Icon::new(IconName::LayoutDashboard))
             .tooltip("Layouts")
             .dropdown_menu(move |menu, _, cx| layouts_menu(this.clone(), menu, cx));
+        let overview_button = Button::new("overview")
+            .small()
+            .ghost()
+            .icon(Icon::new(IconName::LayoutGrid))
+            .tooltip(crate::keymap::with_keys("Show All Tabs", &crate::ShowAllTabs, cx))
+            .selected(self.overview_shown(None))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_overview(window, cx)));
 
         // As in den: the sidebar views on the left, the session in the middle,
         // the layout and the workspace's split and flip, then settings, on the
@@ -2009,6 +2063,7 @@ impl Workspace {
                         .gap_1()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .children(self.extension_buttons(cx))
+                        .child(overview_button)
                         .child(layout_button)
                         // The root's actions, called the workspace's.
                         .children(self.root_actions(root_node, "workspace", root_is_split, cx))
@@ -2230,6 +2285,9 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
+            .on_action(cx.listener(|this, _: &crate::ToggleMaximizeGroup, window, cx| this.toggle_maximize(this.active_group, false, window, cx)))
+            .on_action(cx.listener(|this, _: &crate::ToggleGroupTiles, window, cx| this.toggle_maximize(this.active_group, true, window, cx)))
+            .on_action(cx.listener(|this, _: &crate::ShowAllTabs, window, cx| this.toggle_overview(window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if let Some(pane) = this.tree.active_tab(this.active_group) {
                     this.request_close_pane(pane, window, cx);
@@ -2372,6 +2430,7 @@ fn open_float_window(workspace: Entity<Workspace>, id: u64, bounds: Option<[f32;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_overlays();
         self.sync_browsers(None, window, cx);
         self.report_active_file(cx);
         let sidebar = AppState::get(cx).sidebar.clone();
@@ -2430,7 +2489,9 @@ impl Render for Workspace {
                 crate::extensions::run_command(&action.extension, &action.command, &this.root, cx)
             }))
             .child(self.render_title_bar(window, cx))
-            .child(div().flex_1().min_h_0().child(body))
+            // The overlays (a maximized group, the tiles) lie over the whole
+            // body, sidebar and all, under the title bar.
+            .child(div().flex_1().min_h_0().relative().child(body).child(self.render_overlays(None, window, cx)))
             .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
     }
 }

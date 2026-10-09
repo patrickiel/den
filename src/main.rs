@@ -28,6 +28,7 @@ mod keymap;
 mod layout;
 mod layout_file;
 mod layout_view;
+mod overlays;
 mod pane;
 mod preset_icon;
 mod repo;
@@ -87,6 +88,9 @@ actions!(
         ShowCommands,
         OpenKeyboardShortcuts,
         ToggleSidebar,
+        ToggleMaximizeGroup,
+        ToggleGroupTiles,
+        ShowAllTabs,
         GoToLine,
         NavigateBack,
         NavigateForward,
@@ -235,6 +239,9 @@ pub(crate) fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
+                MenuItem::action("Toggle Maximize Group", ToggleMaximizeGroup),
+                MenuItem::action("Toggle Group Tiles", ToggleGroupTiles),
+                MenuItem::action("Show All Tabs", ShowAllTabs),
                 MenuItem::action("Save Layout…", SaveLayout),
                 MenuItem::action("Reset Layout", ResetLayout),
                 MenuItem::separator(),
@@ -335,6 +342,9 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<ShowCommands>,
         forward::<OpenKeyboardShortcuts>,
         forward::<ToggleSidebar>,
+        forward::<ToggleMaximizeGroup>,
+        forward::<ToggleGroupTiles>,
+        forward::<ShowAllTabs>,
         forward::<NavigateBack>,
         forward::<NavigateForward>,
         forward::<OpenTab>,

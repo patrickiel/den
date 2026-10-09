@@ -1854,6 +1854,7 @@ impl Render for SettingsPanel {
                         .child(toggle("Style from history", "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).", "ai-derive", settings.ai_derive_style, |s, v| s.ai_derive_style = v, cx))
                         .child(section_title("Tabs", cx))
                         .child(toggle("Close buttons", "Show a close button on each tab (a middle-click closes a tab either way).", "tab-close", settings.tab_close_button, |s, v| s.tab_close_button = v, cx))
+                        .child(toggle("Maximize over the sidebar", "A maximized group (or one shown as tiles) covers the sidebar as well; off, it covers only the groups.", "maximize-sidebar", settings.maximize_covers_sidebar, |s, v| s.maximize_covers_sidebar = v, cx))
                         .child(section_title("Notifications", cx))
                         .child(toggle("Notifications", "When a terminal's program wants you (an agent finished or waits for input, a bell) while you look at another tab or window.", "notifications", settings.notifications, |s, v| s.notifications = v, cx))
                         .child(toggle("Toast", "A message in the window's corner; click it to go to the tab.", "notify-toast", settings.notify_toast, |s, v| s.notify_toast = v, cx))

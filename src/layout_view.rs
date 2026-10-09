@@ -302,6 +302,12 @@ fn group_divider() -> ResizeHandleRenderer {
     })
 }
 
+/// How many tiles go across for `n` tabs: three side by side, four as two by
+/// two, five to nine three across, then four, as a near square.
+pub(crate) fn tile_columns(n: usize) -> usize {
+    ((n as f32).sqrt().ceil() as usize).max(n.min(3)).max(1)
+}
+
 /// A flex child taking `share` of the space along the split.
 fn grow(element: Div, share: f32) -> Div {
     let mut element = element.flex_basis(px(0.)).flex_shrink_0();
@@ -465,7 +471,9 @@ impl Workspace {
 
     fn render_node(&self, node: &Node, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match node {
-            Node::Group { id, tabs, active } => self.render_group(*id, tabs, *active, window, cx),
+            // A maximized group is drawn over the body; its place stays empty.
+            Node::Group { id, .. } if self.maximized_group() == Some(*id) => self.render_slot(*id, cx),
+            Node::Group { id, tabs, active } => self.render_group(*id, tabs, *active, false, window, cx),
             Node::Split { id, axis, children, sizes } => self.render_split(*id, *axis, children, sizes, window, cx),
         }
     }
@@ -601,7 +609,9 @@ impl Workspace {
 
     // -- Groups ----------------------------------------------------------------
 
-    fn render_group(&self, id: NodeId, tabs: &[PaneId], active: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// A group: its strip over its shown tab, or over every tab at once when
+    /// `tiled` (maximized as tiles, see `overlays.rs`).
+    pub(crate) fn render_group(&self, id: NodeId, tabs: &[PaneId], active: usize, tiled: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let is_active = id == self.active_group;
         let shown = tabs.get(active).and_then(|pane| self.panes.get(pane)).cloned();
@@ -610,8 +620,8 @@ impl Workspace {
         let tab_bar = theme.tab_bar;
         let primary = theme.primary;
         // Its number for Focus Group, while the keys ask for them (none past
-        // the commands there are).
-        let number = (self.hints == Some(Hints::Groups))
+        // the commands there are); tiled, the numbers are the tiles'.
+        let number = (self.hints == Some(Hints::Groups) && !tiled)
             .then(|| self.tree.groups().iter().position(|g| *g == id).map(|ix| ix + 1).filter(|n| *n <= 8))
             .flatten();
         let flash = self.flash_alpha(Flash::Group(id), window);
@@ -634,6 +644,7 @@ impl Workspace {
                 }
             }))
             .map(|this| match &shown {
+                Some(_) if tiled => this.child(self.render_tiles(tabs, active, window, cx)),
                 Some(pane) => this.child(pane.view().cached(StyleRefinement::default().absolute().size_full())),
                 None => this.child(
                     v_flex()
@@ -668,7 +679,7 @@ impl Workspace {
                     .w_full()
                     // Under the strip, so dimming fades its tabs and not its colour.
                     .bg(tab_bar)
-                    .child(div().when(!is_active, |this| this.opacity(0.6)).child(self.render_tab_strip(id, tabs, active, window, cx))),
+                    .child(div().when(!is_active, |this| this.opacity(0.6)).child(self.render_tab_strip(id, tabs, active, tiled, window, cx))),
             )
             .child(content)
             // The keys came here: a border round the whole group, strip and
@@ -679,7 +690,93 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_tab_strip(&self, group: NodeId, tabs: &[PaneId], active: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Every tab of a group at once, each live in a cell of a grid (see
+    /// `tile_columns`), the cells all one size. The active tab's cell is
+    /// ringed; a click in a cell makes its tab the active one. While the
+    /// keys ask for numbers, each cell shows its own (the Focus Group and
+    /// Open Tab keys both go between the tiles), and the cell the keys went
+    /// to flashes.
+    fn render_tiles(&self, tabs: &[PaneId], active: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (primary, border, tab_bar) = (theme.primary, theme.border, theme.tab_bar);
+        let numbered = self.hints.is_some();
+        let columns = tile_columns(tabs.len());
+        let rows = tabs.chunks(columns).enumerate().map(|(row, chunk)| {
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                // The cells take the row's whole height (a row centres its
+                // children otherwise, and a cell would be its caption alone).
+                .items_stretch()
+                .gap(px(4.))
+                .children(chunk.iter().enumerate().map(|(col, pane_id)| {
+                    let pane_id = *pane_id;
+                    let ix = row * columns + col;
+                    let is_active = ix == active;
+                    let pane = self.panes.get(&pane_id);
+                    let number = (numbered && ix < 8).then_some(ix + 1);
+                    let flash = self.flash_alpha(Flash::Tab(pane_id), window);
+                    let caption = h_flex()
+                        .flex_none()
+                        .h(px(24.))
+                        .px_2()
+                        .gap_1p5()
+                        .items_center()
+                        .bg(tab_bar)
+                        .text_xs()
+                        .when_some(pane, |this, pane| {
+                            this.child(pane.icon_element(cx).unwrap_or_else(|| Icon::new(pane.icon(cx)).small().into_any_element()))
+                                .child(div().flex_1().min_w_0().truncate().child(pane.label(cx)))
+                                .when(pane.is_dirty(cx), |this| this.child("●"))
+                        })
+                        // Closes the tab, as the tab's own X does.
+                        .child(
+                            Button::new(("tile-close", pane_id))
+                                .icon(IconName::X)
+                                .xsmall()
+                                .ghost()
+                                .tab_stop(false)
+                                .tooltip(crate::keymap::with_keys("Close", &crate::CloseTab, cx))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.request_close_pane(pane_id, window, cx);
+                                })),
+                        );
+                    // A middle-click on the caption closes, as on a tab (not
+                    // one in the pane, which is the program's).
+                    let caption = caption.on_mouse_down(MouseButton::Middle, cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.request_close_pane(pane_id, window, cx);
+                    }));
+                    v_flex()
+                        .id(("tile", pane_id))
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(if is_active { primary } else { border })
+                        .capture_any_mouse_down(cx.listener(move |this, _, window, cx| this.show_pane(pane_id, false, window, cx)))
+                        .child(caption)
+                        .child(div().relative().flex_1().min_h_0().w_full().when_some(pane, |this, pane| {
+                            this.child(pane.view().cached(StyleRefinement::default().absolute().size_full()))
+                        }))
+                        .when_some(number, |this, n| this.child(deferred(number_badge(n, true, cx)).with_priority(1)))
+                        .when_some(flash, |this, alpha| {
+                            this.child(deferred(div().absolute().inset_0().rounded(px(4.)).border_2().border_color(primary.alpha(alpha))).with_priority(1))
+                        })
+                }))
+                // A short last row keeps its cells the width of the others'.
+                .children((chunk.len()..columns).map(|_| div().flex_1()))
+        });
+        v_flex().size_full().p(px(4.)).gap(px(4.)).children(rows).into_any_element()
+    }
+
+    /// The strip: the tabs between the group's default button and its
+    /// actions. Tiled, every tab is in sight below with its own caption, so
+    /// the strip keeps only the buttons.
+    fn render_tab_strip(&self, group: NodeId, tabs: &[PaneId], active: usize, tiled: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The strip's scroll, and the tab it last showed: a tab that becomes
         // the active one is scrolled into view, as in VS Code.
         let scroll = window.use_keyed_state(("tab-strip-scroll", group), cx, |_, _| (ScrollHandle::new(), None::<PaneId>));
@@ -704,6 +801,7 @@ impl Workspace {
         let tab_elements: Vec<Tab> = tabs
             .iter()
             .enumerate()
+            .filter(|_| !tiled)
             .filter_map(|(ix, pane_id)| {
                 let pane = self.panes.get(pane_id)?;
                 let pane_id = *pane_id;
@@ -854,6 +952,28 @@ impl Workspace {
                 this.children(openers).child(div().flex_none().w(px(1.)).h_4().mx_0p5().bg(rule))
             })
             .when(buttons.split, |this| this.child(self.split_button(group, "group", true, cx)))
+            // Over the whole window: the shown tab alone, or every tab as tiles.
+            .when(buttons.maximize, |this| {
+                let maximized = self.is_maximized(group, false);
+                let tiled = self.is_maximized(group, true);
+                this.child(
+                    Button::new(("group-maximize", group))
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(if maximized { IconName::Minimize2 } else { IconName::Maximize2 }))
+                        .tooltip(crate::keymap::with_keys(if maximized { "Restore group" } else { "Maximize group" }, &crate::ToggleMaximizeGroup, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.toggle_maximize(group, false, window, cx))),
+                )
+                .child(
+                    Button::new(("group-tiles", group))
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(IconName::LayoutGrid))
+                        .selected(tiled)
+                        .tooltip(crate::keymap::with_keys(if tiled { "Restore group" } else { "Show all tabs as tiles" }, &crate::ToggleGroupTiles, cx))
+                        .on_click(cx.listener(move |this, _, window, cx| this.toggle_maximize(group, true, window, cx))),
+                )
+            })
             // An empty group closes with its own X, as in den (not the last one).
             .when(tabs.is_empty() && self.tree.groups().len() > 1, |this| {
                 this.child(
@@ -1035,6 +1155,8 @@ impl Workspace {
     fn group_menu(&self, group: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
         let floating = self.tree.float_of(group).is_some();
+        let maximized = self.is_maximized(group, false);
+        let tiled = self.is_maximized(group, true);
         // The kinds of tab this group takes: its menu lists only their buttons.
         let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| self.defaults.allows(group, *kind)).collect();
         Button::new(("group-menu", group))
@@ -1052,6 +1174,14 @@ impl Workspace {
                 let menu = menu
                     .item(item("Split Right", |this, group, _, cx| this.split(group, Side::Right, cx)).icon(Icon::new(IconName::Columns2)))
                     .item(item("Split Down", |this, group, _, cx| this.split(group, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
+                    .item(
+                        item(if maximized { "Restore Group" } else { "Maximize Group" }, |this, group, window, cx| this.toggle_maximize(group, false, window, cx))
+                            .icon(Icon::new(if maximized { IconName::Minimize2 } else { IconName::Maximize2 })),
+                    )
+                    .item(
+                        item(if tiled { "Restore Group" } else { "Show All Tabs as Tiles" }, |this, group, window, cx| this.toggle_maximize(group, true, window, cx))
+                            .icon(Icon::new(IconName::LayoutGrid)),
+                    )
                     .separator()
                     .map(|menu| window_items(menu, &this, group, floating))
                     .separator()
@@ -1113,7 +1243,8 @@ fn group_buttons_menu(menu: PopupMenu, kinds: &[Kind], cx: &App) -> PopupMenu {
         .label("BUTTONS")
         .when(kinds.contains(&Kind::Terminals), |menu| menu.item(toggle("Shell", buttons.shell, |b| b.shell = !b.shell)))
         .when(kinds.contains(&Kind::Browsers), |menu| menu.item(toggle("Browser", buttons.browser, |b| b.browser = !b.browser)))
-        .item(toggle("Split", buttons.split, |b| b.split = !b.split));
+        .item(toggle("Split", buttons.split, |b| b.split = !b.split))
+        .item(toggle("Maximize and Tiles", buttons.maximize, |b| b.maximize = !b.maximize));
     for (ix, preset) in settings.presets.iter().enumerate().filter(|(_, preset)| kinds.contains(&preset.kind())) {
         menu = menu.item(PopupMenuItem::new(preset.name.clone()).checked(preset.pinned).on_click(move |_, _, cx| {
             Settings::update(cx, |s| {

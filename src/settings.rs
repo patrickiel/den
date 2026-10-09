@@ -32,11 +32,12 @@ pub struct GroupButtons {
     pub shell: bool,
     pub browser: bool,
     pub split: bool,
+    pub maximize: bool,
 }
 
 impl Default for GroupButtons {
     fn default() -> Self {
-        Self { shell: true, browser: true, split: true }
+        Self { shell: true, browser: true, split: true, maximize: true }
     }
 }
 
@@ -120,6 +121,9 @@ pub struct Settings {
     /// Lines a terminal keeps above the screen.
     pub scrollback: usize,
     pub tab_close_button: bool,
+    /// A maximized group (or one maximized as tiles) covers the sidebar too,
+    /// not just the groups.
+    pub maximize_covers_sidebar: bool,
     /// Saving formats the file first (Format Document's formatter).
     pub format_on_save: bool,
     pub diff_layout: DiffLayout,
@@ -208,6 +212,7 @@ impl Default for Settings {
             shell: String::new(),
             scrollback: 10_000,
             tab_close_button: true,
+            maximize_covers_sidebar: true,
             format_on_save: false,
             diff_layout: DiffLayout::Automatic,
             smart_commit: SmartCommit::Ask,
