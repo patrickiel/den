@@ -326,6 +326,10 @@ pub struct Workspace {
     pub(crate) dragging: Option<Dragged>,
     /// Where each window drew its drop zones, for a drag from another one.
     pub(crate) zones: Zones,
+    /// The size the maximized group has when full, which the tiles' grid is
+    /// laid out for (see `tile_columns`), and how many then go across.
+    pub(crate) tile_area: std::cell::Cell<Option<Size<Pixels>>>,
+    pub(crate) tile_columns: std::cell::Cell<usize>,
     /// A drag from another window over this float's window (`None` for the
     /// main one): where the pointer is in it.
     pub(crate) remote_drag: Option<(Option<u64>, Point<Pixels>)>,
@@ -450,6 +454,8 @@ impl Workspace {
             last_active: HashMap::new(),
             dragging: None,
             zones: Zones::default(),
+            tile_area: Default::default(),
+            tile_columns: std::cell::Cell::new(1),
             remote_drag: None,
             tab_menu: None,
             activate_float: None,
@@ -2278,6 +2284,9 @@ impl Workspace {
                 }
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
+            // The keys' changes go to a browser while it has the keyboard, so
+            // the pointer's moves (which carry the keys' state) catch up.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(false, window, cx)))
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))

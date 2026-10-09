@@ -184,12 +184,12 @@ impl Workspace {
     }
 
     /// The tile beside the active one towards `side` in the tiled group's
-    /// grid, as `render_tiles` lays it out; `None` at the grid's edge.
+    /// grid, as `render_tiles` last laid it out; `None` at the grid's edge.
     pub(crate) fn tile_beside(&self, side: Side) -> Option<PaneId> {
         let group = self.tiled_group()?;
         let tabs = self.tree.tabs(group);
         let active = self.tree.active_tab(group).and_then(|pane| tabs.iter().position(|p| *p == pane))?;
-        let columns = crate::layout_view::tile_columns(tabs.len());
+        let columns = self.tile_columns.get().max(1);
         let (row, col) = (active / columns, active % columns);
         let (row, col) = match side {
             Side::Left => (row, col.checked_sub(1)?),
@@ -311,14 +311,17 @@ impl Workspace {
         });
         // Where the group lies when full, and where it grows from (drawn
         // full before the body has been painted).
-        let at = body.zip(region).map(|(body, region)| {
+        let full = region.map(|region| {
             let margin = px(SPACING);
-            let full = Bounds::new(region.origin + point(margin, margin), size(region.size.width - margin * 2., region.size.height - margin * 2.));
-            match m.from {
-                Some(from) => between(Bounds::new(from.origin - body.origin, from.size), full, t),
-                None => full,
-            }
+            Bounds::new(region.origin + point(margin, margin), size(region.size.width - margin * 2., region.size.height - margin * 2.))
         });
+        let at = body.zip(full).map(|(body, full)| match m.from {
+            Some(from) => between(Bounds::new(from.origin - body.origin, from.size), full, t),
+            None => full,
+        });
+        // The tiles' grid is laid out for the full size, so it holds still
+        // while the group grows to it and shrinks back.
+        self.tile_area.set(full.map(|full| full.size));
         let (background, border) = (cx.theme().background, cx.theme().border);
         let frame = div()
             .id(("maximized", group))

@@ -33,11 +33,12 @@ pub struct GroupButtons {
     pub browser: bool,
     pub split: bool,
     pub maximize: bool,
+    pub tiles: bool,
 }
 
 impl Default for GroupButtons {
     fn default() -> Self {
-        Self { shell: true, browser: true, split: true, maximize: true }
+        Self { shell: true, browser: true, split: true, maximize: true, tiles: true }
     }
 }
 

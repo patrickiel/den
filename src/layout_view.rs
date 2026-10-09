@@ -302,10 +302,29 @@ fn group_divider() -> ResizeHandleRenderer {
     })
 }
 
-/// How many tiles go across for `n` tabs: three side by side, four as two by
-/// two, five to nine three across, then four, as a near square.
-pub(crate) fn tile_columns(n: usize) -> usize {
-    ((n as f32).sqrt().ceil() as usize).max(n.min(3)).max(1)
+/// How many tiles go across for `n` tabs in an area `aspect` (width over
+/// height) times as wide as high: as many as makes the cells nearest to
+/// square, so a wide window gets more and a tall pane fewer. Of the two
+/// counts about the ideal, the one leaving fewer cells empty wins; a last
+/// row that would be short gives its spare columns back (the cells only
+/// widen). On a 16:9 window: two side by side, three side by side, four as
+/// two by two, five to six three across, seven to eight four, nine three.
+pub(crate) fn tile_columns(n: usize, aspect: f32) -> usize {
+    if n <= 1 {
+        return 1;
+    }
+    let ideal = (n as f32 * aspect.max(0.01)).sqrt();
+    let rows = |c: usize| n.div_ceil(c);
+    let settle = |c: usize| n.div_ceil(rows(c));
+    let empty = |c: usize| settle(c) * rows(c) - n;
+    let (lo, hi) = ((ideal.floor() as usize).clamp(1, n), (ideal.ceil() as usize).clamp(1, n));
+    let pick = match empty(lo).cmp(&empty(hi)) {
+        std::cmp::Ordering::Less => lo,
+        std::cmp::Ordering::Greater => hi,
+        std::cmp::Ordering::Equal if ideal - lo as f32 <= hi as f32 - ideal => lo,
+        std::cmp::Ordering::Equal => hi,
+    };
+    settle(pick)
 }
 
 /// A flex child taking `share` of the space along the split.
@@ -691,7 +710,8 @@ impl Workspace {
     }
 
     /// Every tab of a group at once, each live in a cell of a grid (see
-    /// `tile_columns`), the cells all one size. The active tab's cell is
+    /// `tile_columns`, for the group's full size, the window's when that is
+    /// not known), the cells all one size. The active tab's cell is
     /// ringed; a click in a cell makes its tab the active one. While the
     /// keys ask for numbers, each cell shows its own (the Focus Group and
     /// Open Tab keys both go between the tiles), and the cell the keys went
@@ -700,7 +720,9 @@ impl Workspace {
         let theme = cx.theme();
         let (primary, border, tab_bar) = (theme.primary, theme.border, theme.tab_bar);
         let numbered = self.hints.is_some();
-        let columns = tile_columns(tabs.len());
+        let area = self.tile_area.get().unwrap_or_else(|| window.viewport_size());
+        let columns = tile_columns(tabs.len(), f32::from(area.width) / f32::from(area.height).max(1.));
+        self.tile_columns.set(columns);
         let rows = tabs.chunks(columns).enumerate().map(|(row, chunk)| {
             h_flex()
                 .flex_1()
@@ -955,7 +977,6 @@ impl Workspace {
             // Over the whole window: the shown tab alone, or every tab as tiles.
             .when(buttons.maximize, |this| {
                 let maximized = self.is_maximized(group, false);
-                let tiled = self.is_maximized(group, true);
                 this.child(
                     Button::new(("group-maximize", group))
                         .small()
@@ -964,7 +985,10 @@ impl Workspace {
                         .tooltip(crate::keymap::with_keys(if maximized { "Restore group" } else { "Maximize group" }, &crate::ToggleMaximizeGroup, cx))
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_maximize(group, false, window, cx))),
                 )
-                .child(
+            })
+            .when(buttons.tiles, |this| {
+                let tiled = self.is_maximized(group, true);
+                this.child(
                     Button::new(("group-tiles", group))
                         .small()
                         .ghost()
@@ -1154,43 +1178,49 @@ impl Workspace {
     /// The group's ⋮ menu.
     fn group_menu(&self, group: NodeId, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
-        let floating = self.tree.float_of(group).is_some();
-        let maximized = self.is_maximized(group, false);
-        let tiled = self.is_maximized(group, true);
-        // The kinds of tab this group takes: its menu lists only their buttons.
-        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| self.defaults.allows(group, *kind)).collect();
         Button::new(("group-menu", group))
             .small()
             .ghost()
             .icon(Icon::new(IconName::EllipsisVertical))
             .tooltip("Group")
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
-                let item = |label: &'static str, action: fn(&mut Workspace, NodeId, &mut Window, &mut Context<Workspace>)| {
-                    let this = this.clone();
-                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        _ = this.update(cx, |this, cx| action(this, group, window, cx));
-                    })
-                };
-                let menu = menu
-                    .item(item("Split Right", |this, group, _, cx| this.split(group, Side::Right, cx)).icon(Icon::new(IconName::Columns2)))
-                    .item(item("Split Down", |this, group, _, cx| this.split(group, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
-                    .item(
-                        item(if maximized { "Restore Group" } else { "Maximize Group" }, |this, group, window, cx| this.toggle_maximize(group, false, window, cx))
-                            .icon(Icon::new(if maximized { IconName::Minimize2 } else { IconName::Maximize2 })),
-                    )
-                    .item(
-                        item(if tiled { "Restore Group" } else { "Show All Tabs as Tiles" }, |this, group, window, cx| this.toggle_maximize(group, true, window, cx))
-                            .icon(Icon::new(IconName::LayoutGrid)),
-                    )
-                    .separator()
-                    .map(|menu| window_items(menu, &this, group, floating))
-                    .separator()
-                    .item(item("Close Group", |this, group, window, cx| this.request_close_group(group, window, cx)));
-                group_buttons_menu(menu, &kinds, cx)
-                    .separator()
-                    .item(item("Edit Presets…", |this, _, window, cx| this.open_settings(true, window, cx)).icon(Icon::new(IconName::Settings)))
-            })
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| group_menu_items(this.clone(), group, menu, window, cx))
     }
+}
+
+/// A group's ⋮ menu, from the group as it is now (rebuilt in place when a
+/// button is toggled, so the menu stays open).
+fn group_menu_items(this: WeakEntity<Workspace>, group: NodeId, menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let Some(workspace) = this.upgrade() else { return menu };
+    let (floating, maximized, tiled, kinds) = {
+        let workspace = workspace.read(cx);
+        // The kinds of tab this group takes: its menu lists only their buttons.
+        let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|kind| workspace.defaults.allows(group, *kind)).collect();
+        (workspace.tree.float_of(group).is_some(), workspace.is_maximized(group, false), workspace.is_maximized(group, true), kinds)
+    };
+    let item = |label: &'static str, action: fn(&mut Workspace, NodeId, &mut Window, &mut Context<Workspace>)| {
+        let this = this.clone();
+        PopupMenuItem::new(label).on_click(move |_, window, cx| {
+            _ = this.update(cx, |this, cx| action(this, group, window, cx));
+        })
+    };
+    let menu = menu
+        .item(item("Split Right", |this, group, _, cx| this.split(group, Side::Right, cx)).icon(Icon::new(IconName::Columns2)))
+        .item(item("Split Down", |this, group, _, cx| this.split(group, Side::Bottom, cx)).icon(Icon::new(IconName::Rows2)))
+        .item(
+            item(if maximized { "Restore Group" } else { "Maximize Group" }, |this, group, window, cx| this.toggle_maximize(group, false, window, cx))
+                .icon(Icon::new(if maximized { IconName::Minimize2 } else { IconName::Maximize2 })),
+        )
+        .item(
+            item(if tiled { "Restore Group" } else { "Show All Tabs as Tiles" }, |this, group, window, cx| this.toggle_maximize(group, true, window, cx))
+                .icon(Icon::new(IconName::LayoutGrid)),
+        )
+        .separator()
+        .map(|menu| window_items(menu, &this, group, floating))
+        .separator()
+        .item(item("Close Group", |this, group, window, cx| this.request_close_group(group, window, cx)));
+    group_buttons_menu(menu, &kinds, &this, group, cx)
+        .separator()
+        .item(item("Edit Presets…", |this, _, window, cx| this.open_settings(true, window, cx)).icon(Icon::new(IconName::Settings)))
 }
 
 /// A file's paths, and showing it, as the Explorer's menu has them.
@@ -1229,30 +1259,62 @@ fn window_items(menu: PopupMenu, this: &WeakEntity<Workspace>, node: NodeId, flo
 }
 
 /// The strip's buttons, checked when shown, as den's ⋮ menu lists them:
-/// the built-in ones and each preset (its pin), those of `kinds` only, as
-/// the strip shows them.
-fn group_buttons_menu(menu: PopupMenu, kinds: &[Kind], cx: &App) -> PopupMenu {
-    use crate::settings::GroupButtons;
+/// the built-in ones, then each preset (its pin) under its own heading,
+/// those of `kinds` only, as the strip shows them. A toggle rebuilds the
+/// menu in place, so several can be set in one go.
+fn group_buttons_menu(menu: PopupMenu, kinds: &[Kind], this: &WeakEntity<Workspace>, group: NodeId, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let settings = Settings::get(cx);
     let buttons = settings.group_buttons;
-    let toggle = |label: &'static str, on: bool, flip: fn(&mut GroupButtons)| {
-        PopupMenuItem::new(label).checked(on).on_click(move |_, _, cx| Settings::update(cx, |s| flip(&mut s.group_buttons)))
+    let own = cx.weak_entity();
+    let toggle = |label: SharedString, on: bool, flip: Rc<dyn Fn(&mut Settings)>| {
+        let (own, this) = (own.clone(), this.clone());
+        PopupMenuItem::element(move |_, _| {
+            let (own, this, flip, label) = (own.clone(), this.clone(), flip.clone(), label.clone());
+            // Over the whole row, check mark and padding included (the
+            // item's own click would close the menu), drawn as a plain item.
+            h_flex()
+                .id(label.clone())
+                .flex_1()
+                .min_h(px(26.))
+                .ml(px(-24.))
+                .mr(px(-8.))
+                .px_2()
+                .gap_1()
+                .items_center()
+                .child(if on { Icon::new(IconName::Check).xsmall() } else { Icon::empty().xsmall() })
+                .child(label)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    cx.stop_propagation();
+                    Settings::update(cx, |s| flip(s));
+                    let this = this.clone();
+                    _ = own.update(cx, |menu, cx| menu.rebuild(window, cx, |menu, window, cx| group_menu_items(this, group, menu, window, cx)));
+                    window.refresh();
+                })
+        })
     };
     let mut menu = menu
         .separator()
         .label("BUTTONS")
-        .when(kinds.contains(&Kind::Terminals), |menu| menu.item(toggle("Shell", buttons.shell, |b| b.shell = !b.shell)))
-        .when(kinds.contains(&Kind::Browsers), |menu| menu.item(toggle("Browser", buttons.browser, |b| b.browser = !b.browser)))
-        .item(toggle("Split", buttons.split, |b| b.split = !b.split))
-        .item(toggle("Maximize and Tiles", buttons.maximize, |b| b.maximize = !b.maximize));
-    for (ix, preset) in settings.presets.iter().enumerate().filter(|(_, preset)| kinds.contains(&preset.kind())) {
-        menu = menu.item(PopupMenuItem::new(preset.name.clone()).checked(preset.pinned).on_click(move |_, _, cx| {
-            Settings::update(cx, |s| {
+        .when(kinds.contains(&Kind::Terminals), |menu| menu.item(toggle("Shell".into(), buttons.shell, Rc::new(|s| s.group_buttons.shell = !s.group_buttons.shell))))
+        .when(kinds.contains(&Kind::Browsers), |menu| menu.item(toggle("Browser".into(), buttons.browser, Rc::new(|s| s.group_buttons.browser = !s.group_buttons.browser))))
+        .item(toggle("Split".into(), buttons.split, Rc::new(|s| s.group_buttons.split = !s.group_buttons.split)))
+        .item(toggle("Maximize".into(), buttons.maximize, Rc::new(|s| s.group_buttons.maximize = !s.group_buttons.maximize)))
+        .item(toggle("Tiles".into(), buttons.tiles, Rc::new(|s| s.group_buttons.tiles = !s.group_buttons.tiles)));
+    let presets: Vec<(usize, SharedString, bool)> =
+        settings.presets.iter().enumerate().filter(|(_, preset)| kinds.contains(&preset.kind())).map(|(ix, preset)| (ix, preset.name.clone().into(), preset.pinned)).collect();
+    if !presets.is_empty() {
+        menu = menu.separator().label("PRESETS");
+    }
+    for (ix, name, pinned) in presets {
+        menu = menu.item(toggle(
+            name,
+            pinned,
+            Rc::new(move |s| {
                 if let Some(preset) = s.presets.get_mut(ix) {
                     preset.pinned = !preset.pinned;
                 }
-            })
-        }));
+            }),
+        ));
     }
     menu
 }

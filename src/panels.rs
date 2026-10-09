@@ -1868,7 +1868,9 @@ impl Render for SettingsPanel {
                                 .gap_1()
                                 .child(strip_toggle("strip-shell", "Shell", settings.group_buttons.shell, |b| b.shell = !b.shell))
                                 .child(strip_toggle("strip-browser", "Browser", settings.group_buttons.browser, |b| b.browser = !b.browser))
-                                .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split)),
+                                .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split))
+                                .child(strip_toggle("strip-maximize", "Maximize", settings.group_buttons.maximize, |b| b.maximize = !b.maximize))
+                                .child(strip_toggle("strip-tiles", "Tiles", settings.group_buttons.tiles, |b| b.tiles = !b.tiles)),
                             cx,
                         ))
                         .child(setting_row(
