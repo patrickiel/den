@@ -278,6 +278,9 @@ pub struct TerminalPanel {
     cell: Size<Pixels>,
     /// Where the grid starts in the window, from the last layout.
     origin: Point<Pixels>,
+    /// The last session's text, to lay out once the view has its size, and
+    /// the console's output held back until then.
+    restore: Option<(String, Vec<u8>)>,
     selecting: bool,
     /// The link under the pointer while Ctrl is held: its screen row and columns.
     hover_link: Option<(usize, Range<usize>)>,
@@ -358,6 +361,7 @@ impl TerminalPanel {
             lines,
             cell: size(px(8.), px(17.)),
             origin: Point::default(),
+            restore: None,
             selecting: false,
             hover_link: None,
             link_cache: None,
@@ -376,10 +380,11 @@ impl TerminalPanel {
             _reader: None,
         };
         if let Some(history) = history.filter(|h| !h.trim().is_empty()) {
-            // The console asks where the cursor is and paints from that row
-            // down, so the shell's first prompt follows the text directly.
-            let text = format!("{}\r\n", history.trim_end().replace('\n', "\r\n"));
-            this.parser.advance(&mut this.term, text.as_bytes());
+            // Laid out in `fit`, at the view's size: the console's first
+            // question is where the cursor is, and it paints from that row
+            // down, so the text must have its final shape by then for the
+            // prompt to follow it directly.
+            this.restore = Some((format!("{}\r\n", history.trim_end().replace('\n', "\r\n")), Vec::new()));
         }
         let weak = cx.weak_entity();
         cx.global_mut::<Terminals>().0.insert(this.hook_id, weak);
@@ -505,6 +510,10 @@ impl TerminalPanel {
     }
 
     fn feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        if let Some((_, held)) = &mut self.restore {
+            held.extend_from_slice(bytes);
+            return;
+        }
         self.forget_links();
         let (mut cwd, mut messages) = (None, Vec::new());
         for (number, body) in self.osc.scan(bytes) {
@@ -834,22 +843,25 @@ impl TerminalPanel {
         self.origin = point(bounds.origin.x + PADDING, bounds.origin.y + PADDING / 2.);
         let columns = ((bounds.size.width - PADDING * 2.) / self.cell.width).floor().max(2.) as usize;
         let lines = ((bounds.size.height - PADDING) / self.cell.height).floor().max(1.) as usize;
-        if (columns, lines) == (self.columns, self.lines) {
-            return;
+        if (columns, lines) != (self.columns, self.lines) {
+            self.columns = columns;
+            self.lines = lines;
+            self.term.resize(GridSize { columns, lines });
+            self.forget_links();
+            if let Some(pty) = &self.pty {
+                _ = pty.master.resize(PtySize {
+                    rows: lines as u16,
+                    cols: columns as u16,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+            cx.notify();
         }
-        self.columns = columns;
-        self.lines = lines;
-        self.term.resize(GridSize { columns, lines });
-        self.forget_links();
-        if let Some(pty) = &self.pty {
-            _ = pty.master.resize(PtySize {
-                rows: lines as u16,
-                cols: columns as u16,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
+        if let Some((text, held)) = self.restore.take() {
+            self.parser.advance(&mut self.term, text.as_bytes());
+            self.feed(&held, cx);
         }
-        cx.notify();
     }
 
     /// The last `max` lines of output as plain text, trailing blank lines
