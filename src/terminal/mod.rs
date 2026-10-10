@@ -297,9 +297,6 @@ pub struct TerminalPanel {
     /// The program it was started with still runs (until the shell's prompt
     /// comes back).
     program_running: bool,
-    /// The shell waits at its prompt, the line the cursor is on: it reported
-    /// its folder as it drew one, and nothing has been entered since.
-    at_prompt: bool,
     /// The Claude Code conversation running here, from its hooks: `None`
     /// while none runs, `Some(None)` for a new one not yet named.
     claude_session: Option<Option<String>>,
@@ -372,7 +369,6 @@ impl TerminalPanel {
             last_alert: None,
             claude_session: None,
             program_running: program_is_set,
-            at_prompt: false,
             wheel_lines: 0,
             focus_window: None,
             _focus_subscriptions: Vec::new(),
@@ -531,7 +527,6 @@ impl TerminalPanel {
             self.cwd = cwd;
             // The shell's prompt is back: whatever program or Claude Code ran
             // has ended.
-            self.at_prompt = true;
             self.claude_session = None;
             if self.program_running {
                 self.program_running = false;
@@ -642,9 +637,6 @@ impl TerminalPanel {
         }
         if self.term.selection.take().is_some() {
             cx.notify();
-        }
-        if bytes.contains(&b'\r') {
-            self.at_prompt = false;
         }
         self.write(bytes);
     }
@@ -866,9 +858,12 @@ impl TerminalPanel {
 
     /// The last `max` lines of output as plain text, trailing blank lines
     /// dropped, and a prompt waiting for input with them: the next shell
-    /// draws its own. A shell that was never used leaves nothing.
+    /// draws its own. A shell that was never used leaves nothing. A prompt
+    /// (any shell's) leaves the cursor after it on its line, where finished
+    /// output leaves it at the start of a fresh one.
     pub(crate) fn scrollback(&self, max: usize) -> String {
-        let lines = if self.at_prompt { self.term.grid().cursor.point.line.0 as usize } else { self.lines };
+        let cursor = self.term.grid().cursor.point;
+        let lines = if cursor.column.0 > 0 { cursor.line.0 as usize } else { self.lines };
         tail_text(&self.term, lines, self.columns, max)
     }
 
