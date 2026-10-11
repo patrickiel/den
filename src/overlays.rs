@@ -41,7 +41,11 @@ struct Transition {
 
 impl Transition {
     fn start(duration: Duration) -> Self {
-        Self { started: Instant::now(), closing: false, duration }
+        Self {
+            started: Instant::now(),
+            closing: false,
+            duration,
+        }
     }
 
     /// How much of the duration has passed, 0 to 1.
@@ -97,13 +101,19 @@ pub(crate) struct Painted {
 pub(crate) type PaintedRef = Rc<RefCell<Painted>>;
 
 /// Records where its parent is painted, through `record`.
-pub(crate) fn mark(painted: &PaintedRef, record: impl Fn(&mut Painted, Bounds<Pixels>) + 'static) -> impl IntoElement {
+pub(crate) fn mark(
+    painted: &PaintedRef,
+    record: impl Fn(&mut Painted, Bounds<Pixels>) + 'static,
+) -> impl IntoElement {
     let painted = painted.clone();
-    canvas(move |bounds, _, _| record(&mut painted.borrow_mut(), bounds), |_, _, _, _| {})
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
+    canvas(
+        move |bounds, _, _| record(&mut painted.borrow_mut(), bounds),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// `a` moved and sized towards `b`, `t` of the way.
@@ -111,7 +121,10 @@ fn between(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
     let mix = |a: Pixels, b: Pixels| a + (b - a) * t;
     Bounds::new(
         point(mix(a.origin.x, b.origin.x), mix(a.origin.y, b.origin.y)),
-        size(mix(a.size.width, b.size.width), mix(a.size.height, b.size.height)),
+        size(
+            mix(a.size.width, b.size.width),
+            mix(a.size.height, b.size.height),
+        ),
     )
 }
 
@@ -126,13 +139,18 @@ impl Workspace {
     /// Whether `group` is maximized that way (its shown tab, or as tiles)
     /// and not on its way back.
     pub(crate) fn is_maximized(&self, group: NodeId, tiles: bool) -> bool {
-        self.maximized.as_ref().is_some_and(|m| m.group == group && m.tiles == tiles && !m.transition.closing)
+        self.maximized
+            .as_ref()
+            .is_some_and(|m| m.group == group && m.tiles == tiles && !m.transition.closing)
     }
 
     /// The group shown as tiles, while one is (and not on its way back): the
     /// keys that go between groups go between its tiles instead.
     pub(crate) fn tiled_group(&self) -> Option<NodeId> {
-        self.maximized.as_ref().filter(|m| m.tiles && !m.transition.closing).map(|m| m.group)
+        self.maximized
+            .as_ref()
+            .filter(|m| m.tiles && !m.transition.closing)
+            .map(|m| m.group)
     }
 
     /// The tile beside the active one towards `side` in the tiled group's
@@ -140,7 +158,10 @@ impl Workspace {
     pub(crate) fn tile_beside(&self, side: Side) -> Option<PaneId> {
         let group = self.tiled_group()?;
         let tabs = self.tree.tabs(group);
-        let active = self.tree.active_tab(group).and_then(|pane| tabs.iter().position(|p| *p == pane))?;
+        let active = self
+            .tree
+            .active_tab(group)
+            .and_then(|pane| tabs.iter().position(|p| *p == pane))?;
         let columns = self.tile_columns.get().max(1);
         let (row, col) = (active / columns, active % columns);
         let (row, col) = match side {
@@ -149,12 +170,20 @@ impl Workspace {
             Side::Top => (row.checked_sub(1)?, col),
             Side::Bottom => (row + 1, col),
         };
-        (col < columns).then(|| tabs.get(row * columns + col).copied()).flatten()
+        (col < columns)
+            .then(|| tabs.get(row * columns + col).copied())
+            .flatten()
     }
 
     /// Maximize `group`, showing its tab or every tab as `tiles`; restore it
     /// when it is maximized that way already, and switch the way otherwise.
-    pub(crate) fn toggle_maximize(&mut self, group: NodeId, tiles: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_maximize(
+        &mut self,
+        group: NodeId,
+        tiles: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_maximized(group, tiles) {
             self.restore_group(cx);
             return;
@@ -182,7 +211,12 @@ impl Workspace {
         // another group maximized in its window, so this comes first.
         self.maximized = None;
         self.set_active_group(group, cx);
-        self.maximized = Some(Maximized { group, tiles, from, transition: Transition::start(GROW) });
+        self.maximized = Some(Maximized {
+            group,
+            tiles,
+            from,
+            transition: Transition::start(GROW),
+        });
         if let Some(pane) = self.tree.active_tab(group) {
             self.focus_pane(pane, window, cx);
         }
@@ -218,13 +252,20 @@ impl Workspace {
             .relative()
             .size_full()
             .bg(cx.theme().tab_bar)
-            .child(mark(&self.painted, |painted, bounds| painted.slot = Some(bounds)))
+            .child(mark(&self.painted, |painted, bounds| {
+                painted.slot = Some(bounds)
+            }))
             .into_any_element()
     }
 
     /// What lies over a window's body: the maximized group, when it is this
     /// window's (`None` for the main one).
-    pub(crate) fn render_overlays(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_overlays(
+        &self,
+        float: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .absolute()
             .inset_0()
@@ -237,20 +278,33 @@ impl Workspace {
 
     /// The maximized group, grown over the body a little in from its edges,
     /// with a dimmed rim showing round it.
-    fn render_maximized(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_maximized(
+        &self,
+        float: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let m = self.maximized.as_ref()?;
         let group = m.group;
         if self.tree.float_of(group) != float {
             return None;
         }
-        let Some(Node::Group { tabs, active, .. }) = self.tree.find(group) else { return None };
+        let Some(Node::Group { tabs, active, .. }) = self.tree.find(group) else {
+            return None;
+        };
         let t = m.transition.progress(window);
         let body = self.painted.borrow().body.get(&float).copied();
         // What it covers, in the body's own pixels: the whole body, or (as
         // Settings may have it) the groups' area alone, leaving the sidebar.
         let region = body.map(|body| {
             let area = (!crate::settings::Settings::get(cx).maximize_covers_sidebar)
-                .then(|| self.zones.borrow().get(&float).and_then(|zones| zones.iter().find_map(|(zone, bounds)| matches!(zone, Zone::Area(_)).then_some(*bounds))))
+                .then(|| {
+                    self.zones.borrow().get(&float).and_then(|zones| {
+                        zones.iter().find_map(|(zone, bounds)| {
+                            matches!(zone, Zone::Area(_)).then_some(*bounds)
+                        })
+                    })
+                })
                 .flatten();
             match area {
                 Some(area) => Bounds::new(area.origin - body.origin, area.size),
@@ -261,7 +315,13 @@ impl Workspace {
         // full before the body has been painted).
         let full = region.map(|region| {
             let margin = px(SPACING);
-            Bounds::new(region.origin + point(margin, margin), size(region.size.width - margin * 2., region.size.height - margin * 2.))
+            Bounds::new(
+                region.origin + point(margin, margin),
+                size(
+                    region.size.width - margin * 2.,
+                    region.size.height - margin * 2.,
+                ),
+            )
         });
         let at = body.zip(full).map(|(body, full)| match m.from {
             Some(from) => between(Bounds::new(from.origin - body.origin, from.size), full, t),
@@ -275,7 +335,11 @@ impl Workspace {
             .id(("maximized", group))
             .absolute()
             .map(|this| match at {
-                Some(at) => this.left(at.origin.x).top(at.origin.y).w(at.size.width).h(at.size.height),
+                Some(at) => this
+                    .left(at.origin.x)
+                    .top(at.origin.y)
+                    .w(at.size.width)
+                    .h(at.size.height),
                 None => this.inset(px(SPACING)),
             })
             .rounded(px(6.))
@@ -291,7 +355,11 @@ impl Workspace {
             div()
                 .absolute()
                 .map(|this| match region {
-                    Some(region) => this.left(region.origin.x).top(region.origin.y).w(region.size.width).h(region.size.height),
+                    Some(region) => this
+                        .left(region.origin.x)
+                        .top(region.origin.y)
+                        .w(region.size.width)
+                        .h(region.size.height),
                     None => this.inset_0(),
                 })
                 .occlude()

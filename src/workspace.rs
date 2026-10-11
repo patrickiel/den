@@ -26,29 +26,31 @@ use gpui_kit::{prelude::FluentBuilder as _, *};
 use serde::{Deserialize, Serialize};
 
 use crate::pane::AlertKind;
-use gpui_kit::component::notification::{Notification, NotificationType};
 use crate::{
-    CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FormatDocument, NewAgent, NewBrowser, FocusLeft, FocusRight, FocusScm, FocusSearch,
-    FocusUp, NewTerminal, NextTab, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab, ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight,
-    defaults::{Defaults, GroupDefault, Kind},
+    CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
+    FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewBrowser, NewTerminal,
+    NextTab, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab, ReplaceInFiles,
+    ResetLayout, SaveLayout, SplitDown, SplitRight,
     backend::watch,
+    defaults::{Defaults, GroupDefault, Kind},
     diff::DiffPanel,
     explorer::{Explorer, ExplorerEvent},
+    extension_panel::ExtensionPanel,
+    extensions_view::{ExtensionsEvent, ExtensionsView},
     float::FloatWindow,
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
-    layout_view::{Drop, Dragged, DropHint, Flash, Hints, Zones},
+    layout_view::{Dragged, Drop, DropHint, Flash, Hints, Zones},
     overlays::{Maximized, PaintedRef},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
     repo::{Refresh, Repo},
-    extension_panel::ExtensionPanel,
-    extensions_view::{ExtensionsEvent, ExtensionsView},
     scm::{ScmEvent, ScmView},
     search::{IsDirty, SearchEvent, SearchView},
     settings::{AppState, LayoutPreset, Settings, SidebarSide, SidebarView},
     terminal::{Launch, TerminalPanel},
 };
+use gpui_kit::component::notification::{Notification, NotificationType};
 
 /// The arrangement as saved: the tree, the panes in it and the defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,17 +72,32 @@ pub struct LayoutState {
 /// there leave the title bar's list too. GPUI fails the whole list without
 /// a task, so there is New Window too, which starts den as `--dock-action 0`.
 pub(crate) fn sync_jump_list(cx: &mut App) {
-    let entries: Vec<smallvec::SmallVec<[PathBuf; 2]>> =
-        AppState::get(cx).recent.iter().take(12).map(|path| smallvec::smallvec![path.clone()]).collect();
-    let removed = cx.update_jump_list(vec![MenuItem::action("New Window", crate::OpenFolder)], entries);
+    let entries: Vec<smallvec::SmallVec<[PathBuf; 2]>> = AppState::get(cx)
+        .recent
+        .iter()
+        .take(12)
+        .map(|path| smallvec::smallvec![path.clone()])
+        .collect();
+    let removed = cx.update_jump_list(
+        vec![MenuItem::action("New Window", crate::OpenFolder)],
+        entries,
+    );
     cx.spawn(async move |cx| {
         let removed = removed.await;
         if removed.is_empty() {
             return;
         }
         _ = cx.update(|cx| {
-            let keys: Vec<String> = removed.iter().flatten().map(|p| crate::repo::key(p)).collect();
-            AppState::update(cx, |state| state.recent.retain(|p| !keys.contains(&crate::repo::key(p))));
+            let keys: Vec<String> = removed
+                .iter()
+                .flatten()
+                .map(|p| crate::repo::key(p))
+                .collect();
+            AppState::update(cx, |state| {
+                state
+                    .recent
+                    .retain(|p| !keys.contains(&crate::repo::key(p)))
+            });
         });
     })
     .detach();
@@ -95,7 +112,9 @@ fn recent_names(root: &std::path::Path, cx: &App) -> (Vec<String>, Vec<PathBuf>)
         .filter(|p| crate::repo::key(p) != crate::repo::key(root))
         .cloned()
         .collect();
-    let all: Vec<PathBuf> = std::iter::once(root.to_path_buf()).chain(recent.iter().cloned()).collect();
+    let all: Vec<PathBuf> = std::iter::once(root.to_path_buf())
+        .chain(recent.iter().cloned())
+        .collect();
     (crate::settings::unique_names(&all), recent)
 }
 
@@ -106,21 +125,37 @@ fn session_name(root: &std::path::Path, cx: &App) -> String {
         .0
         .into_iter()
         .next()
-        .unwrap_or_else(|| root.file_name().map_or_else(|| root.display().to_string(), |name| name.to_string_lossy().to_string()))
+        .unwrap_or_else(|| {
+            root.file_name().map_or_else(
+                || root.display().to_string(),
+                |name| name.to_string_lossy().to_string(),
+            )
+        })
 }
 
 /// The session switcher's menu, from the recent folders as they are now.
-fn recent_menu(this: WeakEntity<Workspace>, root: PathBuf, menu: PopupMenu, cx: &mut Context<PopupMenu>) -> PopupMenu {
+fn recent_menu(
+    this: WeakEntity<Workspace>,
+    root: PathBuf,
+    menu: PopupMenu,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let (names, recent) = recent_names(&root, cx);
     let own = cx.weak_entity();
-    let mut menu = menu.label("RECENT FOLDERS").max_h(px(480.)).scrollable(true);
+    let mut menu = menu
+        .label("RECENT FOLDERS")
+        .max_h(px(480.))
+        .scrollable(true);
     if recent.is_empty() {
         menu = menu.item(PopupMenuItem::new("No other folders yet").disabled(true));
     }
     for (ix, (path, label)) in recent.iter().zip(names.iter().skip(1)).enumerate() {
         let this = this.clone();
         let path = path.clone();
-        let (label, full) = (SharedString::from(label.clone()), SharedString::from(path.display().to_string()));
+        let (label, full) = (
+            SharedString::from(label.clone()),
+            SharedString::from(path.display().to_string()),
+        );
         let forget = path.clone();
         let elsewhere = (this.clone(), path.clone());
         let rebuild = (this.clone(), root.clone(), own.clone());
@@ -134,7 +169,9 @@ fn recent_menu(this: WeakEntity<Workspace>, root: PathBuf, menu: PopupMenu, cx: 
                     .id((id, ix))
                     .flex_none()
                     .invisible()
-                    .group_hover(SharedString::from(format!("recent-{ix}")), |this| this.visible())
+                    .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
+                        this.visible()
+                    })
                     .rounded(px(3.))
                     .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
                     .child(Icon::new(icon).xsmall())
@@ -149,45 +186,68 @@ fn recent_menu(this: WeakEntity<Workspace>, root: PathBuf, menu: PopupMenu, cx: 
                 // Opens the folder in a window of its own, leaving this one be.
                 .child(
                     row_button("open-recent-elsewhere", IconName::AppWindow)
-                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Open in New Window").build(window, cx))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Open in New Window")
+                                .build(window, cx)
+                        })
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
-                            _ = open.update(cx, |this, cx| this.open_session(path.clone(), true, window, cx));
+                            _ = open.update(cx, |this, cx| {
+                                this.open_session(path.clone(), true, window, cx)
+                            });
                             window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
                         }),
                 )
                 // The x takes the folder off the list (its saved session stays),
                 // as in den.
                 .child(
-                    row_button("forget-recent", IconName::X)
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            let forget = forget.clone();
-                            AppState::update(cx, |state| {
-                                let key = crate::repo::key(&forget);
-                                state.recent.retain(|p| crate::repo::key(p) != key);
-                            });
-                            sync_jump_list(cx);
-                            let (this, root) = (this.clone(), root.clone());
-                            _ = own.update(cx, |menu, cx| menu.rebuild(window, cx, |menu, _, cx| recent_menu(this, root, menu, cx)));
-                            window.refresh();
-                        }),
+                    row_button("forget-recent", IconName::X).on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let forget = forget.clone();
+                        AppState::update(cx, |state| {
+                            let key = crate::repo::key(&forget);
+                            state.recent.retain(|p| crate::repo::key(p) != key);
+                        });
+                        sync_jump_list(cx);
+                        let (this, root) = (this.clone(), root.clone());
+                        _ = own.update(cx, |menu, cx| {
+                            menu.rebuild(window, cx, |menu, _, cx| {
+                                recent_menu(this, root, menu, cx)
+                            })
+                        });
+                        window.refresh();
+                    }),
                 )
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx))
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                })
         });
-        menu = menu.item(item.icon(Icon::new(IconName::Folder)).on_click(move |_, window, cx| {
-            _ = this.update(cx, |this, cx| this.open_session(path.clone(), false, window, cx));
-        }));
+        menu = menu.item(
+            item.icon(Icon::new(IconName::Folder))
+                .on_click(move |_, window, cx| {
+                    _ = this.update(cx, |this, cx| {
+                        this.open_session(path.clone(), false, window, cx)
+                    });
+                }),
+        );
     }
     let open = this.clone();
     let new_window = this;
     menu.separator()
-        .item(PopupMenuItem::new("Open Folder…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-            _ = open.update(cx, |this, cx| this.prompt_open_folder(false, window, cx));
-        }))
-        .item(PopupMenuItem::new("Open Folder in New Window…").icon(Icon::new(IconName::AppWindow)).on_click(move |_, window, cx| {
-            _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
-        }))
+        .item(
+            PopupMenuItem::new("Open Folder…")
+                .icon(Icon::new(IconName::FolderOpen))
+                .on_click(move |_, window, cx| {
+                    _ = open.update(cx, |this, cx| this.prompt_open_folder(false, window, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Open Folder in New Window…")
+                .icon(Icon::new(IconName::AppWindow))
+                .on_click(move |_, window, cx| {
+                    _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
+                }),
+        )
 }
 
 /// A layout preset being dragged to another place in the Layouts menu.
@@ -197,7 +257,11 @@ struct LayoutPresetDrag {
 }
 
 /// The Layouts menu, from the presets as they are now.
-fn layouts_menu(this: WeakEntity<Workspace>, mut menu: PopupMenu, cx: &mut Context<PopupMenu>) -> PopupMenu {
+fn layouts_menu(
+    this: WeakEntity<Workspace>,
+    mut menu: PopupMenu,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
     let count = AppState::get(cx).presets.len();
     let own = cx.weak_entity();
     menu = menu.label("LAYOUTS");
@@ -211,28 +275,45 @@ fn layouts_menu(this: WeakEntity<Workspace>, mut menu: PopupMenu, cx: &mut Conte
         let this = this.clone();
         let (row_this, row_menu) = (this.clone(), own.clone());
         menu = menu.item(
-            PopupMenuItem::element(move |_, cx| layout_preset_row(ix, row_this.clone(), row_menu.clone(), cx))
-                .icon(Icon::new(IconName::LayoutTemplate))
-                .on_click(move |_, window, cx| {
-                    let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else { return };
-                    _ = this.update(cx, |this, cx| this.load_preset(&name, window, cx));
-                }),
+            PopupMenuItem::element(move |_, cx| {
+                layout_preset_row(ix, row_this.clone(), row_menu.clone(), cx)
+            })
+            .icon(Icon::new(IconName::LayoutTemplate))
+            .on_click(move |_, window, cx| {
+                let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else {
+                    return;
+                };
+                _ = this.update(cx, |this, cx| this.load_preset(&name, window, cx));
+            }),
         );
     }
     let save = this.clone();
     let reset = this;
     menu.separator()
-        .item(PopupMenuItem::new("Save Layout…").icon(Icon::new(IconName::Save)).on_click(move |_, window, cx| {
-            _ = save.update(cx, |this, cx| this.prompt_save_preset(window, cx));
-        }))
-        .item(PopupMenuItem::new("Reset Layout").icon(Icon::new(IconName::RotateCcw)).on_click(move |_, _, cx| {
-            _ = reset.update(cx, |this, cx| this.reset_layout(cx));
-        }))
+        .item(
+            PopupMenuItem::new("Save Layout…")
+                .icon(Icon::new(IconName::Save))
+                .on_click(move |_, window, cx| {
+                    _ = save.update(cx, |this, cx| this.prompt_save_preset(window, cx));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Reset Layout")
+                .icon(Icon::new(IconName::RotateCcw))
+                .on_click(move |_, _, cx| {
+                    _ = reset.update(cx, |this, cx| this.reset_layout(cx));
+                }),
+        )
 }
 
 /// A row of the Layouts menu: preset `ix` (by position, read as it draws),
 /// draggable onto another row, with an x on hover that deletes it.
-fn layout_preset_row(ix: usize, this: WeakEntity<Workspace>, menu: WeakEntity<PopupMenu>, cx: &App) -> AnyElement {
+fn layout_preset_row(
+    ix: usize,
+    this: WeakEntity<Workspace>,
+    menu: WeakEntity<PopupMenu>,
+    cx: &App,
+) -> AnyElement {
     let Some(name) = AppState::get(cx).presets.get(ix).map(|p| p.name.clone()) else {
         return div().into_any_element();
     };
@@ -265,11 +346,15 @@ fn layout_preset_row(ix: usize, this: WeakEntity<Workspace>, menu: WeakEntity<Po
                         }
                     });
                     let this = this.clone();
-                    _ = menu.update(cx, |menu, cx| menu.rebuild(window, cx, |menu, _, cx| layouts_menu(this, menu, cx)));
+                    _ = menu.update(cx, |menu, cx| {
+                        menu.rebuild(window, cx, |menu, _, cx| layouts_menu(this, menu, cx))
+                    });
                     window.refresh();
                 }),
         )
-        .on_drag(LayoutPresetDrag { ix }, move |_, _, _, cx| cx.new(|_| crate::layout_view::DragLabel(label.clone().into())))
+        .on_drag(LayoutPresetDrag { ix }, move |_, _, _, cx| {
+            cx.new(|_| crate::layout_view::DragLabel(label.clone().into()))
+        })
         .drag_over::<LayoutPresetDrag>(move |this, _, _, _| this.bg(drop))
         .on_drop(move |drag: &LayoutPresetDrag, window, cx| {
             let from = drag.ix;
@@ -370,12 +455,20 @@ impl Workspace {
         sync_jump_list(cx);
         // Closing the window saves the session, asking first about unsaved changes.
         let weak = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| weak.upgrade().is_none_or(|this| this.update(cx, |this, cx| this.request_close_window(window, cx))));
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.upgrade().is_none_or(|this| {
+                this.update(cx, |this, cx| this.request_close_window(window, cx))
+            })
+        });
         let session = AppState::get(cx).session(&root);
         let repo = cx.new(|cx| Repo::new(root.clone(), cx));
-        let explorer = cx.new(|cx| Explorer::new(root.clone(), session.expanded.clone(), repo.clone(), cx));
+        let explorer =
+            cx.new(|cx| Explorer::new(root.clone(), session.expanded.clone(), repo.clone(), cx));
         let weak = cx.weak_entity();
-        let is_dirty: IsDirty = std::rc::Rc::new(move |path, cx| weak.upgrade().is_some_and(|this| this.read(cx).is_dirty_file(path, cx)));
+        let is_dirty: IsDirty = std::rc::Rc::new(move |path, cx| {
+            weak.upgrade()
+                .is_some_and(|this| this.read(cx).is_dirty_file(path, cx))
+        });
         let search = cx.new(|cx| SearchView::new(root.clone(), is_dirty, window, cx));
         let scm = cx.new(|cx| ScmView::new(repo.clone(), window, cx));
         let extensions = cx.new(|cx| ExtensionsView::new(window, cx));
@@ -385,27 +478,56 @@ impl Workspace {
         }
 
         let _subscriptions = vec![
-            cx.subscribe_in(&extensions, window, |this, _, event: &ExtensionsEvent, window, cx| match event {
-                ExtensionsEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
-                ExtensionsEvent::Show(id) => this.open_extension(id.clone(), None, window, cx),
-                ExtensionsEvent::Preview(listing) => this.open_extension(listing.id.clone(), Some(listing.clone()), window, cx),
-            }),
-            cx.subscribe_in(&explorer, window, |this, _, event: &ExplorerEvent, window, cx| match event {
-                ExplorerEvent::Open { path, preview } => this.open_file(path.clone(), *preview, window, cx),
-                ExplorerEvent::ExpandedChanged => this.schedule_save(cx),
-                ExplorerEvent::OpenTerminal(dir) => this.open_shell_in(dir.clone(), window, cx),
-            }),
-            cx.subscribe_in(&search, window, |this, _, event: &SearchEvent, window, cx| match event {
-                SearchEvent::Open { path, line, column, focus } => {
-                    this.open_file(path.clone(), !*focus, window, cx);
-                    this.go_to(path, *line, *column, *focus, window, cx);
-                }
-            }),
-            cx.subscribe_in(&scm, window, |this, _, event: &ScmEvent, window, cx| match event {
-                ScmEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
-                ScmEvent::Diff { file, staged } => this.open_diff(file.path.clone(), file.rel.clone(), *staged, window, cx),
-                ScmEvent::CommitDiff { rel, commit } => this.open_commit_diff(rel.clone(), commit.clone(), window, cx),
-            }),
+            cx.subscribe_in(
+                &extensions,
+                window,
+                |this, _, event: &ExtensionsEvent, window, cx| match event {
+                    ExtensionsEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
+                    ExtensionsEvent::Show(id) => this.open_extension(id.clone(), None, window, cx),
+                    ExtensionsEvent::Preview(listing) => {
+                        this.open_extension(listing.id.clone(), Some(listing.clone()), window, cx)
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &explorer,
+                window,
+                |this, _, event: &ExplorerEvent, window, cx| match event {
+                    ExplorerEvent::Open { path, preview } => {
+                        this.open_file(path.clone(), *preview, window, cx)
+                    }
+                    ExplorerEvent::ExpandedChanged => this.schedule_save(cx),
+                    ExplorerEvent::OpenTerminal(dir) => this.open_shell_in(dir.clone(), window, cx),
+                },
+            ),
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, _, event: &SearchEvent, window, cx| match event {
+                    SearchEvent::Open {
+                        path,
+                        line,
+                        column,
+                        focus,
+                    } => {
+                        this.open_file(path.clone(), !*focus, window, cx);
+                        this.go_to(path, *line, *column, *focus, window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &scm,
+                window,
+                |this, _, event: &ScmEvent, window, cx| match event {
+                    ScmEvent::Open(path) => this.open_file(path.clone(), false, window, cx),
+                    ScmEvent::Diff { file, staged } => {
+                        this.open_diff(file.path.clone(), file.rel.clone(), *staged, window, cx)
+                    }
+                    ScmEvent::CommitDiff { rel, commit } => {
+                        this.open_commit_diff(rel.clone(), commit.clone(), window, cx)
+                    }
+                },
+            ),
             // Coming back to the window, git may have changed underneath.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
@@ -480,10 +602,13 @@ impl Workspace {
         };
         this.start_watching(window, cx);
         // Once per run, a little after start: is there a newer den?
-        static UPDATE_CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static UPDATE_CHECKED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if !UPDATE_CHECKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             cx.spawn_in(window, async move |_, cx| {
-                cx.background_executor().timer(std::time::Duration::from_secs(10)).await;
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(10))
+                    .await;
                 _ = cx.update(|window, cx| crate::update::check_in_window(false, window, cx));
             })
             .detach();
@@ -493,10 +618,17 @@ impl Workspace {
         // used.
         let from_folder = crate::layout_file::read(&this.root);
         this.layout_file_text = from_folder.as_ref().map(crate::layout_file::text);
-        let restored = from_folder.map(|shared| crate::layout_file::restore(shared, &this.root, session.layout.as_ref()));
+        let restored = from_folder
+            .map(|shared| crate::layout_file::restore(shared, &this.root, session.layout.as_ref()));
         let loaded = match restored.map(|layout| this.load_state(layout, window, cx)) {
             Some(Ok(())) => Ok(()),
-            _ => session.layout.map_or(Ok(()), |layout| this.load_state(crate::layout_file::restore(layout, &this.root, None), window, cx)),
+            _ => session.layout.map_or(Ok(()), |layout| {
+                this.load_state(
+                    crate::layout_file::restore(layout, &this.root, None),
+                    window,
+                    cx,
+                )
+            }),
         };
         if let Err(err) = loaded {
             eprintln!("den: the saved layout could not be read, starting fresh: {err}");
@@ -513,13 +645,19 @@ impl Workspace {
     /// the active tab, or with no tab the workspace's own handle, both under
     /// its handlers.
     pub(crate) fn action_target(&self, cx: &App) -> FocusHandle {
-        self.window_focus(None, cx).unwrap_or_else(|| self.focus_handle.clone())
+        self.window_focus(None, cx)
+            .unwrap_or_else(|| self.focus_handle.clone())
     }
 
     // -- State ---------------------------------------------------------------
 
     /// Replace the arrangement with a saved one, making its panes anew.
-    pub fn load_state(&mut self, value: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    pub fn load_state(
+        &mut self,
+        value: serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         let state: LayoutState = serde_json::from_value(value)?;
         let mut tree = Tree::with_floats(state.root, state.floats);
         let mut panes = HashMap::new();
@@ -585,7 +723,8 @@ impl Workspace {
     }
 
     fn track(&mut self, id: PaneId, pane: PaneRef, window: &mut Window, cx: &mut Context<Self>) {
-        self.pane_subscriptions.insert(id, pane.subscribe(id, window, cx));
+        self.pane_subscriptions
+            .insert(id, pane.subscribe(id, window, cx));
         self.panes.insert(id, pane);
     }
 
@@ -593,7 +732,10 @@ impl Workspace {
     /// windows to match, and save.
     pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
         // The maximized group closed: nothing is maximized.
-        if self.maximized_group().is_some_and(|group| !self.tree.find(group).is_some_and(Node::is_group)) {
+        if self
+            .maximized_group()
+            .is_some_and(|group| !self.tree.find(group).is_some_and(Node::is_group))
+        {
             self.maximized = None;
         }
         self.note_visit();
@@ -627,7 +769,9 @@ impl Workspace {
 
     /// The tab shown in the active group, for going back and forward.
     fn note_visit(&mut self) {
-        let Some(pane) = self.tree.active_tab(self.active_group) else { return };
+        let Some(pane) = self.tree.active_tab(self.active_group) else {
+            return;
+        };
         if self.navigating {
             self.history.arrive(pane);
         } else {
@@ -666,7 +810,14 @@ impl Workspace {
     }
 
     /// Put a new pane in `group` and show it.
-    pub(crate) fn add_pane<T: Pane>(&mut self, pane: Entity<T>, group: NodeId, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_pane<T: Pane>(
+        &mut self,
+        pane: Entity<T>,
+        group: NodeId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.tree.mint();
         let pane: PaneRef = std::rc::Rc::new(pane);
         self.track(id, pane, window, cx);
@@ -678,7 +829,13 @@ impl Workspace {
         self.changed(cx);
     }
 
-    pub(crate) fn show_pane(&mut self, pane: PaneId, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_pane(
+        &mut self,
+        pane: PaneId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.tree.activate(pane);
         self.attention.remove(&pane);
         if let Some(group) = self.tree.group_of(pane) {
@@ -693,8 +850,14 @@ impl Workspace {
     /// Focus a pane in the window it is in: `window` when that is it, else
     /// its own, brought to the front.
     pub(crate) fn focus_pane(&self, pane: PaneId, window: &mut Window, cx: &mut App) {
-        let Some(focus) = self.panes.get(&pane).map(|p| p.focus_handle(cx)) else { return };
-        let target = self.window_of(self.tree.group_of(pane).and_then(|group| self.tree.float_of(group)));
+        let Some(focus) = self.panes.get(&pane).map(|p| p.focus_handle(cx)) else {
+            return;
+        };
+        let target = self.window_of(
+            self.tree
+                .group_of(pane)
+                .and_then(|group| self.tree.float_of(group)),
+        );
         if target == window.window_handle() {
             focus.focus(window, cx);
         } else {
@@ -710,7 +873,9 @@ impl Workspace {
 
     /// The window of the main tree (`None`) or of a float.
     fn window_of(&self, float: Option<u64>) -> AnyWindowHandle {
-        float.and_then(|id| self.float_windows.get(&id).copied()).unwrap_or(self.window)
+        float
+            .and_then(|id| self.float_windows.get(&id).copied())
+            .unwrap_or(self.window)
     }
 
     /// Close a tab; its group stays, empty or not.
@@ -724,7 +889,9 @@ impl Workspace {
 
     /// A tab goes: the history keeps it as its file, if it has one.
     fn forget_pane(&mut self, pane: PaneId, cx: &App) {
-        let file = self.pane_as::<FilePanel>(pane).and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf));
+        let file = self
+            .pane_as::<FilePanel>(pane)
+            .and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf));
         self.panes.remove(&pane);
         self.pane_subscriptions.remove(&pane);
         self.tree.remove_tab(pane);
@@ -763,18 +930,30 @@ impl Workspace {
     /// A terminal's program wants the user. Unless they look at that tab:
     /// mark the tab, play a sound, toast, and flash the taskbar while the
     /// window is in the background, each as Settings allow.
-    pub(crate) fn pane_alert(&mut self, pane: PaneId, kind: AlertKind, message: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pane_alert(
+        &mut self,
+        pane: PaneId,
+        kind: AlertKind,
+        message: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let settings = Settings::get(cx).clone();
         if !settings.notifications {
             return;
         }
         // The window the tab is in: this one, or a floating one.
-        let float = self.tree.group_of(pane).and_then(|group| self.tree.float_of(group));
+        let float = self
+            .tree
+            .group_of(pane)
+            .and_then(|group| self.tree.float_of(group));
         let target = self.window_of(float);
         let focused = if target == window.window_handle() {
             window.is_window_active()
         } else {
-            target.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false)
+            target
+                .update(cx, |_, window, _| window.is_window_active())
+                .unwrap_or(false)
         };
         if focused && self.tree.active_tab(self.active_group) == Some(pane) {
             return;
@@ -794,24 +973,35 @@ impl Workspace {
             }
         }
         if settings.notify_toast {
-            let Some(handle) = self.panes.get(&pane).cloned() else { return };
+            let Some(handle) = self.panes.get(&pane).cloned() else {
+                return;
+            };
             let name = handle.label(cx);
             let status = match kind {
                 AlertKind::Done => "finished",
                 AlertKind::Input => "needs input",
                 AlertKind::Attention => "needs attention",
             };
-            let title = self.pane_as::<TerminalPanel>(pane).and_then(|t| t.read(cx).title_text());
-            let body: Vec<String> = [message.map(|m| m.trim().to_string()), title.filter(|t| t.as_str() != name.as_ref())]
-                .into_iter()
-                .flatten()
-                .filter(|text| !text.is_empty())
-                .collect();
+            let title = self
+                .pane_as::<TerminalPanel>(pane)
+                .and_then(|t| t.read(cx).title_text());
+            let body: Vec<String> = [
+                message.map(|m| m.trim().to_string()),
+                title.filter(|t| t.as_str() != name.as_ref()),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+            .collect();
             let this = cx.weak_entity();
             let note = Notification::new()
                 .title(format!("{name} {status}"))
                 .message(body.join(" — "))
-                .with_type(if kind == AlertKind::Done { NotificationType::Success } else { NotificationType::Warning })
+                .with_type(if kind == AlertKind::Done {
+                    NotificationType::Success
+                } else {
+                    NotificationType::Warning
+                })
                 .on_click(move |_, window, cx| {
                     _ = this.update(cx, |this, cx| this.show_pane(pane, true, window, cx));
                 });
@@ -821,14 +1011,27 @@ impl Workspace {
 
     /// Format Document on the active group's file tab.
     pub(crate) fn format_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(file) = self.tree.active_tab(self.active_group).and_then(|pane| self.pane_as::<FilePanel>(pane)) {
+        if let Some(file) = self
+            .tree
+            .active_tab(self.active_group)
+            .and_then(|pane| self.pane_as::<FilePanel>(pane))
+        {
             file.update(cx, |file, cx| file.format(false, window, cx));
         }
     }
 
     fn fix_active_group(&mut self) {
-        if !self.tree.find(self.active_group).is_some_and(Node::is_group) {
-            self.active_group = self.tree.groups().first().copied().unwrap_or(self.tree.root.id());
+        if !self
+            .tree
+            .find(self.active_group)
+            .is_some_and(Node::is_group)
+        {
+            self.active_group = self
+                .tree
+                .groups()
+                .first()
+                .copied()
+                .unwrap_or(self.tree.root.id());
         }
     }
 
@@ -846,13 +1049,24 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn set_default(&mut self, group: NodeId, kind: Option<Kind>, cx: &mut Context<Self>) {
+    pub(crate) fn set_default(
+        &mut self,
+        group: NodeId,
+        kind: Option<Kind>,
+        cx: &mut Context<Self>,
+    ) {
         self.defaults.set(group, kind);
         self.changed(cx);
     }
 
     /// Move a group beside `target`.
-    pub(crate) fn move_node(&mut self, node: NodeId, target: NodeId, side: Side, cx: &mut Context<Self>) {
+    pub(crate) fn move_node(
+        &mut self,
+        node: NodeId,
+        target: NodeId,
+        side: Side,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(remap) = self.tree.move_node(node, target, side) {
             self.defaults.prune(&self.tree, &remap);
             if let Some(group) = self.tree.groups_under(node).first() {
@@ -866,8 +1080,17 @@ impl Workspace {
     /// when `side` is given. A group the tab leaves empty goes with it,
     /// unless the tab was split off beside it: a group's only tab dropped on
     /// its own side splits it, leaving it empty.
-    pub(crate) fn move_tab(&mut self, pane: PaneId, target: NodeId, side: Option<Side>, ix: Option<usize>, cx: &mut Context<Self>) {
-        let Some(from) = self.tree.group_of(pane) else { return };
+    pub(crate) fn move_tab(
+        &mut self,
+        pane: PaneId,
+        target: NodeId,
+        side: Option<Side>,
+        ix: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.tree.group_of(pane) else {
+            return;
+        };
         let group = match side {
             None => target,
             Some(side) => match self.tree.split(target, side) {
@@ -894,8 +1117,16 @@ impl Workspace {
             let Some(this) = this.upgrade() else { return };
             let (gone, missing) = this.update(cx, |this, _| {
                 let wanted: Vec<u64> = this.tree.floats.iter().map(|f| f.id).collect();
-                let gone: Vec<u64> = this.float_windows.keys().copied().filter(|id| !wanted.contains(id)).collect();
-                let gone: Vec<AnyWindowHandle> = gone.iter().filter_map(|id| this.float_windows.remove(id)).collect();
+                let gone: Vec<u64> = this
+                    .float_windows
+                    .keys()
+                    .copied()
+                    .filter(|id| !wanted.contains(id))
+                    .collect();
+                let gone: Vec<AnyWindowHandle> = gone
+                    .iter()
+                    .filter_map(|id| this.float_windows.remove(id))
+                    .collect();
                 let missing: Vec<(u64, Option<[f32; 4]>, bool)> = this
                     .tree
                     .floats
@@ -917,7 +1148,9 @@ impl Workspace {
             }
             // Then the windows to close, once the pages in them have a new home.
             for window in gone {
-                if let Ok(Some(from)) = window.update(cx, |_, window, _| crate::browser::hwnd(window)) {
+                if let Ok(Some(from)) =
+                    window.update(cx, |_, window, _| crate::browser::hwnd(window))
+                {
                     this.update(cx, |this, cx| this.rehome_browsers(from, cx));
                 }
                 _ = window.update(cx, |_, window, _| window.remove_window());
@@ -927,12 +1160,26 @@ impl Workspace {
 
     /// Move a group (or a window's whole root) into a new window: at `bounds`
     /// (on screen), or centred.
-    pub(crate) fn float_node(&mut self, node: NodeId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
+    pub(crate) fn float_node(
+        &mut self,
+        node: NodeId,
+        bounds: Option<Bounds<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
         // The main window's groups, all empty, have nothing to take along.
-        if node == self.tree.root.id() && self.tree.root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
+        if node == self.tree.root.id()
+            && self
+                .tree
+                .root
+                .groups()
+                .iter()
+                .all(|group| self.tree.tabs(*group).is_empty())
+        {
             return;
         }
-        let Some((float, remap)) = self.tree.float_out(node, bounds.map(screen_rect)) else { return };
+        let Some((float, remap)) = self.tree.float_out(node, bounds.map(screen_rect)) else {
+            return;
+        };
         self.defaults.prune(&self.tree, &remap);
         self.activate_float = Some(float);
         self.fix_active_group();
@@ -943,10 +1190,20 @@ impl Workspace {
     }
 
     /// Move a tab into a new window, in a group of its own.
-    pub(crate) fn float_tab(&mut self, pane: PaneId, bounds: Option<Bounds<Pixels>>, cx: &mut Context<Self>) {
-        let Some(from) = self.tree.group_of(pane) else { return };
+    pub(crate) fn float_tab(
+        &mut self,
+        pane: PaneId,
+        bounds: Option<Bounds<Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(from) = self.tree.group_of(pane) else {
+            return;
+        };
         // Alone in a window of its own already.
-        if self.tree.tabs(from).len() == 1 && self.tree.float_of(from).is_some() && self.tree.is_root(from) {
+        if self.tree.tabs(from).len() == 1
+            && self.tree.float_of(from).is_some()
+            && self.tree.is_root(from)
+        {
             return;
         }
         let (float, group) = self.tree.new_float(bounds.map(screen_rect));
@@ -959,9 +1216,16 @@ impl Workspace {
     /// Closing it drops empty groups, which have nothing to bring back;
     /// `keep_empty` (its Move into Main Window button) moves them all the same.
     pub(crate) fn dock_float(&mut self, id: u64, keep_empty: bool, cx: &mut Context<Self>) {
-        let Some(root) = self.tree.window_root(Some(id)) else { return };
+        let Some(root) = self.tree.window_root(Some(id)) else {
+            return;
+        };
         let root_id = root.id();
-        if !keep_empty && root.groups().iter().all(|group| self.tree.tabs(*group).is_empty()) {
+        if !keep_empty
+            && root
+                .groups()
+                .iter()
+                .all(|group| self.tree.tabs(*group).is_empty())
+        {
             self.detach(root_id);
             return self.changed(cx);
         }
@@ -979,7 +1243,10 @@ impl Workspace {
         let moves: Vec<(Entity<crate::browser::BrowserPanel>, AnyWindowHandle)> = self
             .panes_of::<crate::browser::BrowserPanel>()
             .map(|(id, browser)| {
-                let float = self.tree.group_of(id).and_then(|group| self.tree.float_of(group));
+                let float = self
+                    .tree
+                    .group_of(id)
+                    .and_then(|group| self.tree.float_of(group));
                 (browser, self.window_of(float))
             })
             .collect();
@@ -1002,12 +1269,15 @@ impl Workspace {
     /// one, as it was when the user left it.
     pub(crate) fn window_activated(&mut self, float: Option<u64>, cx: &mut Context<Self>) {
         if self.tree.float_of(self.active_group) != float {
-            let remembered = self
-                .last_active
-                .get(&float)
-                .copied()
-                .filter(|group| self.tree.find(*group).is_some_and(Node::is_group) && self.tree.float_of(*group) == float);
-            let group = remembered.or_else(|| self.tree.window_root(float).and_then(|root| root.groups().first().copied()));
+            let remembered = self.last_active.get(&float).copied().filter(|group| {
+                self.tree.find(*group).is_some_and(Node::is_group)
+                    && self.tree.float_of(*group) == float
+            });
+            let group = remembered.or_else(|| {
+                self.tree
+                    .window_root(float)
+                    .and_then(|root| root.groups().first().copied())
+            });
             if let Some(group) = group {
                 self.set_active_group(group, cx);
             }
@@ -1029,15 +1299,35 @@ impl Workspace {
     /// The session's window under `at` (on screen, see `on_screen`), other
     /// than float `from`'s (or the main one): its float, and where `at` is in
     /// it. Floating windows first: they tend to be over the main one.
-    pub(crate) fn window_under(&self, from: Option<u64>, at: Point<f32>, cx: &mut App) -> Option<(Option<u64>, Point<Pixels>)> {
-        let others: Vec<Option<u64>> = self.float_windows.keys().copied().map(Some).chain([None]).filter(|w| *w != from).collect();
+    pub(crate) fn window_under(
+        &self,
+        from: Option<u64>,
+        at: Point<f32>,
+        cx: &mut App,
+    ) -> Option<(Option<u64>, Point<Pixels>)> {
+        let others: Vec<Option<u64>> = self
+            .float_windows
+            .keys()
+            .copied()
+            .map(Some)
+            .chain([None])
+            .filter(|w| *w != from)
+            .collect();
         others.into_iter().find_map(|float| {
             let (origin, scale, size) = self
                 .window_of(float)
-                .update(cx, |_, window, _| (on_screen(window, Point::default()), window.scale_factor(), window.viewport_size()))
+                .update(cx, |_, window, _| {
+                    (
+                        on_screen(window, Point::default()),
+                        window.scale_factor(),
+                        window.viewport_size(),
+                    )
+                })
                 .ok()?;
             let local = point(px((at.x - origin.x) / scale), px((at.y - origin.y) / scale));
-            Bounds::new(Point::default(), size).contains(&local).then_some((float, local))
+            Bounds::new(Point::default(), size)
+                .contains(&local)
+                .then_some((float, local))
         })
     }
 
@@ -1045,8 +1335,16 @@ impl Workspace {
     /// the main one): over another window of the session, what it carries
     /// lands where that window showed it would; elsewhere, it moves into a
     /// new window where it was let go.
-    pub(crate) fn drag_released(&mut self, from: Option<u64>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dragged) = self.dragging.take() else { return };
+    pub(crate) fn drag_released(
+        &mut self,
+        from: Option<u64>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dragged) = self.dragging.take() else {
+            return;
+        };
         if self.remote_drag.take().is_some() {
             cx.notify();
         }
@@ -1057,12 +1355,23 @@ impl Workspace {
         let at = on_screen(window, position);
         match self.window_under(from, at, cx) {
             Some((float, _)) => {
-                let Some(hint) = hint.filter(|hint| self.tree.float_of(hint.target) == float) else { return cx.notify() };
+                let Some(hint) = hint.filter(|hint| self.tree.float_of(hint.target) == float)
+                else {
+                    return cx.notify();
+                };
                 match (dragged, hint.drop) {
-                    (Dragged::Tab(pane), Drop::Center) => self.move_tab(pane, hint.target, None, None, cx),
-                    (Dragged::Tab(pane), Drop::Side(side)) => self.move_tab(pane, hint.target, Some(side), None, cx),
-                    (Dragged::Node(node), Drop::Side(side)) => self.move_node(node, hint.target, side, cx),
-                    (Dragged::Tab(pane), Drop::Tab(ix)) => self.move_tab(pane, hint.target, None, ix, cx),
+                    (Dragged::Tab(pane), Drop::Center) => {
+                        self.move_tab(pane, hint.target, None, None, cx)
+                    }
+                    (Dragged::Tab(pane), Drop::Side(side)) => {
+                        self.move_tab(pane, hint.target, Some(side), None, cx)
+                    }
+                    (Dragged::Node(node), Drop::Side(side)) => {
+                        self.move_node(node, hint.target, side, cx)
+                    }
+                    (Dragged::Tab(pane), Drop::Tab(ix)) => {
+                        self.move_tab(pane, hint.target, None, ix, cx)
+                    }
                     (Dragged::Node(_), Drop::Center | Drop::Tab(_)) => cx.notify(),
                 }
             }
@@ -1073,7 +1382,10 @@ impl Workspace {
                 let scale = monitor_scale(at).unwrap_or_else(|| window.scale_factor());
                 let pointer = point(px(at.x / scale), px(at.y / scale));
                 let current = window.bounds().size;
-                let size = size(px(960f32.min(current.width.as_f32())), px(640f32.min(current.height.as_f32())));
+                let size = size(
+                    px(960f32.min(current.width.as_f32())),
+                    px(640f32.min(current.height.as_f32())),
+                );
                 let bounds = Bounds::new(pointer - FLOAT_GRAB, size);
                 match dragged {
                     Dragged::Node(node) => self.float_node(node, Some(bounds), cx),
@@ -1084,15 +1396,33 @@ impl Workspace {
     }
 
     /// A floating window's content: a title bar and its groups.
-    pub(crate) fn render_float(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_float(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.settle_overlays();
         self.sync_browsers(Some(id), window, cx);
-        let Some(root) = self.tree.window_root(Some(id)) else { return Empty.into_any_element() };
+        let Some(root) = self.tree.window_root(Some(id)) else {
+            return Empty.into_any_element();
+        };
         let root_id = root.id();
         let groups = self.render_layout(root, Some(id), window, cx);
-        let name = self.root.file_name().map_or_else(|| self.root.display().to_string(), |name| name.to_string_lossy().to_string());
+        let name = self.root.file_name().map_or_else(
+            || self.root.display().to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
         let title_bar = TitleBar::new()
-            .child(h_flex().flex_1().min_w_0().px_2().text_sm().text_color(cx.theme().muted_foreground).child(div().truncate().child(name)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().truncate().child(name)),
+            )
             .child(
                 h_flex()
                     .gap_1()
@@ -1105,25 +1435,42 @@ impl Workspace {
                             .ghost()
                             .icon(Icon::new(IconName::Minimize))
                             .tooltip("Move into Main Window")
-                            .on_click(cx.listener(move |this, _, _, cx| this.dock_float(id, true, cx))),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.dock_float(id, true, cx)),
+                            ),
                     ),
             );
         self.layout_actions(v_flex().id("float"), cx)
             // Alt+F4 closes this window, not den.
-            .on_action(cx.listener(move |this, _: &crate::Quit, _, cx| this.dock_float(id, false, cx)))
+            .on_action(
+                cx.listener(move |this, _: &crate::Quit, _, cx| this.dock_float(id, false, cx)),
+            )
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(title_bar)
-            .child(div().flex_1().min_h_0().relative().child(groups).child(self.render_overlays(Some(id), window, cx)))
-            .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(groups)
+                    .child(self.render_overlays(Some(id), window, cx)),
+            )
+            .when(cfg!(windows) && window.has_active_dialog(cx), |this| {
+                this.child(caption_buttons(window, cx))
+            })
             .into_any_element()
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         let tabs = self.tree.tabs(self.active_group).to_vec();
-        let Some(current) = self.tree.active_tab(self.active_group) else { return };
-        let Some(ix) = tabs.iter().position(|p| *p == current) else { return };
+        let Some(current) = self.tree.active_tab(self.active_group) else {
+            return;
+        };
+        let Some(ix) = tabs.iter().position(|p| *p == current) else {
+            return;
+        };
         let next = tabs[(ix as isize + step).rem_euclid(tabs.len() as isize) as usize];
         self.show_pane(next, true, window, cx);
         self.flash(Flash::Tab(next), cx);
@@ -1144,13 +1491,21 @@ impl Workspace {
     fn focus_group_at(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
         // With a group shown as tiles, the numbers are its tiles'.
         if let Some(tiled) = self.tiled_group() {
-            if let Some(pane) = n.checked_sub(1).and_then(|ix| self.tree.tabs(tiled).get(ix).copied()) {
+            if let Some(pane) = n
+                .checked_sub(1)
+                .and_then(|ix| self.tree.tabs(tiled).get(ix).copied())
+            {
                 self.show_pane(pane, true, window, cx);
                 self.flash(Flash::Tab(pane), cx);
             }
             return;
         }
-        let Some(group) = n.checked_sub(1).and_then(|ix| self.tree.groups().get(ix).copied()) else { return };
+        let Some(group) = n
+            .checked_sub(1)
+            .and_then(|ix| self.tree.groups().get(ix).copied())
+        else {
+            return;
+        };
         self.set_active_group(group, cx);
         if let Some(pane) = self.tree.active_tab(group) {
             self.focus_pane(pane, window, cx);
@@ -1242,7 +1597,11 @@ impl Workspace {
             if wanted.is_some() {
                 let seq = self.hint_seq;
                 cx.spawn(async move |this, cx| {
-                    let delay = if wanted == Some(Hints::Groups) { GROUP_HINT_DELAY } else { HINT_DELAY };
+                    let delay = if wanted == Some(Hints::Groups) {
+                        GROUP_HINT_DELAY
+                    } else {
+                        HINT_DELAY
+                    };
                     cx.background_executor().timer(delay).await;
                     _ = this.update(cx, |this, cx| {
                         if this.hint_seq == seq {
@@ -1261,17 +1620,24 @@ impl Workspace {
 
     /// The pane as its kind, when it is of that kind.
     pub(crate) fn pane_as<T: 'static>(&self, id: PaneId) -> Option<Entity<T>> {
-        self.panes.get(&id).and_then(|pane| pane.view().downcast::<T>().ok())
+        self.panes
+            .get(&id)
+            .and_then(|pane| pane.view().downcast::<T>().ok())
     }
 
     /// The panes of one kind.
     pub(crate) fn panes_of<T: 'static>(&self) -> impl Iterator<Item = (PaneId, Entity<T>)> + '_ {
-        self.panes.iter().filter_map(|(id, pane)| Some((*id, pane.view().downcast::<T>().ok()?)))
+        self.panes
+            .iter()
+            .filter_map(|(id, pane)| Some((*id, pane.view().downcast::<T>().ok()?)))
     }
 
     /// The first tab, in layout order, of kind `T` that `matches`.
     fn find_pane<T: 'static>(&self, matches: impl Fn(&T) -> bool, cx: &App) -> Option<PaneId> {
-        self.tree.panes().into_iter().find(|id| self.pane_as::<T>(*id).is_some_and(|view| matches(view.read(cx))))
+        self.tree.panes().into_iter().find(|id| {
+            self.pane_as::<T>(*id)
+                .is_some_and(|view| matches(view.read(cx)))
+        })
     }
 
     /// Show the tab `existing`, else a new pane from `make` where tabs of
@@ -1297,7 +1663,13 @@ impl Workspace {
 
     /// Open a file: as the preview tab (a single click; focus stays where it
     /// is, and the next preview replaces it), or kept, as in den.
-    pub fn open_file(&mut self, path: PathBuf, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_file(
+        &mut self,
+        path: PathBuf,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let existing = self.find_pane::<FilePanel>(|file| file.path() == Some(path.as_path()), cx);
         match existing {
             Some(pane) => {
@@ -1318,7 +1690,9 @@ impl Workspace {
                 let added = self.tree.active_tab(group);
                 if let Some(old) = replaced {
                     // Into the old tab's place, so the strip does not shuffle.
-                    if let (Some(added), Some(ix)) = (added, self.tree.tabs(group).iter().position(|p| *p == old)) {
+                    if let (Some(added), Some(ix)) =
+                        (added, self.tree.tabs(group).iter().position(|p| *p == old))
+                    {
                         self.tree.move_tab(added, group, Some(ix));
                     }
                     self.close_pane(old, cx);
@@ -1333,9 +1707,20 @@ impl Workspace {
     /// A new untitled file, as VS Code's Ctrl+N: an empty tab named by the
     /// lowest free number, saved where Save As says. In `group`, else where
     /// files go.
-    pub(crate) fn new_untitled(&mut self, group: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
-        let taken: HashSet<String> = self.panes_of::<FilePanel>().filter_map(|(_, file)| file.read(cx).untitled_name()).collect();
-        let name = (1..).map(|n| format!("Untitled-{n}")).find(|name| !taken.contains(name)).unwrap_or_default();
+    pub(crate) fn new_untitled(
+        &mut self,
+        group: Option<NodeId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let taken: HashSet<String> = self
+            .panes_of::<FilePanel>()
+            .filter_map(|(_, file)| file.read(cx).untitled_name())
+            .collect();
+        let name = (1..)
+            .map(|n| format!("Untitled-{n}"))
+            .find(|name| !taken.contains(name))
+            .unwrap_or_default();
         let path = self.root.join(name);
         let file = cx.new(|cx| FilePanel::untitled(path, window, cx));
         let group = group.unwrap_or_else(|| self.target_group(Kind::Files));
@@ -1362,7 +1747,14 @@ impl Workspace {
     }
 
     /// Open a file and put the cursor at `line` and `column` (both from 1).
-    pub(crate) fn open_file_at(&mut self, path: PathBuf, line: Option<u32>, column: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_at(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_file(path.clone(), false, window, cx);
         if let Some(line) = line {
             self.go_to(&path, line, column.unwrap_or(1), true, window, cx);
@@ -1370,11 +1762,21 @@ impl Workspace {
     }
 
     fn file_pane(&self, path: &std::path::Path, cx: &App) -> Option<Entity<FilePanel>> {
-        self.panes_of::<FilePanel>().map(|(_, file)| file).find(|file| file.read(cx).path() == Some(path))
+        self.panes_of::<FilePanel>()
+            .map(|(_, file)| file)
+            .find(|file| file.read(cx).path() == Some(path))
     }
 
     /// Move an open file's cursor to `line` and `column` (both from 1).
-    pub(crate) fn go_to(&mut self, path: &std::path::Path, line: u32, column: u32, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_to(
+        &mut self,
+        path: &std::path::Path,
+        line: u32,
+        column: u32,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(file) = self.file_pane(path, cx) {
             file.update(cx, |file, cx| file.go_to(line, column, focus, window, cx));
         }
@@ -1382,7 +1784,8 @@ impl Workspace {
 
     /// A file with unsaved changes in a tab.
     pub(crate) fn is_dirty_file(&self, path: &std::path::Path, cx: &App) -> bool {
-        self.file_pane(path, cx).is_some_and(|file| file.read(cx).is_dirty(cx))
+        self.file_pane(path, cx)
+            .is_some_and(|file| file.read(cx).is_dirty(cx))
     }
 
     // -- Following the disk -------------------------------------------------
@@ -1390,23 +1793,43 @@ impl Workspace {
     /// Watch the session root: the Explorer, git status and open files follow
     /// changes on disk.
     fn start_watching(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok((watcher, mut rx)) = watch::watch(&self.root) else { return };
+        let Ok((watcher, mut rx)) = watch::watch(&self.root) else {
+            return;
+        };
         self._watcher = Some(watcher);
         self._watch_task = Some(cx.spawn_in(window, async move |this, cx| {
             let executor = cx.background_executor().clone();
-            let timer = move |d| -> futures::future::BoxFuture<'static, ()> { Box::pin(executor.timer(d)) };
-            while let Some(batch) = watch::next_batch(&mut rx, Duration::from_millis(150), &timer).await {
-                if this.update_in(cx, |this, window, cx| this.on_disk_changed(batch, window, cx)).is_err() {
+            let timer =
+                move |d| -> futures::future::BoxFuture<'static, ()> { Box::pin(executor.timer(d)) };
+            while let Some(batch) =
+                watch::next_batch(&mut rx, Duration::from_millis(150), &timer).await
+            {
+                if this
+                    .update_in(cx, |this, window, cx| {
+                        this.on_disk_changed(batch, window, cx)
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
         }));
     }
 
-    fn on_disk_changed(&mut self, batch: BTreeSet<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-        let outside_git: Vec<PathBuf> = batch.iter().filter(|p| !watch::in_git_dir(p)).cloned().collect();
+    fn on_disk_changed(
+        &mut self,
+        batch: BTreeSet<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let outside_git: Vec<PathBuf> = batch
+            .iter()
+            .filter(|p| !watch::in_git_dir(p))
+            .cloned()
+            .collect();
         if !outside_git.is_empty() {
-            self.explorer.update(cx, |explorer, cx| explorer.paths_changed(&outside_git, cx));
+            self.explorer
+                .update(cx, |explorer, cx| explorer.paths_changed(&outside_git, cx));
             // Open files without unsaved changes take what is on disk now.
             for path in &outside_git {
                 if let Some(file) = self.file_pane(path, cx) {
@@ -1418,11 +1841,16 @@ impl Workspace {
         // too, and everything when a remote may have. Files changed: the
         // status, unless they are all ignored (a build writing its output).
         let git_state: Vec<&PathBuf> = batch.iter().filter(|p| watch::is_git_state(p)).collect();
-        let level = if git_state.iter().any(|p| p.file_name().is_some_and(|name| name == "config")) {
+        let level = if git_state
+            .iter()
+            .any(|p| p.file_name().is_some_and(|name| name == "config"))
+        {
             Refresh::Reload
         } else if !git_state.is_empty() {
             Refresh::Full
-        } else if outside_git.is_empty() || outside_git.iter().all(|p| self.repo.read(cx).is_ignored(p)) {
+        } else if outside_git.is_empty()
+            || outside_git.iter().all(|p| self.repo.read(cx).is_ignored(p))
+        {
             return;
         } else {
             Refresh::Status
@@ -1433,21 +1861,58 @@ impl Workspace {
 
     /// The change to `path` (`rel` in the repository) side by side, in an
     /// existing diff tab when there is one.
-    fn open_diff(&mut self, path: PathBuf, rel: String, staged: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
-        let existing = self.find_pane::<DiffPanel>(|diff| diff.path() == path && diff.staged() == staged && diff.commit().is_none(), cx);
+    fn open_diff(
+        &mut self,
+        path: PathBuf,
+        rel: String,
+        staged: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let existing = self.find_pane::<DiffPanel>(
+            |diff| diff.path() == path && diff.staged() == staged && diff.commit().is_none(),
+            cx,
+        );
         if let Some(diff) = existing.and_then(|pane| self.pane_as::<DiffPanel>(pane)) {
             diff.update(cx, |diff, cx| diff.reload(cx));
         }
-        self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::new(path, top, rel, staged, cx)), window, cx);
+        self.show_or_add(
+            existing,
+            Kind::Files,
+            false,
+            |_, cx| cx.new(|cx| DiffPanel::new(path, top, rel, staged, cx)),
+            window,
+            cx,
+        );
     }
 
     /// A commit's change to one file; shown again when already open.
-    fn open_commit_diff(&mut self, rel: String, commit: crate::diff::CommitRevs, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+    fn open_commit_diff(
+        &mut self,
+        rel: String,
+        commit: crate::diff::CommitRevs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         let path = top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-        let existing = self.find_pane::<DiffPanel>(|diff| diff.path() == path && diff.commit().is_some_and(|c| c.hash == commit.hash), cx);
-        self.show_or_add(existing, Kind::Files, false, |_, cx| cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)), window, cx);
+        let existing = self.find_pane::<DiffPanel>(
+            |diff| diff.path() == path && diff.commit().is_some_and(|c| c.hash == commit.hash),
+            cx,
+        );
+        self.show_or_add(
+            existing,
+            Kind::Files,
+            false,
+            |_, cx| cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)),
+            window,
+            cx,
+        );
     }
 
     /// After git's own state changed (`None`: a stage, a commit, a checkout),
@@ -1460,11 +1925,15 @@ impl Workspace {
                 file.update(cx, |file, cx| file.refresh_git_base(cx));
             }
         }
-        let changed: Option<HashSet<String>> = batch.map(|batch| batch.iter().map(|p| crate::repo::key(p)).collect());
+        let changed: Option<HashSet<String>> =
+            batch.map(|batch| batch.iter().map(|p| crate::repo::key(p)).collect());
         for (_, diff) in self.panes_of::<DiffPanel>() {
             let wanted = {
                 let diff = diff.read(cx);
-                diff.commit().is_none() && changed.as_ref().is_none_or(|changed| changed.contains(&crate::repo::key(diff.path())))
+                diff.commit().is_none()
+                    && changed
+                        .as_ref()
+                        .is_none_or(|changed| changed.contains(&crate::repo::key(diff.path())))
             };
             if wanted {
                 diff.update(cx, |diff, cx| diff.reload(cx));
@@ -1474,13 +1943,23 @@ impl Workspace {
 
     /// Settings in a dialog over the window, as den has them; scrolled to
     /// the presets with `presets`.
-    pub(crate) fn open_settings(&mut self, presets: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings(
+        &mut self,
+        presets: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_settings_at(presets.then_some(1), window, cx);
     }
 
     /// Settings scrolled to its `section`th part (1 the presets, 2 Keyboard
     /// Shortcuts); the top with none.
-    pub(crate) fn open_settings_at(&mut self, section: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_settings_at(
+        &mut self,
+        section: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let view = cx.new(|cx| SettingsPanel::new(window, cx));
         if let Some(section) = section {
             view.update(cx, |view, _| view.show_section(section));
@@ -1499,14 +1978,20 @@ impl Workspace {
                 .child(div().h(height).child(view.clone()))
                 .on_close(move |_, _, cx| _ = this.update(cx, |_, cx| cx.notify()))
         });
-        window.defer(cx, move |window, cx| search.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            search.update(cx, |input, cx| input.focus(window, cx))
+        });
         // A browser page hides while the dialog is open.
         cx.notify();
     }
 
     /// A terminal running the coding agent's preset (a plain shell without one).
     fn open_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let program = Settings::get(cx).presets.iter().find(|p| p.agent).map(|p| p.command.clone());
+        let program = Settings::get(cx)
+            .presets
+            .iter()
+            .find(|p| p.agent)
+            .map(|p| p.command.clone());
         let agent = program.is_some();
         self.open_terminal(None, program, agent, window, cx)
     }
@@ -1514,7 +1999,16 @@ impl Workspace {
     /// Open Preset 1…9 (no keys by default): the `n`th pinned preset, as the
     /// tab strips show them, in the group its kind goes to.
     fn open_preset(&mut self, n: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(preset) = n.checked_sub(1).and_then(|ix| Settings::get(cx).presets.iter().filter(|p| p.pinned).nth(ix).cloned()) else { return };
+        let Some(preset) = n.checked_sub(1).and_then(|ix| {
+            Settings::get(cx)
+                .presets
+                .iter()
+                .filter(|p| p.pinned)
+                .nth(ix)
+                .cloned()
+        }) else {
+            return;
+        };
         if preset.browser {
             self.open_browser(None, Some(preset.command), window, cx);
         } else {
@@ -1525,21 +2019,50 @@ impl Workspace {
     /// A terminal running `program` (`None` for a plain shell), a coding
     /// agent's or not: in `group` when a group's button asked, else where
     /// its kind goes.
-    pub(crate) fn open_terminal(&mut self, group: Option<NodeId>, program: Option<String>, agent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let group = group.unwrap_or_else(|| self.target_group(if agent { Kind::Agents } else { Kind::Terminals }));
-        let program = program.map(|p| p.trim().to_string()).filter(|c| !c.is_empty());
-        let launch = Launch { cwd: self.root.clone(), program: program.clone(), command: program, history: None, agent };
+    pub(crate) fn open_terminal(
+        &mut self,
+        group: Option<NodeId>,
+        program: Option<String>,
+        agent: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group = group.unwrap_or_else(|| {
+            self.target_group(if agent { Kind::Agents } else { Kind::Terminals })
+        });
+        let program = program
+            .map(|p| p.trim().to_string())
+            .filter(|c| !c.is_empty());
+        let launch = Launch {
+            cwd: self.root.clone(),
+            program: program.clone(),
+            command: program,
+            history: None,
+            agent,
+        };
         self.add_terminal(launch, group, window, cx);
     }
 
-    fn add_terminal(&mut self, launch: Launch, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_terminal(
+        &mut self,
+        launch: Launch,
+        group: NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
         self.add_pane(terminal, group, true, window, cx);
     }
 
     /// A browser tab at `url` (the home page when none), in `group` or where
     /// browsers go.
-    pub(crate) fn open_browser(&mut self, group: Option<NodeId>, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_browser(
+        &mut self,
+        group: Option<NodeId>,
+        url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let group = group.unwrap_or_else(|| self.target_group(Kind::Browsers));
         let browser = cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx));
         self.add_pane(browser, group, true, window, cx);
@@ -1552,12 +2075,18 @@ impl Workspace {
     fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         // A page stays live: only a drag or a dialog hides it (menus and
         // toasts may be drawn under it).
-        let covered = cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
+        let covered =
+            cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
         // Under a maximized group, the other groups' pages are out of sight;
         // in one maximized as tiles, every page is in sight.
-        let maximized = self.maximized.as_ref().filter(|m| self.tree.float_of(m.group) == float);
+        let maximized = self
+            .maximized
+            .as_ref()
+            .filter(|m| self.tree.float_of(m.group) == float);
         for (id, browser) in self.panes_of::<crate::browser::BrowserPanel>() {
-            let Some(group) = self.tree.group_of(id) else { continue };
+            let Some(group) = self.tree.group_of(id) else {
+                continue;
+            };
             if self.tree.float_of(group) != float {
                 continue;
             }
@@ -1572,7 +2101,13 @@ impl Workspace {
 
     /// The page of extension `id` (a preview of `listing` when it is not
     /// installed): its tab if open, else a new one where files go.
-    pub(crate) fn open_extension(&mut self, id: String, listing: Option<crate::backend::extensions::Listing>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_extension(
+        &mut self,
+        id: String,
+        listing: Option<crate::backend::extensions::Listing>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let existing = self.find_pane::<ExtensionPanel>(|page| page.id() == id, cx);
         let make = |window: &mut Window, cx: &mut Context<Self>| match listing {
             Some(listing) => cx.new(|cx| ExtensionPanel::preview(listing, cx)),
@@ -1582,17 +2117,37 @@ impl Workspace {
     }
 
     /// Extension `id`'s view `view`: its tab if open, else a new one where files go.
-    pub(crate) fn open_extension_view(&mut self, id: String, view: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_extension_view(
+        &mut self,
+        id: String,
+        view: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::extension_view::ExtensionView;
         let existing = self.find_pane::<ExtensionView>(|v| v.is(&id, &view), cx);
         let root = self.root.clone();
-        self.show_or_add(existing, Kind::Files, true, |_, cx| cx.new(|cx| ExtensionView::new(id, view, root, cx)), window, cx);
+        self.show_or_add(
+            existing,
+            Kind::Files,
+            true,
+            |_, cx| cx.new(|cx| ExtensionView::new(id, view, root, cx)),
+            window,
+            cx,
+        );
     }
 
     /// An extension's `open_diff`: a commit's change to a file, or its
     /// uncommitted change, in the window's repository.
-    pub(crate) fn open_extension_diff(&mut self, diff: den_extension::view::Diff, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+    pub(crate) fn open_extension_diff(
+        &mut self,
+        diff: den_extension::view::Diff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         let path = std::path::Path::new(&diff.path);
         let rel = match path.strip_prefix(&top) {
             Ok(rel) if path.is_absolute() => rel.to_string_lossy().replace('\\', "/"),
@@ -1601,7 +2156,16 @@ impl Workspace {
         match diff.hash {
             Some(hash) => {
                 let old_rel = diff.old_path.unwrap_or_else(|| rel.clone());
-                self.open_commit_diff(rel, crate::diff::CommitRevs { hash, parent: diff.parent, old_rel }, window, cx);
+                self.open_commit_diff(
+                    rel,
+                    crate::diff::CommitRevs {
+                        hash,
+                        parent: diff.parent,
+                        old_rel,
+                    },
+                    window,
+                    cx,
+                );
             }
             None => {
                 let path = top.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -1612,40 +2176,84 @@ impl Workspace {
 
     /// An extension's `run_in_terminal`: a shell in `cwd` (else the root)
     /// running `command`, where terminals go.
-    pub(crate) fn run_in_terminal(&mut self, command: String, cwd: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_in_terminal(
+        &mut self,
+        command: String,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let group = self.target_group(Kind::Terminals);
         // A plain shell, so the session brings it back as one rather than
         // running the command again.
-        let launch = Launch { cwd: cwd.unwrap_or_else(|| self.root.clone()), program: None, command: Some(command), history: None, agent: false };
+        let launch = Launch {
+            cwd: cwd.unwrap_or_else(|| self.root.clone()),
+            program: None,
+            command: Some(command),
+            history: None,
+            agent: false,
+        };
         self.add_terminal(launch, group, window, cx);
     }
 
     /// A shell starting in `dir` (Open Terminal Here).
-    pub(crate) fn open_shell_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_shell_in(
+        &mut self,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let group = self.target_group(Kind::Terminals);
-        let launch = Launch { cwd: dir, program: None, command: None, history: None, agent: false };
+        let launch = Launch {
+            cwd: dir,
+            program: None,
+            command: None,
+            history: None,
+            agent: false,
+        };
         self.add_terminal(launch, group, window, cx);
     }
 
     /// Another terminal beside `pane` running what it runs, in the folder its
     /// shell is in now.
-    pub(crate) fn duplicate_terminal(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(terminal) = self.pane_as::<TerminalPanel>(pane) else { return };
-        let Some(group) = self.tree.group_of(pane) else { return };
+    pub(crate) fn duplicate_terminal(
+        &mut self,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.pane_as::<TerminalPanel>(pane) else {
+            return;
+        };
+        let Some(group) = self.tree.group_of(pane) else {
+            return;
+        };
         let terminal = terminal.read(cx);
         let program = terminal.program().map(str::to_string);
-        let launch = Launch { cwd: terminal.cwd().to_path_buf(), program: program.clone(), command: program, history: None, agent: terminal.is_agent() };
+        let launch = Launch {
+            cwd: terminal.cwd().to_path_buf(),
+            program: program.clone(),
+            command: program,
+            history: None,
+            agent: terminal.is_agent(),
+        };
         self.add_terminal(launch, group, window, cx);
     }
 
     /// Show `path` in the Explorer view: in the main window's sidebar, which
     /// comes to the front.
-    pub(crate) fn reveal_in_sidebar(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_in_sidebar(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         AppState::update(cx, |state| {
             state.sidebar.visible = true;
             state.sidebar.view = SidebarView::Explorer;
         });
-        self.explorer.update(cx, |explorer, cx| explorer.show_path(&path, cx));
+        self.explorer
+            .update(cx, |explorer, cx| explorer.show_path(&path, cx));
         let focus = self.explorer.focus_handle(cx);
         if self.window == window.window_handle() {
             focus.focus(window, cx);
@@ -1665,7 +2273,12 @@ impl Workspace {
     /// active, else its first.
     pub(crate) fn dock_tab(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         let groups = self.tree.root.groups();
-        let target = self.last_active.get(&None).filter(|group| groups.contains(group)).or(groups.first()).copied();
+        let target = self
+            .last_active
+            .get(&None)
+            .filter(|group| groups.contains(group))
+            .or(groups.first())
+            .copied();
         if let Some(target) = target {
             self.move_tab(pane, target, None, None, cx);
         }
@@ -1678,9 +2291,15 @@ impl Workspace {
     pub(crate) fn open_more(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         match self.defaults.get(group) {
             Some(Kind::Files) => return self.new_untitled(Some(group), window, cx),
-            Some(Kind::Terminals) => return self.open_terminal(Some(group), None, false, window, cx),
+            Some(Kind::Terminals) => {
+                return self.open_terminal(Some(group), None, false, window, cx);
+            }
             Some(Kind::Agents) => {
-                let preset = Settings::get(cx).presets.iter().find(|p| p.kind() == Kind::Agents).map(|p| p.command.clone());
+                let preset = Settings::get(cx)
+                    .presets
+                    .iter()
+                    .find(|p| p.kind() == Kind::Agents)
+                    .map(|p| p.command.clone());
                 if preset.is_some() {
                     return self.open_terminal(Some(group), preset, true, window, cx);
                 }
@@ -1696,16 +2315,29 @@ impl Workspace {
             .map(|id| {
                 let terminal = self.pane_as::<TerminalPanel>(*id)?;
                 let terminal = terminal.read(cx);
-                terminal.program().map(|p| (p.to_string(), terminal.is_agent()))
+                terminal
+                    .program()
+                    .map(|p| (p.to_string(), terminal.is_agent()))
             })
             .collect();
-        let same = programs.first().cloned().flatten().filter(|first| programs.iter().all(|p| p.as_ref() == Some(first)));
+        let same = programs
+            .first()
+            .cloned()
+            .flatten()
+            .filter(|first| programs.iter().all(|p| p.as_ref() == Some(first)));
         // A group of browsers gets another browser.
         let tabs = self.tree.tabs(group);
-        if !tabs.is_empty() && tabs.iter().all(|id| self.panes.get(id).is_some_and(|p| p.kind(cx) == crate::browser::BROWSER)) {
+        if !tabs.is_empty()
+            && tabs.iter().all(|id| {
+                self.panes
+                    .get(id)
+                    .is_some_and(|p| p.kind(cx) == crate::browser::BROWSER)
+            })
+        {
             return self.open_browser(Some(group), None, window, cx);
         }
-        let (program, agent) = same.map_or((None, false), |(command, agent)| (Some(command), agent));
+        let (program, agent) =
+            same.map_or((None, false), |(command, agent)| (Some(command), agent));
         self.open_terminal(Some(group), program, agent, window, cx);
     }
 
@@ -1714,7 +2346,11 @@ impl Workspace {
     /// Files with unsaved changes in this window.
     /// Close this window: at once, saving the session, when nothing is
     /// unsaved; else after asking (false then: the window stays for now).
-    pub(crate) fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn request_close_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let dirty = self.dirty_panes(cx);
         if dirty.is_empty() {
             self.save_session(cx);
@@ -1733,11 +2369,21 @@ impl Workspace {
     }
 
     fn dirty_panes(&self, cx: &App) -> Vec<PaneId> {
-        self.tree.panes().into_iter().filter(|id| self.panes.get(id).is_some_and(|p| p.is_dirty(cx))).collect()
+        self.tree
+            .panes()
+            .into_iter()
+            .filter(|id| self.panes.get(id).is_some_and(|p| p.is_dirty(cx)))
+            .collect()
     }
 
     /// Run `then` now, or after asking when tabs have unsaved changes.
-    fn confirm_discard(&mut self, panes: Vec<PaneId>, then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_discard(
+        &mut self,
+        panes: Vec<PaneId>,
+        then: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let dirty: Vec<SharedString> = panes
             .iter()
             .filter_map(|id| self.panes.get(id))
@@ -1751,7 +2397,11 @@ impl Workspace {
         let then = std::rc::Rc::new(then);
         let what = match dirty.as_slice() {
             [one] => format!("{one} has unsaved changes. Discard them?"),
-            many => format!("{} files have unsaved changes: {}. Discard them?", many.len(), many.join(", ")),
+            many => format!(
+                "{} files have unsaved changes: {}. Discard them?",
+                many.len(),
+                many.join(", ")
+            ),
         };
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
@@ -1770,23 +2420,59 @@ impl Workspace {
     }
 
     /// Close a tab, asking first when it has unsaved changes.
-    pub(crate) fn request_close_pane(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_discard(vec![pane], move |this, _, cx| this.close_pane(pane, cx), window, cx);
+    pub(crate) fn request_close_pane(
+        &mut self,
+        pane: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_discard(
+            vec![pane],
+            move |this, _, cx| this.close_pane(pane, cx),
+            window,
+            cx,
+        );
     }
 
     /// Close several tabs, asking first when any has unsaved changes.
-    pub(crate) fn request_close_panes(&mut self, panes: Vec<PaneId>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_close_panes(
+        &mut self,
+        panes: Vec<PaneId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let close = panes.clone();
-        self.confirm_discard(panes, move |this, _, cx| close.iter().for_each(|&pane| this.close_pane(pane, cx)), window, cx);
+        self.confirm_discard(
+            panes,
+            move |this, _, cx| close.iter().for_each(|&pane| this.close_pane(pane, cx)),
+            window,
+            cx,
+        );
     }
 
-    pub(crate) fn request_close_group(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_close_group(
+        &mut self,
+        group: NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let panes = self.tree.tabs(group).to_vec();
-        self.confirm_discard(panes, move |this, _, cx| this.close_group(group, cx), window, cx);
+        self.confirm_discard(
+            panes,
+            move |this, _, cx| this.close_group(group, cx),
+            window,
+            cx,
+        );
     }
 
     /// Open `root` as a session: in this window (saving this one first), or a new one.
-    fn open_session(&mut self, root: PathBuf, new_window: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_session(
+        &mut self,
+        root: PathBuf,
+        new_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
         if new_window {
             crate::open_workspace(root, None, cx);
@@ -1799,14 +2485,21 @@ impl Workspace {
                 this.save_session(cx);
                 // Once this workspace is out of its update: the switch drops it.
                 let root = root.clone();
-                window.defer(cx, move |window, cx| crate::switch_workspace(root, window, cx));
+                window.defer(cx, move |window, cx| {
+                    crate::switch_workspace(root, window, cx)
+                });
             },
             window,
             cx,
         );
     }
 
-    fn prompt_open_folder(&mut self, new_window: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn prompt_open_folder(
+        &mut self,
+        new_window: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1814,8 +2507,18 @@ impl Workspace {
             prompt: Some("Open Folder".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Some(path) = paths.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next()) else { return };
-            _ = this.update_in(cx, |this, window, cx| this.open_session(path, new_window, window, cx));
+            let Some(path) = paths
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .and_then(|p| p.into_iter().next())
+            else {
+                return;
+            };
+            _ = this.update_in(cx, |this, window, cx| {
+                this.open_session(path, new_window, window, cx)
+            });
         })
         .detach();
     }
@@ -1828,7 +2531,9 @@ impl Workspace {
             prompt: Some("Open Files".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Some(paths) = paths.await.ok().and_then(Result::ok).flatten() else { return };
+            let Some(paths) = paths.await.ok().and_then(Result::ok).flatten() else {
+                return;
+            };
             _ = this.update_in(cx, |this, window, cx| {
                 for path in paths {
                     this.open_file(path, false, window, cx);
@@ -1848,7 +2553,9 @@ impl Workspace {
             }
             return;
         }
-        let Some(group) = self.tree.neighbor(self.active_group, side) else { return };
+        let Some(group) = self.tree.neighbor(self.active_group, side) else {
+            return;
+        };
         self.set_active_group(group, cx);
         if let Some(pane) = self.tree.active_tab(group) {
             self.focus_pane(pane, window, cx);
@@ -1859,11 +2566,24 @@ impl Workspace {
     // -- Presets -------------------------------------------------------------
 
     fn load_preset(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(preset) = AppState::get(cx).presets.iter().find(|p| p.name == name).cloned() else {
+        let Some(preset) = AppState::get(cx)
+            .presets
+            .iter()
+            .find(|p| p.name == name)
+            .cloned()
+        else {
             return;
         };
-        if let Err(err) = self.load_state(crate::layout_file::preset(&preset.layout, &self.root), window, cx) {
-            crate::toast::push(window, format!("Could not load layout \"{name}\": {err}"), cx);
+        if let Err(err) = self.load_state(
+            crate::layout_file::preset(&preset.layout, &self.root),
+            window,
+            cx,
+        ) {
+            crate::toast::push(
+                window,
+                format!("Could not load layout \"{name}\": {err}"),
+                cx,
+            );
             return;
         }
         self.changed(cx);
@@ -1883,15 +2603,18 @@ impl Workspace {
         });
         state.root = tree.root;
         state.floats = tree.floats;
-        let Ok(layout) = serde_json::to_value(state) else { return };
+        let Ok(layout) = serde_json::to_value(state) else {
+            return;
+        };
         let layout = crate::layout_file::shareable(&layout, &self.root);
-        AppState::update(cx, |state| match state.presets.iter_mut().find(|p| p.name == name) {
-            Some(preset) => preset.layout = layout,
-            None => state.presets.push(LayoutPreset { name, layout }),
+        AppState::update(cx, |state| {
+            match state.presets.iter_mut().find(|p| p.name == name) {
+                Some(preset) => preset.layout = layout,
+                None => state.presets.push(LayoutPreset { name, layout }),
+            }
         });
         cx.notify();
     }
-
 
     fn prompt_save_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Layout name"));
@@ -1899,38 +2622,50 @@ impl Workspace {
         window.open_alert_dialog(cx, {
             let input = input.clone();
             move |dialog, _, cx| {
-                let existing: Vec<String> = AppState::get(cx).presets.iter().map(|p| p.name.clone()).collect();
+                let existing: Vec<String> = AppState::get(cx)
+                    .presets
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
                 dialog
                     .title("Save Layout")
                     .show_cancel(true)
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(Input::new(&input))
-                            .when(!existing.is_empty(), |list| {
-                                let theme = cx.theme().clone();
-                                list.child(div().pt_1().text_xs().text_color(theme.muted_foreground).child("Or replace a saved layout:"))
-                                    .children(existing.iter().enumerate().map(|(ix, name)| {
-                                        let this = this.clone();
+                    .child(v_flex().gap_2().child(Input::new(&input)).when(
+                        !existing.is_empty(),
+                        |list| {
+                            let theme = cx.theme().clone();
+                            list.child(
+                                div()
+                                    .pt_1()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Or replace a saved layout:"),
+                            )
+                            .children(existing.iter().enumerate().map(|(ix, name)| {
+                                let this = this.clone();
+                                let name = name.clone();
+                                h_flex()
+                                    .id(("replace-layout", ix))
+                                    .gap_2()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(px(4.))
+                                    .text_sm()
+                                    .hover(|row| row.bg(theme.accent))
+                                    .child(
+                                        Icon::new(IconName::LayoutTemplate)
+                                            .small()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(name.clone())
+                                    .on_click(move |_, window, cx| {
                                         let name = name.clone();
-                                        h_flex()
-                                            .id(("replace-layout", ix))
-                                            .gap_2()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded(px(4.))
-                                            .text_sm()
-                                            .hover(|row| row.bg(theme.accent))
-                                            .child(Icon::new(IconName::LayoutTemplate).small().text_color(theme.muted_foreground))
-                                            .child(name.clone())
-                                            .on_click(move |_, window, cx| {
-                                                let name = name.clone();
-                                                _ = this.update(cx, |this, cx| this.save_preset(name, cx));
-                                                window.close_dialog(cx);
-                                            })
-                                    }))
-                            }),
-                    )
+                                        _ = this.update(cx, |this, cx| this.save_preset(name, cx));
+                                        window.close_dialog(cx);
+                                    })
+                            }))
+                        },
+                    ))
                     .on_ok({
                         let input = input.clone();
                         let this = this.clone();
@@ -1945,14 +2680,18 @@ impl Workspace {
                     })
             }
         });
-        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
     }
 
     // -- Session -------------------------------------------------------------
 
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self._save_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(500)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
             _ = this.update(cx, |this, cx| this.save_session(cx));
         }));
     }
@@ -1963,7 +2702,10 @@ impl Workspace {
             let text = crate::layout_file::text(&crate::layout_file::shareable(layout, &self.root));
             if self.layout_file_text.as_deref() != Some(text.as_str()) {
                 let path = crate::layout_file::path(&self.root);
-                let written = path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && std::fs::write(&path, &text).is_ok();
+                let written = path
+                    .parent()
+                    .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+                    && std::fs::write(&path, &text).is_ok();
                 if written {
                     self.layout_file_text = Some(text);
                 }
@@ -2044,7 +2786,12 @@ impl Workspace {
         let root_is_split = !self.tree.root.is_group();
         let this = cx.weak_entity();
 
-        let view_button = |id: &'static str, icon: IconName, tooltip: &'static str, keys: &dyn Action, view: SidebarView, cx: &mut Context<Self>| {
+        let view_button = |id: &'static str,
+                           icon: IconName,
+                           tooltip: &'static str,
+                           keys: &dyn Action,
+                           view: SidebarView,
+                           cx: &mut Context<Self>| {
             let active = sidebar.visible && sidebar.view == view;
             Button::new(id)
                 .small()
@@ -2071,33 +2818,69 @@ impl Workspace {
         TitleBar::new()
             // The title bar keeps room for the traffic lights on macOS; in
             // full screen they are gone with the menu bar.
-            .when(crate::ui::COMMAND_KEY && window.is_fullscreen(), |this| this.pl_0())
+            .when(crate::ui::COMMAND_KEY && window.is_fullscreen(), |this| {
+                this.pl_0()
+            })
             .child(
                 h_flex()
                     .flex_1()
                     .gap_1()
                     // On macOS these menus are in the menu bar (`set_menus`).
                     .when(!crate::ui::COMMAND_KEY, |this| {
-                        this.child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(self.app_menu(cx))).child(separator())
+                        this.child(
+                            div()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .child(self.app_menu(cx)),
+                        )
+                        .child(separator())
                     })
                     .child(
                         h_flex()
                             .gap_1()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(view_button("view-explorer", IconName::Files, "Explorer", &FocusExplorer, SidebarView::Explorer, cx))
-                            .child(view_button("view-search", IconName::Search, "Search", &FocusSearch, SidebarView::Search, cx))
+                            .child(view_button(
+                                "view-explorer",
+                                IconName::Files,
+                                "Explorer",
+                                &FocusExplorer,
+                                SidebarView::Explorer,
+                                cx,
+                            ))
+                            .child(view_button(
+                                "view-search",
+                                IconName::Search,
+                                "Search",
+                                &FocusSearch,
+                                SidebarView::Search,
+                                cx,
+                            ))
                             .child(
                                 // As in VS Code: how many files have changed, in the
                                 // bottom corner, ringed to stand off the icon.
                                 div()
                                     .relative()
-                                    .child(view_button("view-scm", IconName::GitBranch, "Source Control", &FocusScm, SidebarView::Scm, cx))
+                                    .child(view_button(
+                                        "view-scm",
+                                        IconName::GitBranch,
+                                        "Source Control",
+                                        &FocusScm,
+                                        SidebarView::Scm,
+                                        cx,
+                                    ))
                                     .map(|this| {
-                                        let changed = self.repo.read(cx).status().map_or(0, |status| status.files.len());
+                                        let changed = self
+                                            .repo
+                                            .read(cx)
+                                            .status()
+                                            .map_or(0, |status| status.files.len());
                                         if changed == 0 {
                                             return this;
                                         }
-                                        let count = if changed > 999 { "999+".to_string() } else { changed.to_string() };
+                                        let count = if changed > 999 {
+                                            "999+".to_string()
+                                        } else {
+                                            changed.to_string()
+                                        };
                                         this.child(
                                             h_flex()
                                                 .absolute()
@@ -2118,7 +2901,14 @@ impl Workspace {
                                         )
                                     }),
                             )
-                            .child(view_button("view-extensions", IconName::Blocks, "Extensions", &FocusExtensions, SidebarView::Extensions, cx)),
+                            .child(view_button(
+                                "view-extensions",
+                                IconName::Blocks,
+                                "Extensions",
+                                &FocusExtensions,
+                                SidebarView::Extensions,
+                                cx,
+                            )),
                     ),
             )
             .child(
@@ -2143,7 +2933,9 @@ impl Workspace {
                                 .ghost()
                                 .icon(Icon::new(IconName::Settings))
                                 .tooltip(crate::keymap::with_keys("Settings", &OpenSettings, cx))
-                                .on_click(cx.listener(|this, _, window, cx| this.open_settings(false, window, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(false, window, cx)
+                                })),
                         ),
                 ),
             )
@@ -2163,24 +2955,41 @@ impl Workspace {
     fn report_active_file(&mut self, cx: &App) {
         let active = self.active_file(cx);
         if active != self.active_file {
-            crate::extensions::broadcast(den_extension::events::ACTIVE_FILE_CHANGED, serde_json::json!({ "root": self.root, "path": active }), cx);
+            crate::extensions::broadcast(
+                den_extension::events::ACTIVE_FILE_CHANGED,
+                serde_json::json!({ "root": self.root, "path": active }),
+                cx,
+            );
             self.active_file = active;
         }
     }
 
     fn extension_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(extensions) = cx.try_global::<crate::extensions::Extensions>() else { return Vec::new() };
-        let active_file = self.active_file.as_ref().map(|path| path.to_string_lossy().into_owned());
+        let Some(extensions) = cx.try_global::<crate::extensions::Extensions>() else {
+            return Vec::new();
+        };
+        let active_file = self
+            .active_file
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
         let mut elements = Vec::new();
         for set in extensions.buttons_for(&self.root) {
             for button in &set.buttons {
-                if !button.file_pattern.is_empty() && !active_file.as_deref().is_some_and(|path| crate::extensions::pattern_matches(&button.file_pattern, path)) {
+                if !button.file_pattern.is_empty()
+                    && !active_file.as_deref().is_some_and(|path| {
+                        crate::extensions::pattern_matches(&button.file_pattern, path)
+                    })
+                {
                     continue;
                 }
                 let icon = crate::ui::lucide_icon(&button.icon, cx);
                 let color = crate::preset_icon::parse_color(&button.color);
                 let (id, root, name) = (set.id.clone(), self.root.clone(), button.id.clone());
-                let tooltip = if button.tooltip.is_empty() { button.label.clone() } else { button.tooltip.clone() };
+                let tooltip = if button.tooltip.is_empty() {
+                    button.label.clone()
+                } else {
+                    button.tooltip.clone()
+                };
                 elements.push(
                     Button::new(SharedString::from(format!("ext-{}-{}", set.id, button.id)))
                         .small()
@@ -2194,7 +3003,9 @@ impl Workspace {
                                 .when_some(icon, |this, icon| this.child(icon.small()))
                                 .child(button.label.clone()),
                         )
-                        .on_click(move |_, _, cx| crate::extensions::button_clicked(&id, &root, &name, cx))
+                        .on_click(move |_, _, cx| {
+                            crate::extensions::button_clicked(&id, &root, &name, cx)
+                        })
                         .into_any_element(),
                 );
             }
@@ -2216,61 +3027,139 @@ impl Workspace {
                 // Each with the keys of the command it runs.
                 let item = |label: &'static str, keys: &dyn Action, run: Run| {
                     let this = this.clone();
-                    PopupMenuItem::new(crate::keymap::menu_label(label, keys, cx)).on_click(move |_, window, cx| {
-                        _ = this.update(cx, |this, cx| run(this, window, cx));
-                    })
+                    PopupMenuItem::new(crate::keymap::menu_label(label, keys, cx)).on_click(
+                        move |_, window, cx| {
+                            _ = this.update(cx, |this, cx| run(this, window, cx));
+                        },
+                    )
                 };
                 // As tall as the window allows below the title bar, so the
                 // whole menu shows and it only scrolls in a short window.
                 menu.max_h(window.viewport_size().height - px(56.))
                     .scrollable(true)
-                    .item(item("Show All Commands", &crate::ShowCommands, |_, window, cx| crate::keymap::open_palette(window, cx)))
+                    .item(item(
+                        "Show All Commands",
+                        &crate::ShowCommands,
+                        |_, window, cx| crate::keymap::open_palette(window, cx),
+                    ))
                     .separator()
                     .label("FILE")
-                    .item(item("New File", &crate::NewFile, |this, window, cx| this.new_untitled(None, window, cx)))
-                    .item(item("Open Folder…", &OpenFolder, |this, window, cx| this.prompt_open_folder(false, window, cx)))
-                    .item(item("Open Folder in New Window…", &OpenFolderInNewWindow, |this, window, cx| this.prompt_open_folder(true, window, cx)))
-                    .item(item("Open Files…", &OpenFiles, |this, window, cx| this.prompt_open_files(window, cx)))
+                    .item(item("New File", &crate::NewFile, |this, window, cx| {
+                        this.new_untitled(None, window, cx)
+                    }))
+                    .item(item("Open Folder…", &OpenFolder, |this, window, cx| {
+                        this.prompt_open_folder(false, window, cx)
+                    }))
+                    .item(item(
+                        "Open Folder in New Window…",
+                        &OpenFolderInNewWindow,
+                        |this, window, cx| this.prompt_open_folder(true, window, cx),
+                    ))
+                    .item(item("Open Files…", &OpenFiles, |this, window, cx| {
+                        this.prompt_open_files(window, cx)
+                    }))
                     .item(item("Close Tab", &CloseTab, |this, window, cx| {
                         if let Some(pane) = this.tree.active_tab(this.active_group) {
                             this.request_close_pane(pane, window, cx);
                         }
                     }))
-                    .item(item("Close Group", &CloseGroup, |this, window, cx| this.request_close_group(this.active_group, window, cx)))
+                    .item(item("Close Group", &CloseGroup, |this, window, cx| {
+                        this.request_close_group(this.active_group, window, cx)
+                    }))
                     .separator()
                     .label("EDIT")
-                    .item(item("Format Document", &FormatDocument, |this, window, cx| this.format_active(window, cx)))
-                    .item(item("Find in Files", &FocusSearch, |this, window, cx| this.focus_view(SidebarView::Search, window, cx)))
-                    .item(item("Replace in Files", &ReplaceInFiles, |_, window, cx| window.dispatch_action(Box::new(ReplaceInFiles), cx)))
+                    .item(item(
+                        "Format Document",
+                        &FormatDocument,
+                        |this, window, cx| this.format_active(window, cx),
+                    ))
+                    .item(item("Find in Files", &FocusSearch, |this, window, cx| {
+                        this.focus_view(SidebarView::Search, window, cx)
+                    }))
+                    .item(item(
+                        "Replace in Files",
+                        &ReplaceInFiles,
+                        |_, window, cx| window.dispatch_action(Box::new(ReplaceInFiles), cx),
+                    ))
                     .separator()
                     .label("VIEW")
-                    .item(item("Toggle Sidebar", &crate::ToggleSidebar, |this, window, cx| this.toggle_sidebar(window, cx)))
-                    .item(item("Explorer", &FocusExplorer, |this, _, cx| this.toggle_view(SidebarView::Explorer, cx)))
-                    .item(item("Search", &FocusSearch, |this, _, cx| this.toggle_view(SidebarView::Search, cx)))
-                    .item(item("Source Control", &FocusScm, |this, _, cx| this.toggle_view(SidebarView::Scm, cx)))
-                    .item(item("Extensions", &FocusExtensions, |this, _, cx| this.toggle_view(SidebarView::Extensions, cx)))
-                    .item(item("Split Right", &SplitRight, |this, _, cx| this.split(this.active_group, Side::Right, cx)))
-                    .item(item("Split Down", &SplitDown, |this, _, cx| this.split(this.active_group, Side::Bottom, cx)))
-                    .item(item("Save Layout…", &SaveLayout, |this, window, cx| this.prompt_save_preset(window, cx)))
-                    .item(item("Reset Layout", &ResetLayout, |this, _, cx| this.reset_layout(cx)))
-                    .item(item("Settings", &OpenSettings, |this, window, cx| this.open_settings(false, window, cx)))
-                    .item(item("Keyboard Shortcuts", &crate::OpenKeyboardShortcuts, |this, window, cx| this.open_settings_at(Some(2), window, cx)))
-                    .item(item("Check for Updates…", &CheckForUpdates, |_, window, cx| crate::update::check_in_window(true, window, cx)))
+                    .item(item(
+                        "Toggle Sidebar",
+                        &crate::ToggleSidebar,
+                        |this, window, cx| this.toggle_sidebar(window, cx),
+                    ))
+                    .item(item("Explorer", &FocusExplorer, |this, _, cx| {
+                        this.toggle_view(SidebarView::Explorer, cx)
+                    }))
+                    .item(item("Search", &FocusSearch, |this, _, cx| {
+                        this.toggle_view(SidebarView::Search, cx)
+                    }))
+                    .item(item("Source Control", &FocusScm, |this, _, cx| {
+                        this.toggle_view(SidebarView::Scm, cx)
+                    }))
+                    .item(item("Extensions", &FocusExtensions, |this, _, cx| {
+                        this.toggle_view(SidebarView::Extensions, cx)
+                    }))
+                    .item(item("Split Right", &SplitRight, |this, _, cx| {
+                        this.split(this.active_group, Side::Right, cx)
+                    }))
+                    .item(item("Split Down", &SplitDown, |this, _, cx| {
+                        this.split(this.active_group, Side::Bottom, cx)
+                    }))
+                    .item(item("Save Layout…", &SaveLayout, |this, window, cx| {
+                        this.prompt_save_preset(window, cx)
+                    }))
+                    .item(item("Reset Layout", &ResetLayout, |this, _, cx| {
+                        this.reset_layout(cx)
+                    }))
+                    .item(item("Settings", &OpenSettings, |this, window, cx| {
+                        this.open_settings(false, window, cx)
+                    }))
+                    .item(item(
+                        "Keyboard Shortcuts",
+                        &crate::OpenKeyboardShortcuts,
+                        |this, window, cx| this.open_settings_at(Some(2), window, cx),
+                    ))
+                    .item(item(
+                        "Check for Updates…",
+                        &CheckForUpdates,
+                        |_, window, cx| crate::update::check_in_window(true, window, cx),
+                    ))
                     .separator()
                     .label("TERMINAL")
-                    .item(item("New Terminal", &NewTerminal, |this, window, cx| this.open_terminal(None, None, false, window, cx)))
-                    .item(item("New Browser", &NewBrowser, |this, window, cx| this.open_browser(None, None, window, cx)))
+                    .item(item("New Terminal", &NewTerminal, |this, window, cx| {
+                        this.open_terminal(None, None, false, window, cx)
+                    }))
+                    .item(item("New Browser", &NewBrowser, |this, window, cx| {
+                        this.open_browser(None, None, window, cx)
+                    }))
                     .item(item("Claude Code", &NewAgent, Self::open_agent))
                     // The running extensions' commands, each by its extension.
                     .when(!commands.is_empty(), |mut menu| {
                         menu = menu.separator().label("EXTENSIONS");
                         for (id, name, command) in &commands {
-                            let action = crate::extensions::RunCommand { extension: id.clone(), command: command.id.clone() };
-                            let label = crate::keymap::menu_label(&format!("{name}: {}", command.title), &action, cx);
-                            let (this, id, command_id) = (this.clone(), id.clone(), command.id.clone());
-                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                                _ = this.update(cx, |this, cx| crate::extensions::run_command(&id, &command_id, &this.root, cx));
-                            }));
+                            let action = crate::extensions::RunCommand {
+                                extension: id.clone(),
+                                command: command.id.clone(),
+                            };
+                            let label = crate::keymap::menu_label(
+                                &format!("{name}: {}", command.title),
+                                &action,
+                                cx,
+                            );
+                            let (this, id, command_id) =
+                                (this.clone(), id.clone(), command.id.clone());
+                            menu =
+                                menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                                    _ = this.update(cx, |this, cx| {
+                                        crate::extensions::run_command(
+                                            &id,
+                                            &command_id,
+                                            &this.root,
+                                            cx,
+                                        )
+                                    });
+                                }));
                         }
                         menu
                     })
@@ -2348,45 +3237,102 @@ impl Workspace {
                     this.navigate(direction == NavigationDirection::Back, window, cx);
                 }
             }))
-            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                this.modifiers_changed(event.modifiers, cx)
+            }))
             // The keys' changes go to a browser while it has the keyboard, so
             // the pointer's moves (which carry the keys' state) catch up.
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(false, window, cx)))
-            .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
-            .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| this.new_untitled(None, window, cx)))
-            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
-            .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.modifiers_changed(event.modifiers, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(false, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| {
+                this.new_untitled(None, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
+                this.open_terminal(None, None, false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewBrowser, window, cx| {
+                this.open_browser(None, None, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(this.active_group, Side::Right, cx)))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(this.active_group, Side::Bottom, cx)))
-            .on_action(cx.listener(|this, _: &crate::ToggleMaximizeGroup, window, cx| this.toggle_maximize(this.active_group, false, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::ToggleGroupTiles, window, cx| this.toggle_maximize(this.active_group, true, window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                this.split(this.active_group, Side::Right, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                this.split(this.active_group, Side::Bottom, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::ToggleMaximizeGroup, window, cx| {
+                    this.toggle_maximize(this.active_group, false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::ToggleGroupTiles, window, cx| {
+                    this.toggle_maximize(this.active_group, true, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if let Some(pane) = this.tree.active_tab(this.active_group) {
                     this.request_close_pane(pane, window, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &CloseGroup, window, cx| this.request_close_group(this.active_group, window, cx)))
-            .on_action(cx.listener(|this, _: &OpenFiles, window, cx| this.prompt_open_files(window, cx)))
-            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| this.focus_group(Side::Left, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusRight, window, cx| this.focus_group(Side::Right, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusUp, window, cx| this.focus_group(Side::Top, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusDown, window, cx| this.focus_group(Side::Bottom, window, cx)))
+            .on_action(cx.listener(|this, _: &CloseGroup, window, cx| {
+                this.request_close_group(this.active_group, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenFiles, window, cx| this.prompt_open_files(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &FocusLeft, window, cx| {
+                this.focus_group(Side::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusRight, window, cx| {
+                this.focus_group(Side::Right, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &FocusUp, window, cx| {
+                    this.focus_group(Side::Top, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &FocusDown, window, cx| {
+                this.focus_group(Side::Bottom, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle_tab(-1, window, cx)))
-            .on_action(cx.listener(|this, action: &crate::OpenTab, window, cx| this.open_tab_at(action.0, window, cx)))
-            .on_action(cx.listener(|this, action: &crate::FocusGroup, window, cx| this.focus_group_at(action.0, window, cx)))
-            .on_action(cx.listener(|this, action: &crate::OpenPreset, window, cx| this.open_preset(action.0, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::NavigateBack, window, cx| this.navigate(true, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| this.navigate(false, window, cx)))
-            .on_action(cx.listener(|_, _: &crate::ShowCommands, window, cx| crate::keymap::open_palette(window, cx)))
+            .on_action(cx.listener(|this, action: &crate::OpenTab, window, cx| {
+                this.open_tab_at(action.0, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &crate::FocusGroup, window, cx| {
+                this.focus_group_at(action.0, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &crate::OpenPreset, window, cx| {
+                this.open_preset(action.0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::NavigateBack, window, cx| {
+                this.navigate(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| {
+                this.navigate(false, window, cx)
+            }))
+            .on_action(cx.listener(|_, _: &crate::ShowCommands, window, cx| {
+                crate::keymap::open_palette(window, cx)
+            }))
     }
 }
 
 /// A rectangle on screen as a float keeps it: x, y, width, height.
 fn screen_rect(bounds: Bounds<Pixels>) -> [f32; 4] {
-    [bounds.origin.x.as_f32(), bounds.origin.y.as_f32(), bounds.size.width.as_f32(), bounds.size.height.as_f32()]
+    [
+        bounds.origin.x.as_f32(),
+        bounds.origin.y.as_f32(),
+        bounds.size.width.as_f32(),
+        bounds.size.height.as_f32(),
+    ]
 }
 
 /// Where `at` in `window` is on screen, in physical pixels: the one space all
@@ -2407,7 +3353,15 @@ fn monitor_at(at: Point<f32>) -> Option<DisplayId> {
         Graphics::Gdi::{MONITOR_DEFAULTTONULL, MonitorFromPoint},
     };
     // SAFETY: a plain query.
-    let monitor = unsafe { MonitorFromPoint(POINT { x: at.x as i32, y: at.y as i32 }, MONITOR_DEFAULTTONULL) };
+    let monitor = unsafe {
+        MonitorFromPoint(
+            POINT {
+                x: at.x as i32,
+                y: at.y as i32,
+            },
+            MONITOR_DEFAULTTONULL,
+        )
+    };
     (!monitor.is_invalid()).then(|| DisplayId::from(monitor.0 as u64))
 }
 
@@ -2420,7 +3374,15 @@ fn display_scale(display: DisplayId) -> Option<f32> {
     };
     let (mut x, mut y) = (0, 0);
     // SAFETY: a plain query; an unknown handle fails it.
-    unsafe { GetDpiForMonitor(HMONITOR(u64::from(display) as _), MDT_EFFECTIVE_DPI, &mut x, &mut y) }.ok()?;
+    unsafe {
+        GetDpiForMonitor(
+            HMONITOR(u64::from(display) as _),
+            MDT_EFFECTIVE_DPI,
+            &mut x,
+            &mut y,
+        )
+    }
+    .ok()?;
     Some(x as f32 / 96.)
 }
 
@@ -2448,15 +3410,25 @@ fn display_at(grab: Point<Pixels>, cx: &App) -> Option<std::rc::Rc<dyn PlatformD
     let exact = displays.iter().find(|display| {
         display.bounds().contains(&grab)
             && display_scale(display.id()).is_some_and(|scale| {
-                monitor_at(point(grab.x.as_f32() * scale, grab.y.as_f32() * scale)) == Some(display.id())
+                monitor_at(point(grab.x.as_f32() * scale, grab.y.as_f32() * scale))
+                    == Some(display.id())
             })
     });
-    exact.or_else(|| displays.iter().find(|display| display.bounds().contains(&grab))).cloned()
+    exact
+        .or_else(|| {
+            displays
+                .iter()
+                .find(|display| display.bounds().contains(&grab))
+        })
+        .cloned()
 }
 
 /// Where the pointer is in a window popped out by a drag: on its tab strip,
 /// as if it had been picked up there.
-const FLOAT_GRAB: Point<Pixels> = Point { x: px(80.), y: px(52.) };
+const FLOAT_GRAB: Point<Pixels> = Point {
+    x: px(80.),
+    y: px(52.),
+};
 /// How long the border of a group or tab the keys went to flashes.
 const FLASH: Duration = Duration::from_millis(700);
 /// How long the modifiers are held before the numbers show.
@@ -2470,24 +3442,44 @@ const HINT_FADE: Duration = Duration::from_millis(180);
 fn fit(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
     let width = bounds.size.width.as_f32().min(area.size.width.as_f32());
     let height = bounds.size.height.as_f32().min(area.size.height.as_f32());
-    let x = bounds.origin.x.as_f32().clamp(area.left().as_f32(), area.right().as_f32() - width);
-    let y = bounds.origin.y.as_f32().clamp(area.top().as_f32(), area.bottom().as_f32() - height);
+    let x = bounds
+        .origin
+        .x
+        .as_f32()
+        .clamp(area.left().as_f32(), area.right().as_f32() - width);
+    let y = bounds
+        .origin
+        .y
+        .as_f32()
+        .clamp(area.top().as_f32(), area.bottom().as_f32() - height);
     Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
 }
 
 /// The window of float `id`, where it was (when that is still on a screen)
 /// or centred.
-fn open_float_window(workspace: Entity<Workspace>, id: u64, bounds: Option<[f32; 4]>, activate: bool, cx: &mut App) -> Option<AnyWindowHandle> {
+fn open_float_window(
+    workspace: Entity<Workspace>,
+    id: u64,
+    bounds: Option<[f32; 4]>,
+    activate: bool,
+    cx: &mut App,
+) -> Option<AnyWindowHandle> {
     // On the display under its grab point (where the pointer let go), kept
     // inside it: the window is placed on the display it names, and one
     // whose middle is off that display would open centred on it instead.
     let placed = bounds.and_then(|[x, y, w, h]| {
         let bounds = Bounds::new(point(px(x), px(y)), size(px(w.max(320.)), px(h.max(240.))));
-        let display = display_at(bounds.origin + FLOAT_GRAB, cx)
-            .or_else(|| cx.displays().into_iter().find(|display| display.bounds().intersects(&bounds)))?;
+        let display = display_at(bounds.origin + FLOAT_GRAB, cx).or_else(|| {
+            cx.displays()
+                .into_iter()
+                .find(|display| display.bounds().intersects(&bounds))
+        })?;
         Some((display.id(), fit(bounds, display.visible_bounds())))
     });
-    let bounds = placed.map_or_else(|| Bounds::centered(None, size(px(960.), px(640.)), cx), |(_, bounds)| bounds);
+    let bounds = placed.map_or_else(
+        || Bounds::centered(None, size(px(960.), px(640.)), cx),
+        |(_, bounds)| bounds,
+    );
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(320.), px(240.))),
@@ -2496,7 +3488,10 @@ fn open_float_window(workspace: Entity<Workspace>, id: u64, bounds: Option<[f32;
         ..TitleBar::window_options()
     };
     let title = format!("den — {}", workspace.read(cx).root.display());
-    let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| cx.new(|cx| FloatWindow::new(workspace, id, window, cx))).ok()?;
+    let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| FloatWindow::new(workspace, id, window, cx))
+    })
+    .ok()?;
     _ = window.update(cx, |_, window, _| {
         if activate {
             window.activate_window();
@@ -2523,11 +3518,13 @@ impl Render for Workspace {
                 .child(self.render_sidebar(sidebar.view, cx));
             let left = side == SidebarSide::Left;
             let width_ix = if left { 0 } else { 1 };
-            let group = h_resizable(if left { "body-left" } else { "body-right" }).on_resize(move |state, _, cx| {
-                if let Some(width) = state.read(cx).sizes().get(width_ix).copied() {
-                    AppState::update(cx, |s| s.sidebar.width = width.as_f32());
-                }
-            });
+            let group = h_resizable(if left { "body-left" } else { "body-right" }).on_resize(
+                move |state, _, cx| {
+                    if let Some(width) = state.read(cx).sizes().get(width_ix).copied() {
+                        AppState::update(cx, |s| s.sidebar.width = width.as_f32());
+                    }
+                },
+            );
             if left {
                 group.child(panel).child(groups).into_any_element()
             } else {
@@ -2543,13 +3540,25 @@ impl Render for Workspace {
             .text_color(cx.theme().foreground)
             // Without size, so no click lands on it: a focus target only.
             .child(div().track_focus(&self.focus_handle))
-            .on_action(cx.listener(|this, _: &OpenFolder, window, cx| this.prompt_open_folder(false, window, cx)))
-            .on_action(cx.listener(|this, _: &OpenFolderInNewWindow, window, cx| this.prompt_open_folder(true, window, cx)))
-            .on_action(cx.listener(|this, _: &SaveLayout, window, cx| this.prompt_save_preset(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
+                this.prompt_open_folder(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenFolderInNewWindow, window, cx| {
+                this.prompt_open_folder(true, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &SaveLayout, window, cx| this.prompt_save_preset(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ResetLayout, _, cx| this.reset_layout(cx)))
-            .on_action(cx.listener(|_, _: &CheckForUpdates, window, cx| crate::update::check_in_window(true, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusExplorer, window, cx| this.focus_view(SidebarView::Explorer, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_view(SidebarView::Search, window, cx)))
+            .on_action(cx.listener(|_, _: &CheckForUpdates, window, cx| {
+                crate::update::check_in_window(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusExplorer, window, cx| {
+                this.focus_view(SidebarView::Explorer, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.focus_view(SidebarView::Search, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ReplaceInFiles, window, cx| {
                 AppState::update(cx, |state| {
                     state.sidebar.visible = true;
@@ -2559,18 +3568,44 @@ impl Render for Workspace {
                 SearchView::focus(&this.search, window, cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &FocusScm, window, cx| this.focus_view(SidebarView::Scm, window, cx)))
-            .on_action(cx.listener(|this, _: &FocusExtensions, window, cx| this.focus_view(SidebarView::Extensions, window, cx)))
-            .on_action(cx.listener(|this, _: &crate::ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
-            .on_action(cx.listener(|this, _: &crate::OpenKeyboardShortcuts, window, cx| this.open_settings_at(Some(2), window, cx)))
-            .on_action(cx.listener(|this, action: &crate::extensions::RunCommand, _, cx| {
-                crate::extensions::run_command(&action.extension, &action.command, &this.root, cx)
+            .on_action(cx.listener(|this, _: &FocusScm, window, cx| {
+                this.focus_view(SidebarView::Scm, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &FocusExtensions, window, cx| {
+                this.focus_view(SidebarView::Extensions, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::ToggleSidebar, window, cx| {
+                this.toggle_sidebar(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::OpenKeyboardShortcuts, window, cx| {
+                    this.open_settings_at(Some(2), window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, action: &crate::extensions::RunCommand, _, cx| {
+                    crate::extensions::run_command(
+                        &action.extension,
+                        &action.command,
+                        &this.root,
+                        cx,
+                    )
+                }),
+            )
             .child(self.render_title_bar(window, cx))
             // The overlays (a maximized group, the tiles) lie over the whole
             // body, sidebar and all, under the title bar.
-            .child(div().flex_1().min_h_0().relative().child(body).child(self.render_overlays(None, window, cx)))
-            .when(cfg!(windows) && window.has_active_dialog(cx), |this| this.child(caption_buttons(window, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(body)
+                    .child(self.render_overlays(None, window, cx)),
+            )
+            .when(cfg!(windows) && window.has_active_dialog(cx), |this| {
+                this.child(caption_buttons(window, cx))
+            })
     }
 }
 
@@ -2578,10 +3613,19 @@ impl Render for Workspace {
 /// under the workspace's action handlers, in the main window or a floating
 /// one (see `Workspace::action_target`).
 pub(crate) fn action_target(window: &Window, cx: &App) -> Option<FocusHandle> {
-    let view = window.root::<gpui_kit::base::Root>().flatten()?.read(cx).view().clone();
+    let view = window
+        .root::<gpui_kit::base::Root>()
+        .flatten()?
+        .read(cx)
+        .view()
+        .clone();
     match view.downcast::<Workspace>() {
         Ok(workspace) => Some(workspace.read(cx).action_target(cx)),
-        Err(view) => view.downcast::<crate::float::FloatWindow>().ok()?.read(cx).focus(cx),
+        Err(view) => view
+            .downcast::<crate::float::FloatWindow>()
+            .ok()?
+            .read(cx)
+            .focus(cx),
     }
 }
 
@@ -2590,7 +3634,11 @@ pub(crate) fn action_target(window: &Window, cx: &App) -> Option<FocusHandle> {
 /// not take clicks.
 fn caption_buttons(window: &Window, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    let button = |id: &'static str, icon: IconName, area: WindowControlArea, hover_bg: Hsla, hover_fg: Hsla| {
+    let button = |id: &'static str,
+                  icon: IconName,
+                  area: WindowControlArea,
+                  hover_bg: Hsla,
+                  hover_fg: Hsla| {
         div()
             .id(id)
             .flex()
@@ -2603,16 +3651,38 @@ fn caption_buttons(window: &Window, cx: &App) -> impl IntoElement {
             .window_control_area(area)
             .child(Icon::new(icon).small())
     };
-    let maximize = if window.is_maximized() { IconName::WindowRestore } else { IconName::WindowMaximize };
+    let maximize = if window.is_maximized() {
+        IconName::WindowRestore
+    } else {
+        IconName::WindowMaximize
+    };
     deferred(
         h_flex()
             .absolute()
             .top_0()
             .right_0()
             .h(gpui_kit::component::TITLE_BAR_HEIGHT)
-            .child(button("caption-min", IconName::WindowMinimize, WindowControlArea::Min, theme.secondary_hover, theme.secondary_foreground))
-            .child(button("caption-max", maximize, WindowControlArea::Max, theme.secondary_hover, theme.secondary_foreground))
-            .child(button("caption-close", IconName::WindowClose, WindowControlArea::Close, theme.danger, theme.danger_foreground)),
+            .child(button(
+                "caption-min",
+                IconName::WindowMinimize,
+                WindowControlArea::Min,
+                theme.secondary_hover,
+                theme.secondary_foreground,
+            ))
+            .child(button(
+                "caption-max",
+                maximize,
+                WindowControlArea::Max,
+                theme.secondary_hover,
+                theme.secondary_foreground,
+            ))
+            .child(button(
+                "caption-close",
+                IconName::WindowClose,
+                WindowControlArea::Close,
+                theme.danger,
+                theme.danger_foreground,
+            )),
     )
     .with_priority(10)
 }

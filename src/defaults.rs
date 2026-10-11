@@ -57,7 +57,10 @@ pub struct Defaults {
 
 impl Defaults {
     pub fn from_saved(list: Vec<GroupDefault>, tree: &Tree) -> Self {
-        let mut this = Self { list, recent: Vec::new() };
+        let mut this = Self {
+            list,
+            recent: Vec::new(),
+        };
         this.prune(tree, &HashMap::new());
         this
     }
@@ -87,7 +90,11 @@ impl Defaults {
     /// else the one of those used last, else the first. `None` when no
     /// group may take it.
     pub fn target(&self, tree: &Tree, kind: Kind, active: Option<NodeId>) -> Option<NodeId> {
-        let allowed: Vec<NodeId> = tree.groups().into_iter().filter(|g| self.allows(*g, kind)).collect();
+        let allowed: Vec<NodeId> = tree
+            .groups()
+            .into_iter()
+            .filter(|g| self.allows(*g, kind))
+            .collect();
         active
             .into_iter()
             .chain(self.recent.iter().copied())
@@ -116,7 +123,9 @@ impl Defaults {
         let mut kept: Vec<GroupDefault> = Vec::new();
         for mut d in std::mem::take(&mut self.list) {
             d.node = resolve(remap, d.node);
-            if !tree.find(d.node).is_some_and(Node::is_group) || kept.iter().any(|k| k.node == d.node) {
+            if !tree.find(d.node).is_some_and(Node::is_group)
+                || kept.iter().any(|k| k.node == d.node)
+            {
                 continue;
             }
             kept.push(d);
@@ -143,14 +152,26 @@ mod tests {
             axis: Axis::Horizontal,
             sizes: vec![0.5, 0.5],
             children: vec![
-                Node::Group { id: 1, tabs: vec![], active: 0 },
+                Node::Group {
+                    id: 1,
+                    tabs: vec![],
+                    active: 0,
+                },
                 Node::Split {
                     id: 11,
                     axis: Axis::Vertical,
                     sizes: vec![0.5, 0.5],
                     children: vec![
-                        Node::Group { id: 2, tabs: vec![], active: 0 },
-                        Node::Group { id: 3, tabs: vec![], active: 0 },
+                        Node::Group {
+                            id: 2,
+                            tabs: vec![],
+                            active: 0,
+                        },
+                        Node::Group {
+                            id: 3,
+                            tabs: vec![],
+                            active: 0,
+                        },
                     ],
                 },
             ],
@@ -214,7 +235,25 @@ mod tests {
         // Older layouts could make a container the default; those settings
         // sit on a split now and go.
         let tree = tree();
-        let defaults = Defaults::from_saved(vec![GroupDefault { kind: Kind::Files, node: 11 }, GroupDefault { kind: Kind::Agents, node: 1 }], &tree);
-        assert_eq!(defaults.saved(), vec![GroupDefault { kind: Kind::Agents, node: 1 }]);
+        let defaults = Defaults::from_saved(
+            vec![
+                GroupDefault {
+                    kind: Kind::Files,
+                    node: 11,
+                },
+                GroupDefault {
+                    kind: Kind::Agents,
+                    node: 1,
+                },
+            ],
+            &tree,
+        );
+        assert_eq!(
+            defaults.saved(),
+            vec![GroupDefault {
+                kind: Kind::Agents,
+                node: 1
+            }]
+        );
     }
 }

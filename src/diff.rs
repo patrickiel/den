@@ -44,13 +44,19 @@ actions!(diff, [OpenDiffedFile]);
 pub fn init(cx: &mut App) {
     crate::pane::register(cx, DIFF, |data, _, cx| {
         let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
-        let (path, top, rel) = (PathBuf::from(text("path")), PathBuf::from(text("top")), text("rel"));
+        let (path, top, rel) = (
+            PathBuf::from(text("path")),
+            PathBuf::from(text("top")),
+            text("rel"),
+        );
         let staged = data["staged"].as_bool().unwrap_or(false);
         if let Some(hash) = data["hash"].as_str() {
             let commit = CommitRevs {
                 hash: hash.to_string(),
                 parent: data["parent"].as_str().map(str::to_string),
-                old_rel: data["old_rel"].as_str().map_or_else(|| rel.clone(), str::to_string),
+                old_rel: data["old_rel"]
+                    .as_str()
+                    .map_or_else(|| rel.clone(), str::to_string),
             };
             return Rc::new(cx.new(|cx| DiffPanel::for_commit(path, top, rel, commit, cx)));
         }
@@ -83,11 +89,15 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
     // the lines, not their endings.
     let (old, new) = (old.replace("\r\n", "\n"), new.replace("\r\n", "\n"));
     // A huge change gets a rougher diff rather than a long wait.
-    let diff = TextDiff::configure().timeout(Duration::from_millis(500)).diff_lines(&old, &new);
+    let diff = TextDiff::configure()
+        .timeout(Duration::from_millis(500))
+        .diff_lines(&old, &new);
     let mut out = Vec::new();
     let mut removed: Vec<(usize, String)> = Vec::new();
     let mut added: Vec<(usize, String)> = Vec::new();
-    let flush = |removed: &mut Vec<(usize, String)>, added: &mut Vec<(usize, String)>, out: &mut Vec<Row>| {
+    let flush = |removed: &mut Vec<(usize, String)>,
+                 added: &mut Vec<(usize, String)>,
+                 out: &mut Vec<Row>| {
         let n = removed.len().max(added.len());
         let mut r = removed.drain(..);
         let mut a = added.drain(..);
@@ -95,8 +105,16 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
             let left = r.next();
             let right = a.next();
             out.push(Row {
-                left_kind: if left.is_some() { Side::Removed } else { Side::Gap },
-                right_kind: if right.is_some() { Side::Added } else { Side::Gap },
+                left_kind: if left.is_some() {
+                    Side::Removed
+                } else {
+                    Side::Gap
+                },
+                right_kind: if right.is_some() {
+                    Side::Added
+                } else {
+                    Side::Gap
+                },
                 left,
                 right,
             });
@@ -137,14 +155,22 @@ fn highlight_lines(text: &str, language: &str, theme: &HighlightTheme) -> Vec<Li
         .map(|line| {
             let len = line.trim_end_matches('\r').len();
             let end = start + len;
-            while styles.get(first).is_some_and(|(range, _)| range.end <= start) {
+            while styles
+                .get(first)
+                .is_some_and(|(range, _)| range.end <= start)
+            {
                 first += 1;
             }
             let line_styles = styles[first..]
                 .iter()
                 .take_while(|(range, _)| range.start < end)
                 .filter(|(_, style)| *style != HighlightStyle::default())
-                .map(|(range, style)| (range.start.max(start) - start..range.end.min(end) - start, *style))
+                .map(|(range, style)| {
+                    (
+                        range.start.max(start) - start..range.end.min(end) - start,
+                        *style,
+                    )
+                })
                 .filter(|(range, _)| !range.is_empty())
                 .collect();
             start += line.len() + 1;
@@ -169,8 +195,16 @@ pub fn inline_lines(rows: &[Row]) -> Vec<(usize, usize)> {
         while ix < rows.len() && rows[ix].left_kind != Side::Same {
             ix += 1;
         }
-        out.extend((start..ix).filter(|&row| rows[row].left.is_some()).map(|row| (row, 0)));
-        out.extend((start..ix).filter(|&row| rows[row].right.is_some()).map(|row| (row, 1)));
+        out.extend(
+            (start..ix)
+                .filter(|&row| rows[row].left.is_some())
+                .map(|row| (row, 0)),
+        );
+        out.extend(
+            (start..ix)
+                .filter(|&row| rows[row].right.is_some())
+                .map(|row| (row, 1)),
+        );
     }
     out
 }
@@ -178,8 +212,18 @@ pub fn inline_lines(rows: &[Row]) -> Vec<(usize, usize)> {
 /// Both sides' text: a commit's parent and the commit, HEAD and the index
 /// (staged), or the index and the file. A side with no such file is empty
 /// (added, deleted); one git cannot read is the error shown instead.
-fn load_sides(top: &Path, rel: &str, path: &Path, staged: bool, commit: Option<&CommitRevs>) -> Result<(String, String), String> {
-    let side = |rev: &str, rel: &str| git::show_in(top, rev, rel).map(Option::unwrap_or_default).map_err(|e| e.to_string());
+fn load_sides(
+    top: &Path,
+    rel: &str,
+    path: &Path,
+    staged: bool,
+    commit: Option<&CommitRevs>,
+) -> Result<(String, String), String> {
+    let side = |rev: &str, rel: &str| {
+        git::show_in(top, rev, rel)
+            .map(Option::unwrap_or_default)
+            .map_err(|e| e.to_string())
+    };
     if let Some(commit) = commit {
         let old = match &commit.parent {
             Some(parent) => side(parent, &commit.old_rel)?,
@@ -247,16 +291,35 @@ pub struct DiffPanel {
 }
 
 impl DiffPanel {
-    pub fn new(path: PathBuf, top: PathBuf, rel: String, staged: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        top: PathBuf,
+        rel: String,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::build(path, top, rel, staged, None, cx)
     }
 
     /// A commit's change to one file.
-    pub fn for_commit(path: PathBuf, top: PathBuf, rel: String, commit: CommitRevs, cx: &mut Context<Self>) -> Self {
+    pub fn for_commit(
+        path: PathBuf,
+        top: PathBuf,
+        rel: String,
+        commit: CommitRevs,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self::build(path, top, rel, false, Some(commit), cx)
     }
 
-    fn build(path: PathBuf, top: PathBuf, rel: String, staged: bool, commit: Option<CommitRevs>, cx: &mut Context<Self>) -> Self {
+    fn build(
+        path: PathBuf,
+        top: PathBuf,
+        rel: String,
+        staged: bool,
+        commit: Option<CommitRevs>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             path,
             top,
@@ -305,7 +368,13 @@ impl DiffPanel {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
-        let (top, rel, path, staged, commit) = (self.top.clone(), self.rel.clone(), self.path.clone(), self.staged, self.commit.clone());
+        let (top, rel, path, staged, commit) = (
+            self.top.clone(),
+            self.rel.clone(),
+            self.path.clone(),
+            self.staged,
+            self.commit.clone(),
+        );
         let theme = cx.theme().highlight_theme.clone();
         self._reload = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
@@ -313,9 +382,18 @@ impl DiffPanel {
                     let (old, new) = load_sides(&top, &rel, &path, staged, commit.as_ref())?;
                     let rows = rows(&old, &new);
                     let language = crate::panels::language_of(&path);
-                    let styles = [&old, &new].map(|text| highlight_lines(&text.replace("\r\n", "\n"), &language, &theme));
-                    let width = |line: &Option<(usize, String)>| line.as_ref().map_or(0, |(_, t)| t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum());
-                    let widest = [rows.iter().map(|r| width(&r.left)).max().unwrap_or(0), rows.iter().map(|r| width(&r.right)).max().unwrap_or(0)];
+                    let styles = [&old, &new].map(|text| {
+                        highlight_lines(&text.replace("\r\n", "\n"), &language, &theme)
+                    });
+                    let width = |line: &Option<(usize, String)>| {
+                        line.as_ref().map_or(0, |(_, t)| {
+                            t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+                        })
+                    };
+                    let widest = [
+                        rows.iter().map(|r| width(&r.left)).max().unwrap_or(0),
+                        rows.iter().map(|r| width(&r.right)).max().unwrap_or(0),
+                    ];
                     Ok::<_, String>((rows, styles, widest))
                 })
                 .await;
@@ -369,7 +447,11 @@ impl DiffPanel {
     /// beside the line numbers.
     fn max_h_scroll(&self, side: usize) -> Pixels {
         let room = self.h_track(side).1;
-        let widest = if self.is_inline() { self.widest[0].max(self.widest[1]) } else { self.widest[side] };
+        let widest = if self.is_inline() {
+            self.widest[0].max(self.widest[1])
+        } else {
+            self.widest[side]
+        };
         (self.char_width * (widest + 2) as f32 - room).max(px(0.))
     }
 
@@ -378,10 +460,16 @@ impl DiffPanel {
     fn h_track(&self, side: usize) -> (Pixels, Pixels) {
         let bounds = self.list_bounds.get();
         if self.is_inline() {
-            return (bounds.left() + GUTTER * 2., (bounds.size.width - GUTTER * 2.).max(px(0.)));
+            return (
+                bounds.left() + GUTTER * 2.,
+                (bounds.size.width - GUTTER * 2.).max(px(0.)),
+            );
         }
         let half = (bounds.size.width - px(1.)) / 2.;
-        (bounds.left() + (half + px(1.)) * side as f32 + GUTTER, (half - GUTTER).max(px(0.)))
+        (
+            bounds.left() + (half + px(1.)) * side as f32 + GUTTER,
+            (half - GUTTER).max(px(0.)),
+        )
     }
 
     /// A side's scrollbar thumb: its left edge and width.
@@ -392,12 +480,17 @@ impl DiffPanel {
             return (left, room);
         }
         let width = (room * (room / (room + max))).max(px(24.)).min(room);
-        (left + (room - width) * (self.h_scroll[side] / max).clamp(0., 1.), width)
+        (
+            left + (room - width) * (self.h_scroll[side] / max).clamp(0., 1.),
+            width,
+        )
     }
 
     /// Scroll so the held thumb follows the mouse at `x`.
     fn drag_across(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        let Some((side, grab)) = self.h_grab else { return };
+        let Some((side, grab)) = self.h_grab else {
+            return;
+        };
         let (left, room) = self.h_track(side);
         let width = self.h_thumb(side).1;
         let track = room - width;
@@ -413,42 +506,53 @@ impl DiffPanel {
     /// the thumb there.
     fn render_h_scrollbars(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (thumb_color, active_color) = (theme.foreground.opacity(0.2), theme.foreground.opacity(0.35));
+        let (thumb_color, active_color) = (
+            theme.foreground.opacity(0.2),
+            theme.foreground.opacity(0.35),
+        );
         let origin = self.list_bounds.get().left();
-        div().children((0..self.sides()).filter(|&side| self.max_h_scroll(side) > px(0.)).map(|side| {
-            let (left, room) = self.h_track(side);
-            let (thumb_left, thumb_width) = self.h_thumb(side);
-            let held = matches!(self.h_grab, Some((s, _)) if s == side);
-            div()
-                .id(("diff-h-scroll", side))
-                .absolute()
-                .bottom_0()
-                .left(left - origin)
-                .w(room)
-                .h(px(10.))
-                .child(
+        div().children(
+            (0..self.sides())
+                .filter(|&side| self.max_h_scroll(side) > px(0.))
+                .map(|side| {
+                    let (left, room) = self.h_track(side);
+                    let (thumb_left, thumb_width) = self.h_thumb(side);
+                    let held = matches!(self.h_grab, Some((s, _)) if s == side);
                     div()
+                        .id(("diff-h-scroll", side))
                         .absolute()
-                        .top(px(2.))
-                        .left(thumb_left - left)
-                        .w(thumb_width)
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(if held { active_color } else { thumb_color }),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        let (thumb_left, thumb_width) = this.h_thumb(side);
-                        let x = event.position.x;
-                        // Held where it was taken; pressed elsewhere, centred there.
-                        let grab = if x >= thumb_left && x <= thumb_left + thumb_width { x - thumb_left } else { thumb_width / 2. };
-                        this.h_grab = Some((side, grab));
-                        this.drag_across(x, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-        }))
+                        .bottom_0()
+                        .left(left - origin)
+                        .w(room)
+                        .h(px(10.))
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(2.))
+                                .left(thumb_left - left)
+                                .w(thumb_width)
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(if held { active_color } else { thumb_color }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                let (thumb_left, thumb_width) = this.h_thumb(side);
+                                let x = event.position.x;
+                                // Held where it was taken; pressed elsewhere, centred there.
+                                let grab = if x >= thumb_left && x <= thumb_left + thumb_width {
+                                    x - thumb_left
+                                } else {
+                                    thumb_width / 2.
+                                };
+                                this.h_grab = Some((side, grab));
+                                this.drag_across(x, cx);
+                                cx.stop_propagation();
+                            }),
+                        )
+                }),
+        )
     }
 
     fn scroll_across(&mut self, side: usize, delta: Pixels, cx: &mut Context<Self>) {
@@ -481,16 +585,18 @@ impl DiffPanel {
         };
         // A line's text, coloured as the `colours` side's, scrolled across
         // as the `scroll` side.
-        let text = |line: Option<&(usize, String)>, colours: usize, scroll: usize| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .child(div().ml(-h_scroll[scroll]).when_some(line, |el, (n, text)| {
-                    let highlights = styles[colours].get(n - 1).cloned().unwrap_or_default();
-                    el.child(StyledText::new(text.clone()).with_highlights(highlights))
-                }))
-        };
+        let text =
+            |line: Option<&(usize, String)>, colours: usize, scroll: usize| {
+                div().flex_1().min_w_0().overflow_hidden().child(
+                    div()
+                        .ml(-h_scroll[scroll])
+                        .when_some(line, |el, (n, text)| {
+                            let highlights =
+                                styles[colours].get(n - 1).cloned().unwrap_or_default();
+                            el.child(StyledText::new(text.clone()).with_highlights(highlights))
+                        }),
+                )
+            };
         let strip = |kind: Side, side: usize| {
             h_flex()
                 .h_full()
@@ -498,20 +604,26 @@ impl DiffPanel {
                 .overflow_hidden()
                 .whitespace_nowrap()
                 // Sideways (Shift+wheel, a touchpad) moves only this side.
-                .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
-                    let delta = event.delta.pixel_delta(window.line_height());
-                    if !delta.x.is_zero() {
-                        this.scroll_across(side, delta.x, cx);
-                        cx.stop_propagation();
-                    }
-                }))
+                .on_scroll_wheel(
+                    cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        if !delta.x.is_zero() {
+                            this.scroll_across(side, delta.x, cx);
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
         };
         if self.is_inline() {
             return range
                 .filter_map(|ix| {
                     let &(row, side) = self.inline.get(ix)?;
                     let row = self.rows.get(row)?;
-                    let (kind, line) = if side == 0 { (row.left_kind, &row.left) } else { (row.right_kind, &row.right) };
+                    let (kind, line) = if side == 0 {
+                        (row.left_kind, &row.left)
+                    } else {
+                        (row.right_kind, &row.right)
+                    };
                     let (old, new) = match kind {
                         Side::Same => (row.left.as_ref(), row.right.as_ref()),
                         Side::Removed => (line.as_ref(), None),
@@ -530,7 +642,11 @@ impl DiffPanel {
                 .collect();
         }
         let half = |line: &Option<(usize, String)>, kind: Side, side: usize| {
-            strip(kind, side).flex_1().min_w_0().child(number(line.as_ref())).child(text(line.as_ref(), side, side))
+            strip(kind, side)
+                .flex_1()
+                .min_w_0()
+                .child(number(line.as_ref()))
+                .child(text(line.as_ref(), side, side))
         };
         range
             .filter_map(|ix| {
@@ -563,7 +679,11 @@ impl Pane for DiffPanel {
     }
 
     fn icon_element(&self, cx: &App) -> Option<AnyElement> {
-        Some(crate::file_icon::render(self.rel.rsplit('/').next().unwrap_or(&self.rel), 16., cx))
+        Some(crate::file_icon::render(
+            self.rel.rsplit('/').next().unwrap_or(&self.rel),
+            16.,
+            cx,
+        ))
     }
 
     fn icon(&self, _: &App) -> IconName {
@@ -598,21 +718,38 @@ impl Render for DiffPanel {
         let theme = cx.theme().clone();
         let short = |rev: &str| rev.chars().take(7).collect::<String>();
         let (left, right) = match &self.commit {
-            Some(commit) => (commit.parent.as_deref().map_or("(none)".to_string(), short), short(&commit.hash)),
+            Some(commit) => (
+                commit.parent.as_deref().map_or("(none)".to_string(), short),
+                short(&commit.hash),
+            ),
             None if self.staged => ("HEAD".into(), "Index".into()),
             None => ("Index".into(), "Working Tree".into()),
         };
         let font_size = px(Settings::get(cx).editor_font_size);
         self.layout = Settings::get(cx).diff_layout;
-        let automatic = format!("Automatic (Currently {})", if self.is_narrow() { "Inline" } else { "Side by Side" });
+        let automatic = format!(
+            "Automatic (Currently {})",
+            if self.is_narrow() {
+                "Inline"
+            } else {
+                "Side by Side"
+            }
+        );
         let text = window.text_system();
         let font_id = text.resolve_font(&font(theme.mono_font_family.clone()));
-        self.char_width = text.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
+        self.char_width = text
+            .advance(font_id, font_size, 'm')
+            .map(|s| s.width)
+            .unwrap_or(font_size * 0.6);
         // The longest lines or the view may have changed since last scrolled.
         for side in 0..self.sides() {
             self.h_scroll[side] = self.h_scroll[side].min(self.max_h_scroll(side));
         }
-        let count = if self.is_inline() { self.inline.len() } else { self.rows.len() };
+        let count = if self.is_inline() {
+            self.inline.len()
+        } else {
+            self.rows.len()
+        };
         let list_bounds = self.list_bounds.clone();
         let this = cx.weak_entity();
         let path = self.path.clone();
@@ -638,7 +775,11 @@ impl Render for DiffPanel {
                     .border_b_1()
                     .border_color(theme.border)
                     .text_color(theme.muted_foreground)
-                    .child(div().flex_1().child(format!("{} — {left} ↔ {right}", self.rel)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("{} — {left} ↔ {right}", self.rel)),
+                    )
                     .child(
                         Button::new("diff-more")
                             .ghost()
@@ -652,7 +793,9 @@ impl Render for DiffPanel {
                                     let item = |label: SharedString, layout: DiffLayout| {
                                         PopupMenuItem::new(label)
                                             .checked(current == layout)
-                                            .on_click(move |_, _, cx| Settings::update(cx, |s| s.diff_layout = layout))
+                                            .on_click(move |_, _, cx| {
+                                                Settings::update(cx, |s| s.diff_layout = layout)
+                                            })
                                     };
                                     menu.item(item("Inline".into(), DiffLayout::Inline))
                                         .item(item("Side by Side".into(), DiffLayout::SideBySide))
@@ -666,7 +809,11 @@ impl Render for DiffPanel {
                             .xsmall()
                             .icon(Icon::new(IconName::FileText))
                             .label("Open File")
-                            .tooltip(crate::keymap::with_keys("Open the file", &OpenDiffedFile, cx))
+                            .tooltip(crate::keymap::with_keys(
+                                "Open the file",
+                                &OpenDiffedFile,
+                                cx,
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.emit(PaneEvent::OpenFile {
                                     path: this.path.clone(),
@@ -676,7 +823,9 @@ impl Render for DiffPanel {
                             })),
                     ),
             )
-            .when_some(self.error.clone(), |this, error| this.child(div().p_2().text_color(theme.danger).child(error)))
+            .when_some(self.error.clone(), |this, error| {
+                this.child(div().p_2().text_color(theme.danger).child(error))
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -692,25 +841,31 @@ impl Render for DiffPanel {
                             .h_full()
                             .font_family(theme.mono_font_family.clone())
                             .text_size(font_size)
-                            .child(
-                                {
-                                    let mut list = uniform_list("diff-rows", count, cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
-                                        .track_scroll(&self.scroll)
-                                        .size_full();
-                                    // Sideways is each side's own, not the list's
-                                    // (it would turn into scrolling down).
-                                    list.style().restrict_scroll_to_axis = Some(true);
-                                    list
-                                },
-                            )
+                            .child({
+                                let mut list = uniform_list(
+                                    "diff-rows",
+                                    count,
+                                    cx.processor(|this, range, _, cx| this.render_rows(range, cx)),
+                                )
+                                .track_scroll(&self.scroll)
+                                .size_full();
+                                // Sideways is each side's own, not the list's
+                                // (it would turn into scrolling down).
+                                list.style().restrict_scroll_to_axis = Some(true);
+                                list
+                            })
                             .child(
                                 canvas(
                                     {
                                         let this = this.clone();
                                         move |area, _, cx| {
                                             // Across the breakpoint, lay the rows out again.
-                                            let narrow = |width: Pixels| width > px(0.) && width < INLINE_BELOW;
-                                            if narrow(list_bounds.replace(area).size.width) != narrow(area.size.width) {
+                                            let narrow = |width: Pixels| {
+                                                width > px(0.) && width < INLINE_BELOW
+                                            };
+                                            if narrow(list_bounds.replace(area).size.width)
+                                                != narrow(area.size.width)
+                                            {
                                                 _ = this.update(cx, |_, cx| cx.notify());
                                             }
                                         }
@@ -723,7 +878,9 @@ impl Render for DiffPanel {
                                             move |event: &MouseMoveEvent, phase, _, cx| {
                                                 if phase == DispatchPhase::Capture {
                                                     _ = this.update(cx, |this, cx| {
-                                                        if event.pressed_button == Some(MouseButton::Left) {
+                                                        if event.pressed_button
+                                                            == Some(MouseButton::Left)
+                                                        {
                                                             this.drag_across(event.position.x, cx);
                                                         } else if this.h_grab.take().is_some() {
                                                             cx.notify();
@@ -732,15 +889,19 @@ impl Render for DiffPanel {
                                                 }
                                             }
                                         });
-                                        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-                                                _ = this.update(cx, |this, cx| {
-                                                    if this.h_grab.take().is_some() {
-                                                        cx.notify();
-                                                    }
-                                                });
-                                            }
-                                        });
+                                        window.on_mouse_event(
+                                            move |event: &MouseUpEvent, phase, _, cx| {
+                                                if phase == DispatchPhase::Capture
+                                                    && event.button == MouseButton::Left
+                                                {
+                                                    _ = this.update(cx, |this, cx| {
+                                                        if this.h_grab.take().is_some() {
+                                                            cx.notify();
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                        );
                                     },
                                 )
                                 .absolute()
@@ -760,9 +921,23 @@ fn thumb(scroll: &UniformListScrollHandle, area: Bounds<Pixels>) -> (Pixels, Pix
     let viewport = ScrollbarHandle::viewport_bounds(scroll).size.height;
     let content = ScrollbarHandle::content_size(scroll).height.max(viewport);
     let max_offset = content - viewport;
-    let height = if max_offset > px(0.) { (area.size.height * (viewport / content)).max(px(16.)).min(area.size.height) } else { area.size.height };
-    let at = if max_offset > px(0.) { (-ScrollbarHandle::offset(scroll).y / max_offset).clamp(0., 1.) } else { 0. };
-    (area.top() + (area.size.height - height) * at, height, max_offset)
+    let height = if max_offset > px(0.) {
+        (area.size.height * (viewport / content))
+            .max(px(16.))
+            .min(area.size.height)
+    } else {
+        area.size.height
+    };
+    let at = if max_offset > px(0.) {
+        (-ScrollbarHandle::offset(scroll).y / max_offset).clamp(0., 1.)
+    } else {
+        0.
+    };
+    (
+        area.top() + (area.size.height - height) * at,
+        height,
+        max_offset,
+    )
 }
 
 impl DiffPanel {
@@ -791,7 +966,12 @@ impl DiffPanel {
                 })
                 .collect()
         };
-        let total = if self.is_inline() { self.inline.len() } else { self.rows.len() }.max(1);
+        let total = if self.is_inline() {
+            self.inline.len()
+        } else {
+            self.rows.len()
+        }
+        .max(1);
         let scroll = self.scroll.clone();
         let this = cx.weak_entity();
         let bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> = Default::default();
@@ -815,14 +995,29 @@ impl DiffPanel {
                         // Read here, not in render: the list has been laid
                         // out by now, so the thumb is where this frame is.
                         let (top, thumb_height, _) = thumb(&scroll, area);
-                        window.paint_quad(fill(Bounds::new(point(area.left(), top), size(area.size.width, thumb_height)), view_color));
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(area.left(), top),
+                                size(area.size.width, thumb_height),
+                            ),
+                            view_color,
+                        ));
                         for &(ix, removed, added) in &marks {
                             let y = area.top() + height * (ix as f32 / total as f32);
                             if removed {
-                                window.paint_quad(fill(Bounds::new(point(area.left(), y), size(half, row_height)), red));
+                                window.paint_quad(fill(
+                                    Bounds::new(point(area.left(), y), size(half, row_height)),
+                                    red,
+                                ));
                             }
                             if added {
-                                window.paint_quad(fill(Bounds::new(point(area.left() + half, y), size(half, row_height)), green));
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(area.left() + half, y),
+                                        size(half, row_height),
+                                    ),
+                                    green,
+                                ));
                             }
                         }
                         // A drag goes on outside the ruler: the window keeps
@@ -842,7 +1037,8 @@ impl DiffPanel {
                             }
                         });
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                            if phase == DispatchPhase::Capture && event.button == MouseButton::Left
+                            {
                                 _ = this.update(cx, |this, _| this.ruler_grab = None);
                             }
                         });
@@ -857,7 +1053,11 @@ impl DiffPanel {
                     let (top, height, _) = thumb(&this.scroll, area);
                     let y = event.position.y;
                     // Held where it was taken; pressed elsewhere, centred there.
-                    this.ruler_grab = Some(if y >= top && y <= top + height { y - top } else { height / 2. });
+                    this.ruler_grab = Some(if y >= top && y <= top + height {
+                        y - top
+                    } else {
+                        height / 2.
+                    });
                     this.drag_ruler(area, y, cx);
                 }),
             )
@@ -887,7 +1087,10 @@ mod tests {
     fn inline_puts_removed_lines_above_added() {
         let rows = rows("a\nb\nc\n", "a\nB\nB2\nc\n");
         // a; b removed; B, B2 added; c.
-        assert_eq!(inline_lines(&rows), vec![(0, 1), (1, 0), (1, 1), (2, 1), (3, 1)]);
+        assert_eq!(
+            inline_lines(&rows),
+            vec![(0, 1), (1, 0), (1, 1), (2, 1), (3, 1)]
+        );
     }
 
     #[test]
@@ -895,23 +1098,35 @@ mod tests {
         let rows = rows("a\nb\nc\n", "a\nB\nB2\nc\n");
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].left_kind, Side::Same);
-        assert_eq!((rows[1].left_kind, rows[1].right_kind), (Side::Removed, Side::Added));
+        assert_eq!(
+            (rows[1].left_kind, rows[1].right_kind),
+            (Side::Removed, Side::Added)
+        );
         assert_eq!(rows[1].left, Some((2, "b".into())));
         assert_eq!(rows[1].right, Some((2, "B".into())));
-        assert_eq!((rows[2].left_kind, rows[2].right_kind), (Side::Gap, Side::Added));
+        assert_eq!(
+            (rows[2].left_kind, rows[2].right_kind),
+            (Side::Gap, Side::Added)
+        );
         assert_eq!(rows[3].right, Some((4, "c".into())));
     }
 
     #[test]
     fn line_endings_are_not_changes() {
         let rows = rows("a\nb\n", "a\r\nb\r\n");
-        assert!(rows.iter().all(|r| r.left_kind == Side::Same && r.right_kind == Side::Same));
+        assert!(
+            rows.iter()
+                .all(|r| r.left_kind == Side::Same && r.right_kind == Side::Same)
+        );
     }
 
     #[test]
     fn a_new_file_is_all_added() {
         let rows = rows("", "x\ny\n");
-        assert!(rows.iter().all(|r| r.left_kind == Side::Gap && r.right_kind == Side::Added));
+        assert!(
+            rows.iter()
+                .all(|r| r.left_kind == Side::Gap && r.right_kind == Side::Added)
+        );
     }
 
     #[test]

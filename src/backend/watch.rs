@@ -73,17 +73,32 @@ pub fn watch(root: &Path) -> Result<(Watcher, UnboundedReceiver<PathBuf>), Strin
         }
     })
     .map_err(|e| e.to_string())?;
-    inner.watch(root, RecursiveMode::Recursive).map_err(|e| e.to_string())?;
-    Ok((Watcher { _native: Some(inner), wsl: None }, rx))
+    inner
+        .watch(root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    Ok((
+        Watcher {
+            _native: Some(inner),
+            wsl: None,
+        },
+        rx,
+    ))
 }
 
 /// Watch `root`, the folder `linux` in `distro`, from inside WSL.
-fn watch_wsl(root: &Path, distro: &str, linux: &str, tx: UnboundedSender<PathBuf>) -> Result<Watcher, String> {
+fn watch_wsl(
+    root: &Path,
+    distro: &str,
+    linux: &str,
+    tx: UnboundedSender<PathBuf>,
+) -> Result<Watcher, String> {
     let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-d", distro, "--exec", "/bin/sh", "-c", WSL_WATCH, "sh", linux])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args([
+        "-d", distro, "--exec", "/bin/sh", "-c", WSL_WATCH, "sh", linux,
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     process::no_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("The WSL watch has no output.")?;
@@ -92,18 +107,28 @@ fn watch_wsl(root: &Path, distro: &str, linux: &str, tx: UnboundedSender<PathBuf
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             let mut path = root.clone();
-            path.extend(line.split('/').filter(|part| !part.is_empty() && *part != "."));
+            path.extend(
+                line.split('/')
+                    .filter(|part| !part.is_empty() && *part != "."),
+            );
             if tx.unbounded_send(path).is_err() {
                 break;
             }
         }
     });
-    Ok(Watcher { _native: None, wsl: Some(child) })
+    Ok(Watcher {
+        _native: None,
+        wsl: Some(child),
+    })
 }
 
 /// The next batch: the first change, then whatever else arrives within
 /// `quiet` of the last one. `None` once the watch is gone.
-pub async fn next_batch(rx: &mut UnboundedReceiver<PathBuf>, quiet: Duration, timer: impl Fn(Duration) -> futures::future::BoxFuture<'static, ()>) -> Option<BTreeSet<PathBuf>> {
+pub async fn next_batch(
+    rx: &mut UnboundedReceiver<PathBuf>,
+    quiet: Duration,
+    timer: impl Fn(Duration) -> futures::future::BoxFuture<'static, ()>,
+) -> Option<BTreeSet<PathBuf>> {
     let first = rx.next().await?;
     let mut batch = BTreeSet::from([first]);
     loop {
@@ -123,7 +148,9 @@ pub async fn next_batch(rx: &mut UnboundedReceiver<PathBuf>, quiet: Duration, ti
 /// config with its remotes), as opposed to the objects and logs it churns
 /// through.
 pub fn is_git_state(path: &Path) -> bool {
-    let mut components = path.components().map(|c| c.as_os_str().to_string_lossy().to_string());
+    let mut components = path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string());
     if !components.any(|c| c == ".git") {
         return false;
     }

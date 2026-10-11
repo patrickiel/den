@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 /// → `("Ubuntu", "/home/me")`.
 pub fn split(path: &Path) -> Option<(String, String)> {
     let text = path.to_string_lossy();
-    let rest = text.strip_prefix(r"\\?\UNC\").or_else(|| text.strip_prefix(r"\\"))?;
+    let rest = text
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| text.strip_prefix(r"\\"))?;
     let (server, rest) = rest.split_once('\\')?;
     if !server.eq_ignore_ascii_case("wsl.localhost") && !server.eq_ignore_ascii_case("wsl$") {
         return None;
@@ -26,12 +28,22 @@ pub fn split(path: &Path) -> Option<(String, String)> {
 /// under `\\wsl.localhost\<distro>`; `None` for that with no distro known.
 pub fn to_windows(distro: Option<&str>, linux: &str) -> Option<PathBuf> {
     let bytes = linux.as_bytes();
-    if linux.starts_with("/mnt/") && bytes.len() >= 6 && bytes[5].is_ascii_alphabetic() && bytes.get(6).is_none_or(|&b| b == b'/') {
+    if linux.starts_with("/mnt/")
+        && bytes.len() >= 6
+        && bytes[5].is_ascii_alphabetic()
+        && bytes.get(6).is_none_or(|&b| b == b'/')
+    {
         let drive = (bytes[5] as char).to_ascii_uppercase();
-        return Some(PathBuf::from(format!(r"{drive}:\{}", linux.get(7..).unwrap_or("").replace('/', "\\"))));
+        return Some(PathBuf::from(format!(
+            r"{drive}:\{}",
+            linux.get(7..).unwrap_or("").replace('/', "\\")
+        )));
     }
     let distro = distro?;
-    Some(PathBuf::from(format!(r"\\wsl.localhost\{distro}{}", linux.trim_end_matches('/').replace('/', "\\"))))
+    Some(PathBuf::from(format!(
+        r"\\wsl.localhost\{distro}{}",
+        linux.trim_end_matches('/').replace('/', "\\")
+    )))
 }
 
 /// The shell setting names WSL (`wsl`, `wsl.exe -d Ubuntu`): `Some` with the
@@ -55,9 +67,13 @@ pub fn shell(setting: &str) -> Option<Option<String>> {
 /// The distribution `wsl.exe` starts when none is named.
 #[cfg(windows)]
 pub fn default_distro() -> Option<String> {
-    let lxss = windows_registry::CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Lxss").ok()?;
+    let lxss = windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Lxss")
+        .ok()?;
     let id = lxss.get_string("DefaultDistribution").ok()?;
-    lxss.open(&id).and_then(|k| k.get_string("DistributionName")).ok()
+    lxss.open(&id)
+        .and_then(|k| k.get_string("DistributionName"))
+        .ok()
 }
 
 #[cfg(not(windows))]
@@ -69,7 +85,12 @@ pub fn default_distro() -> Option<String> {
 /// turns a Windows path into a Linux one).
 pub fn wslenv(names: &[&str]) -> String {
     let current = std::env::var("WSLENV").unwrap_or_default();
-    current.split(':').filter(|s| !s.is_empty()).chain(names.iter().copied()).collect::<Vec<_>>().join(":")
+    current
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .chain(names.iter().copied())
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 #[cfg(test)]
@@ -79,8 +100,14 @@ mod tests {
     #[test]
     fn splits_wsl_folders() {
         let at = |p: &str| split(Path::new(p));
-        assert_eq!(at(r"\\wsl.localhost\Ubuntu\home\me"), Some(("Ubuntu".into(), "/home/me".into())));
-        assert_eq!(at(r"\\?\UNC\wsl.localhost\Ubuntu\home\me\"), Some(("Ubuntu".into(), "/home/me".into())));
+        assert_eq!(
+            at(r"\\wsl.localhost\Ubuntu\home\me"),
+            Some(("Ubuntu".into(), "/home/me".into()))
+        );
+        assert_eq!(
+            at(r"\\?\UNC\wsl.localhost\Ubuntu\home\me\"),
+            Some(("Ubuntu".into(), "/home/me".into()))
+        );
         assert_eq!(at(r"\\WSL$\Debian"), Some(("Debian".into(), "/".into())));
         assert_eq!(at(r"\\server\share\x"), None);
         assert_eq!(at(r"C:\Users\me"), None);
@@ -88,19 +115,37 @@ mod tests {
 
     #[test]
     fn linux_paths_on_windows() {
-        assert_eq!(to_windows(Some("Ubuntu"), "/home/me"), Some(PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me")));
-        assert_eq!(to_windows(Some("Ubuntu"), "/"), Some(PathBuf::from(r"\\wsl.localhost\Ubuntu")));
-        assert_eq!(to_windows(None, "/mnt/c/Users/me"), Some(PathBuf::from(r"C:\Users\me")));
+        assert_eq!(
+            to_windows(Some("Ubuntu"), "/home/me"),
+            Some(PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me"))
+        );
+        assert_eq!(
+            to_windows(Some("Ubuntu"), "/"),
+            Some(PathBuf::from(r"\\wsl.localhost\Ubuntu"))
+        );
+        assert_eq!(
+            to_windows(None, "/mnt/c/Users/me"),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
         assert_eq!(to_windows(None, "/mnt/d"), Some(PathBuf::from(r"D:\")));
-        assert_eq!(to_windows(Some("U"), "/mnt/wsl"), Some(PathBuf::from(r"\\wsl.localhost\U\mnt\wsl")));
+        assert_eq!(
+            to_windows(Some("U"), "/mnt/wsl"),
+            Some(PathBuf::from(r"\\wsl.localhost\U\mnt\wsl"))
+        );
         assert_eq!(to_windows(None, "/home/me"), None);
     }
 
     #[test]
     fn wsl_shell_settings() {
         assert_eq!(shell("wsl"), Some(None));
-        assert_eq!(shell(r"C:\Windows\System32\WSL.EXE -d Ubuntu"), Some(Some("Ubuntu".into())));
-        assert_eq!(shell("wsl --distribution Debian"), Some(Some("Debian".into())));
+        assert_eq!(
+            shell(r"C:\Windows\System32\WSL.EXE -d Ubuntu"),
+            Some(Some("Ubuntu".into()))
+        );
+        assert_eq!(
+            shell("wsl --distribution Debian"),
+            Some(Some("Debian".into()))
+        );
         assert_eq!(shell("pwsh.exe"), None);
         assert_eq!(shell(""), None);
     }

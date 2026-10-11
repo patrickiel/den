@@ -77,7 +77,10 @@ pub fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         _ if !m.alt || m.control || m.platform => return None,
         _ => {
             // Alt+key: ESC then the character, as xterm's metaSendsEscape.
-            let text = keystroke.key_char.clone().or_else(|| (key == "space").then(|| " ".to_string()))?;
+            let text = keystroke
+                .key_char
+                .clone()
+                .or_else(|| (key == "space").then(|| " ".to_string()))?;
             let mut bytes = vec![0x1b];
             bytes.extend(text.as_bytes());
             bytes
@@ -85,4 +88,3 @@ pub fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     };
     Some(bytes)
 }
-

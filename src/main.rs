@@ -21,8 +21,8 @@ mod extension_view;
 mod extensions;
 mod extensions_view;
 mod file_icon;
-mod git_graph;
 mod float;
+mod git_graph;
 mod history;
 mod keymap;
 mod layout;
@@ -30,9 +30,9 @@ mod layout_file;
 mod layout_view;
 mod overlays;
 mod pane;
+mod panels;
 mod preset_icon;
 mod repo;
-mod panels;
 mod scm;
 mod search;
 mod settings;
@@ -120,7 +120,11 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
         window_min_size: Some(size(px(640.), px(400.))),
         ..TitleBar::window_options()
     };
-    extensions::broadcast(den_extension::events::WORKSPACE_OPENED, serde_json::json!({ "root": root }), cx);
+    extensions::broadcast(
+        den_extension::events::WORKSPACE_OPENED,
+        serde_json::json!({ "root": root }),
+        cx,
+    );
     let Ok((window, workspace)) = gpui_kit::open_window(options, cx, {
         let root = root.clone();
         move |window, cx| cx.new(|cx| workspace::Workspace::new(root, window, cx))
@@ -138,7 +142,11 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
 /// Turn `window` to the session for `root` in its place: the window stays as
 /// it is (its bounds, maximised or not), only its content changes.
 pub fn switch_workspace(root: PathBuf, window: &mut Window, cx: &mut App) {
-    extensions::broadcast(den_extension::events::WORKSPACE_OPENED, serde_json::json!({ "root": root }), cx);
+    extensions::broadcast(
+        den_extension::events::WORKSPACE_OPENED,
+        serde_json::json!({ "root": root }),
+        cx,
+    );
     let mut workspace = None;
     window.replace_root(cx, |window, cx| {
         let view = cx.new(|cx| workspace::Workspace::new(root.clone(), window, cx));
@@ -151,7 +159,12 @@ pub fn switch_workspace(root: PathBuf, window: &mut Window, cx: &mut App) {
 }
 
 /// A workspace now in `window`: named in the title, known to the extensions.
-fn workspace_opened(root: PathBuf, workspace: Entity<workspace::Workspace>, window: &mut Window, cx: &mut App) {
+fn workspace_opened(
+    root: PathBuf,
+    workspace: Entity<workspace::Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.set_window_title(&format!("den — {}", root.display()));
     extensions::window_opened(root, workspace.downgrade(), window.window_handle(), cx);
 }
@@ -161,7 +174,9 @@ fn workspace_opened(root: PathBuf, workspace: Entity<workspace::Workspace>, wind
 /// install folder), the folder last open.
 fn start_folder() -> PathBuf {
     let cwd = std::env::current_dir().ok();
-    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(PathBuf::from));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from));
     let from_shell = match (&cwd, &exe_dir) {
         (Some(cwd), Some(exe_dir)) => repo::key(cwd) != repo::key(exe_dir),
         (cwd, _) => cwd.is_some(),
@@ -177,7 +192,11 @@ fn start_folder() -> PathBuf {
 /// shown come from the keymap, which sets the menus again when it changes.
 pub(crate) fn set_menus(cx: &mut App) {
     use gpui_kit::component::input;
-    let menu = |name: &str, items: Vec<MenuItem>| Menu { name: name.to_string().into(), items, disabled: false };
+    let menu = |name: &str, items: Vec<MenuItem>| Menu {
+        name: name.to_string().into(),
+        items,
+        disabled: false,
+    };
     let mut menus = vec![
         menu(
             "den",
@@ -265,12 +284,26 @@ pub(crate) fn set_menus(cx: &mut App) {
     if !commands.is_empty() {
         let items = commands
             .into_iter()
-            .map(|(extension, name, command)| MenuItem::action(format!("{name}: {}", command.title), extensions::RunCommand { extension, command: command.id }))
+            .map(|(extension, name, command)| {
+                MenuItem::action(
+                    format!("{name}: {}", command.title),
+                    extensions::RunCommand {
+                        extension,
+                        command: command.id,
+                    },
+                )
+            })
             .collect();
         menus.push(menu("Extensions", items));
     }
     // Named "Window", AppKit lists the open windows in it.
-    menus.push(menu("Window", vec![MenuItem::action("Minimize", Minimize), MenuItem::action("Zoom", Zoom)]));
+    menus.push(menu(
+        "Window",
+        vec![
+            MenuItem::action("Minimize", Minimize),
+            MenuItem::action("Zoom", Zoom),
+        ],
+    ));
     cx.set_menus(menus);
 }
 
@@ -297,7 +330,9 @@ fn on_window_actions(cx: &mut App) {
 fn on_unfocused_actions(cx: &mut App) {
     fn forward<A: Action>(cx: &mut App) {
         cx.on_action(|action: &A, cx: &mut App| {
-            let Some(window) = cx.active_window() else { return };
+            let Some(window) = cx.active_window() else {
+                return;
+            };
             let action = action.boxed_clone();
             // This runs inside the window's update: reach it afterwards.
             cx.defer(move |cx| {
@@ -369,18 +404,37 @@ fn inherit_login_path() {
         process::{Command, Stdio},
         time::{Duration, Instant},
     };
-    let current: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let current: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     // Started from a terminal, PATH is already the shell's: nothing to do.
     let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-    if current.iter().any(|dir| !system.iter().any(|s| dir.as_os_str() == *s)) {
+    if current
+        .iter()
+        .any(|dir| !system.iter().any(|s| dir.as_os_str() == *s))
+    {
         return;
     }
-    let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".into());
     // An interactive login shell, as a terminal starts one, so PATH set in
     // .zshrc counts too; markers in case the profile prints something.
-    let fish = std::path::Path::new(&shell).file_name().is_some_and(|name| name == "fish");
-    let script = if fish { "printf '%s' \"<den-path>\"(string join : $PATH)\"</den-path>\"" } else { "printf '%s' \"<den-path>$PATH</den-path>\"" };
-    let Ok(mut child) = Command::new(&shell).args(["-l", "-i", "-c", script]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    let fish = std::path::Path::new(&shell)
+        .file_name()
+        .is_some_and(|name| name == "fish");
+    let script = if fish {
+        "printf '%s' \"<den-path>\"(string join : $PATH)\"</den-path>\""
+    } else {
+        "printf '%s' \"<den-path>$PATH</den-path>\""
+    };
+    let Ok(mut child) = Command::new(&shell)
+        .args(["-l", "-i", "-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return;
     };
@@ -398,10 +452,21 @@ fn inherit_login_path() {
         }
     }
     let mut text = String::new();
-    if child.stdout.take().and_then(|mut out| out.read_to_string(&mut text).ok()).is_none() {
+    if child
+        .stdout
+        .take()
+        .and_then(|mut out| out.read_to_string(&mut text).ok())
+        .is_none()
+    {
         return;
     }
-    let Some(login) = text.split("<den-path>").nth(1).and_then(|rest| rest.split("</den-path>").next()) else { return };
+    let Some(login) = text
+        .split("<den-path>")
+        .nth(1)
+        .and_then(|rest| rest.split("</den-path>").next())
+    else {
+        return;
+    };
     let mut dirs: Vec<PathBuf> = std::env::split_paths(login).collect();
     for dir in current {
         if !dirs.contains(&dir) {

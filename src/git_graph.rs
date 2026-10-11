@@ -17,7 +17,8 @@ use crate::preset_icon::parse_color;
 
 /// vscode-git-graph's colours, one per lane.
 pub const COLORS: [&str; 12] = [
-    "#0085d9", "#d9008f", "#00d90a", "#d98500", "#a300d9", "#ff0000", "#00d9cc", "#e138e8", "#85d900", "#dc5b23", "#6f24d6", "#ffcc00",
+    "#0085d9", "#d9008f", "#00d90a", "#d98500", "#a300d9", "#ff0000", "#00d9cc", "#e138e8",
+    "#85d900", "#dc5b23", "#6f24d6", "#ffcc00",
 ];
 
 /// The colour of uncommitted changes.
@@ -67,7 +68,12 @@ pub fn layout(nodes: &[Node]) -> Layout {
     let mut own_lanes = Vec::with_capacity(nodes.len());
     for node in nodes {
         let before = lanes.clone();
-        let waiting: Vec<usize> = before.iter().enumerate().filter(|(_, l)| l.as_ref().is_some_and(|l| l.hash == node.hash)).map(|(ix, _)| ix).collect();
+        let waiting: Vec<usize> = before
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_ref().is_some_and(|l| l.hash == node.hash))
+            .map(|(ix, _)| ix)
+            .collect();
         let lane = waiting.first().copied().unwrap_or_else(|| free(&before));
         let mut after = before.clone();
         for &ix in &waiting {
@@ -86,16 +92,30 @@ pub fn layout(nodes: &[Node]) -> Layout {
             color: color.to_string(),
             dashed,
         };
-        let own_color = if node.uncommitted { UNCOMMITTED } else { color(lane) };
+        let own_color = if node.uncommitted {
+            UNCOMMITTED
+        } else {
+            color(lane)
+        };
 
         // Into the dot from above, and past it.
         for (ix, waiting_lane) in before.iter().enumerate() {
-            let Some(waiting_lane) = waiting_lane else { continue };
-            let shade = if waiting_lane.uncommitted { UNCOMMITTED } else { color(ix) };
-            if waiting_lane.hash == node.hash {
-                graph.lines.push(line(ix, 0., lane, 0.5, shade, waiting_lane.uncommitted));
+            let Some(waiting_lane) = waiting_lane else {
+                continue;
+            };
+            let shade = if waiting_lane.uncommitted {
+                UNCOMMITTED
             } else {
-                graph.lines.push(line(ix, 0., ix, 1., shade, waiting_lane.uncommitted));
+                color(ix)
+            };
+            if waiting_lane.hash == node.hash {
+                graph
+                    .lines
+                    .push(line(ix, 0., lane, 0.5, shade, waiting_lane.uncommitted));
+            } else {
+                graph
+                    .lines
+                    .push(line(ix, 0., ix, 1., shade, waiting_lane.uncommitted));
             }
         }
 
@@ -104,7 +124,13 @@ pub fn layout(nodes: &[Node]) -> Layout {
             // The first parent stays in the commit's lane, so a branch runs
             // down to where it forked; another parent joins a lane already
             // waiting for it.
-            let waiting = if k == 0 { None } else { after.iter().position(|l| l.as_ref().is_some_and(|l| &l.hash == parent)) };
+            let waiting = if k == 0 {
+                None
+            } else {
+                after
+                    .iter()
+                    .position(|l| l.as_ref().is_some_and(|l| &l.hash == parent))
+            };
             let target = match waiting {
                 Some(ix) => ix,
                 None => {
@@ -112,15 +138,30 @@ pub fn layout(nodes: &[Node]) -> Layout {
                     if after.len() <= ix {
                         after.resize(ix + 1, None);
                     }
-                    after[ix] = Some(Lane { hash: parent.clone(), uncommitted: node.uncommitted });
+                    after[ix] = Some(Lane {
+                        hash: parent.clone(),
+                        uncommitted: node.uncommitted,
+                    });
                     ix
                 }
             };
-            let shade = if node.uncommitted { UNCOMMITTED } else if k == 0 { own_color } else { color(target) };
-            graph.lines.push(line(lane, 0.5, target, 1., shade, node.uncommitted));
+            let shade = if node.uncommitted {
+                UNCOMMITTED
+            } else if k == 0 {
+                own_color
+            } else {
+                color(target)
+            };
+            graph
+                .lines
+                .push(line(lane, 0.5, target, 1., shade, node.uncommitted));
         }
 
-        graph.dots.push(GraphDot { x: lane as f32, color: own_color.to_string(), hollow: node.hollow });
+        graph.dots.push(GraphDot {
+            x: lane as f32,
+            color: own_color.to_string(),
+            hollow: node.hollow,
+        });
         while after.last().is_some_and(Option::is_none) {
             after.pop();
         }
@@ -128,12 +169,18 @@ pub fn layout(nodes: &[Node]) -> Layout {
         graphs.push(graph);
         own_lanes.push(lane);
     }
-    Layout { graphs, lanes: own_lanes }
+    Layout {
+        graphs,
+        lanes: own_lanes,
+    }
 }
 
 /// The first lane that waits for nothing, else a new one.
 fn free(lanes: &[Option<Lane>]) -> usize {
-    lanes.iter().position(Option::is_none).unwrap_or(lanes.len())
+    lanes
+        .iter()
+        .position(Option::is_none)
+        .unwrap_or(lanes.len())
 }
 
 /// The lanes running on below a row, as straight lines: drawn through the
@@ -144,7 +191,14 @@ pub fn continuation(graph: &Graph) -> Graph {
             .lines
             .iter()
             .filter(|l| l.y1 == 1.)
-            .map(|l| GraphLine { x0: l.x1, y0: 0., x1: l.x1, y1: 1., color: l.color.clone(), dashed: l.dashed })
+            .map(|l| GraphLine {
+                x0: l.x1,
+                y0: 0.,
+                x1: l.x1,
+                y1: 1.,
+                color: l.color.clone(),
+                dashed: l.dashed,
+            })
             .collect(),
         dots: Vec::new(),
     }
@@ -164,7 +218,9 @@ pub fn graph_canvas(graph: Graph, background: Hsla) -> impl IntoElement {
             let x = |lane: f32| bounds.left() + px(GRAPH_PAD + LANE * lane + LANE / 2.);
             let y = |t: f32| bounds.top() + bounds.size.height * t;
             for line in &graph.lines {
-                let Some(color) = parse_color(&line.color) else { continue };
+                let Some(color) = parse_color(&line.color) else {
+                    continue;
+                };
                 let mut path = PathBuilder::stroke(px(2.));
                 if line.dashed {
                     path = path.dash_array(&[px(3.), px(3.)]);
@@ -182,11 +238,21 @@ pub fn graph_canvas(graph: Graph, background: Hsla) -> impl IntoElement {
                 }
             }
             for dot in &graph.dots {
-                let Some(color) = parse_color(&dot.color) else { continue };
+                let Some(color) = parse_color(&dot.color) else {
+                    continue;
+                };
                 let radius = px(4.);
-                let circle = Bounds::centered_at(point(x(dot.x), y(0.5)), size(radius * 2., radius * 2.));
+                let circle =
+                    Bounds::centered_at(point(x(dot.x), y(0.5)), size(radius * 2., radius * 2.));
                 let fill = if dot.hollow { background } else { color };
-                window.paint_quad(quad(circle, radius, fill, px(if dot.hollow { 2. } else { 0. }), color, BorderStyle::default()));
+                window.paint_quad(quad(
+                    circle,
+                    radius,
+                    fill,
+                    px(if dot.hollow { 2. } else { 0. }),
+                    color,
+                    BorderStyle::default(),
+                ));
             }
         },
     )
@@ -199,11 +265,19 @@ mod tests {
     use gpui_kit::px;
 
     fn lay(commits: &[(&str, &[&str])]) -> Layout {
-        let parents: Vec<Vec<String>> = commits.iter().map(|(_, p)| p.iter().map(|s| s.to_string()).collect()).collect();
+        let parents: Vec<Vec<String>> = commits
+            .iter()
+            .map(|(_, p)| p.iter().map(|s| s.to_string()).collect())
+            .collect();
         let nodes: Vec<Node> = commits
             .iter()
             .zip(&parents)
-            .map(|((hash, _), parents)| Node { hash, parents, hollow: false, uncommitted: *hash == "*" })
+            .map(|((hash, _), parents)| Node {
+                hash,
+                parents,
+                hollow: false,
+                uncommitted: *hash == "*",
+            })
             .collect();
         layout(&nodes)
     }
@@ -223,12 +297,29 @@ mod tests {
         let layout = lay(&[("m", &["a", "b"]), ("b", &["a"]), ("a", &[])]);
         assert_eq!(layout.lanes, [0, 1, 0]);
         let m = &layout.graphs[0];
-        assert!(m.lines.iter().any(|l| l.x0 == 0. && l.x1 == 1. && l.y1 == 1.));
+        assert!(
+            m.lines
+                .iter()
+                .any(|l| l.x0 == 0. && l.x1 == 1. && l.y1 == 1.)
+        );
         let b = &layout.graphs[1];
         // b keeps its lane, a's passes by; they meet at a.
-        assert!(b.lines.iter().any(|l| l.x0 == 1. && l.y0 == 0.5 && l.x1 == 1. && l.y1 == 1.));
-        assert!(b.lines.iter().any(|l| l.x0 == 0. && l.y0 == 0. && l.x1 == 0. && l.y1 == 1.));
-        assert!(layout.graphs[2].lines.iter().any(|l| l.x0 == 1. && l.y0 == 0. && l.x1 == 0. && l.y1 == 0.5));
+        assert!(
+            b.lines
+                .iter()
+                .any(|l| l.x0 == 1. && l.y0 == 0.5 && l.x1 == 1. && l.y1 == 1.)
+        );
+        assert!(
+            b.lines
+                .iter()
+                .any(|l| l.x0 == 0. && l.y0 == 0. && l.x1 == 0. && l.y1 == 1.)
+        );
+        assert!(
+            layout.graphs[2]
+                .lines
+                .iter()
+                .any(|l| l.x0 == 1. && l.y0 == 0. && l.x1 == 0. && l.y1 == 0.5)
+        );
     }
 
     #[test]
@@ -236,17 +327,35 @@ mod tests {
         // y's lane comes in beside x's, and both end at a.
         let layout = lay(&[("x", &["a"]), ("y", &["a"]), ("a", &[])]);
         assert_eq!(layout.lanes, [0, 1, 0]);
-        assert_eq!(layout.graphs[2].lines.iter().filter(|l| l.y1 == 0.5).count(), 2);
+        assert_eq!(
+            layout.graphs[2]
+                .lines
+                .iter()
+                .filter(|l| l.y1 == 0.5)
+                .count(),
+            2
+        );
         let layout = lay(&[("x", &["a"]), ("y", &["b"]), ("b", &["a"]), ("a", &[])]);
         assert_eq!(layout.lanes, [0, 1, 1, 0]);
         // At a, the second lane comes in from above.
-        assert!(layout.graphs[3].lines.iter().any(|l| l.x0 == 1. && l.y0 == 0. && l.x1 == 0. && l.y1 == 0.5));
+        assert!(
+            layout.graphs[3]
+                .lines
+                .iter()
+                .any(|l| l.x0 == 1. && l.y0 == 0. && l.x1 == 0. && l.y1 == 0.5)
+        );
         assert!(layout.graphs[3].lanes() <= 2.);
     }
 
     #[test]
     fn freed_lanes_are_reused() {
-        let layout = lay(&[("m", &["a", "b"]), ("b", &["a"]), ("a", &["z"]), ("n", &["z"]), ("z", &[])]);
+        let layout = lay(&[
+            ("m", &["a", "b"]),
+            ("b", &["a"]),
+            ("a", &["z"]),
+            ("n", &["z"]),
+            ("z", &[]),
+        ]);
         assert_eq!(layout.lanes, [0, 1, 0, 1, 0]);
     }
 
@@ -266,7 +375,12 @@ mod tests {
         let below = continuation(&layout.graphs[1]);
         assert!(below.dots.is_empty());
         assert_eq!(below.lines.len(), 2);
-        assert!(below.lines.iter().all(|l| l.x0 == l.x1 && l.y0 == 0. && l.y1 == 1.));
+        assert!(
+            below
+                .lines
+                .iter()
+                .all(|l| l.x0 == l.x1 && l.y0 == 0. && l.y1 == 1.)
+        );
         // Nothing continues below the root.
         assert!(continuation(&layout.graphs[2]).lines.is_empty());
     }
@@ -275,7 +389,12 @@ mod tests {
     fn the_column_fits_the_widest_row_and_at_least_two_lanes() {
         let layout = lay(&[("c", &["b"]), ("b", &["a"]), ("a", &[])]);
         assert_eq!(column_width(&layout.graphs), px(GRAPH_PAD * 2. + 2. * LANE));
-        let layout = lay(&[("m", &["a", "b", "c"]), ("c", &["a"]), ("b", &["a"]), ("a", &[])]);
+        let layout = lay(&[
+            ("m", &["a", "b", "c"]),
+            ("c", &["a"]),
+            ("b", &["a"]),
+            ("a", &[]),
+        ]);
         assert_eq!(column_width(&layout.graphs), px(GRAPH_PAD * 2. + 3. * LANE));
     }
 }

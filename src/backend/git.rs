@@ -54,7 +54,10 @@ pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Err
         Some((distro, linux)) => {
             let mut cmd = Command::new("wsl.exe");
             cmd.args(["-d", distro, "--cd", linux, "--exec", "git"])
-                .env("WSLENV", wsl::wslenv(&["GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "LC_ALL"]));
+                .env(
+                    "WSLENV",
+                    wsl::wslenv(&["GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "LC_ALL"]),
+                );
             cmd
         }
         None => {
@@ -95,8 +98,16 @@ pub fn check(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, E
     if out.ok() {
         Ok(out)
     } else {
-        let message = if out.stderr.trim().is_empty() { out.stdout.trim() } else { out.stderr.trim() };
-        Err(Error::Failed(format!("git {}: {}", args.join(" "), message)))
+        let message = if out.stderr.trim().is_empty() {
+            out.stdout.trim()
+        } else {
+            out.stderr.trim()
+        };
+        Err(Error::Failed(format!(
+            "git {}: {}",
+            args.join(" "),
+            message
+        )))
     }
 }
 
@@ -139,7 +150,11 @@ impl FileStatus {
         if self.conflict {
             return '!';
         }
-        let code = if self.worktree != '.' { self.worktree } else { self.index };
+        let code = if self.worktree != '.' {
+            self.worktree
+        } else {
+            self.index
+        };
         match code {
             '?' => 'U',
             'T' => 'M',
@@ -182,7 +197,9 @@ pub fn toplevel(dir: &Path) -> Result<Option<PathBuf>, Error> {
     if let Some((distro, _)) = wsl::split(dir).filter(|_| cfg!(windows)) {
         return Ok(wsl::to_windows(Some(&distro), top));
     }
-    Ok(Some(PathBuf::from(top.replace('/', std::path::MAIN_SEPARATOR_STR))))
+    Ok(Some(PathBuf::from(
+        top.replace('/', std::path::MAIN_SEPARATOR_STR),
+    )))
 }
 
 pub fn status(top: &Path) -> Result<Status, Error> {
@@ -221,7 +238,9 @@ pub fn parse_status(raw: &str, top: &Path) -> Status {
     };
     let mut tokens = raw.split('\0');
     while let Some(record) = tokens.next() {
-        let Some(kind) = record.chars().next() else { continue };
+        let Some(kind) = record.chars().next() else {
+            continue;
+        };
         match kind {
             '#' => {
                 let mut parts = record.splitn(3, ' ');
@@ -235,7 +254,8 @@ pub fn parse_status(raw: &str, top: &Path) -> Status {
                     "branch.ab" => {
                         status.branch.upstream_exists = true;
                         let mut ab = value.split(' ');
-                        let parse = |s: Option<&str>| s.and_then(|s| s[1..].parse().ok()).unwrap_or(0);
+                        let parse =
+                            |s: Option<&str>| s.and_then(|s| s[1..].parse().ok()).unwrap_or(0);
                         status.branch.ahead = parse(ab.next());
                         status.branch.behind = parse(ab.next());
                     }
@@ -252,7 +272,8 @@ pub fn parse_status(raw: &str, top: &Path) -> Status {
                 parts.next();
                 let xy: Vec<char> = parts.next().unwrap_or("..").chars().collect();
                 let rel = parts.nth(fields - 2).unwrap_or_default().to_string();
-                let renamed_from = (kind == '2').then(|| tokens.next().unwrap_or_default().to_string());
+                let renamed_from =
+                    (kind == '2').then(|| tokens.next().unwrap_or_default().to_string());
                 status.files.push(FileStatus {
                     path: abs(&rel),
                     rel,
@@ -303,20 +324,33 @@ pub fn stage(top: &Path, rels: &[String]) -> Result<(), Error> {
 }
 
 pub fn unstage(top: &Path, rels: &[String]) -> Result<(), Error> {
-    let base: &[&str] = if unborn(top) { &["rm", "--cached", "-r", "-q"] } else { &["restore", "--staged"] };
+    let base: &[&str] = if unborn(top) {
+        &["rm", "--cached", "-r", "-q"]
+    } else {
+        &["restore", "--staged"]
+    };
     with_pathspec(top, base, rels)
 }
 
 /// Working-tree changes only: tracked files go back to the index, untracked
 /// ones to the Recycle Bin.
 pub fn discard(top: &Path, files: &[FileStatus]) -> Result<(), Error> {
-    let tracked: Vec<String> = files.iter().filter(|f| !f.untracked()).map(|f| f.rel.clone()).collect();
-    let untracked: Vec<PathBuf> = files.iter().filter(|f| f.untracked()).map(|f| f.path.clone()).collect();
+    let tracked: Vec<String> = files
+        .iter()
+        .filter(|f| !f.untracked())
+        .map(|f| f.rel.clone())
+        .collect();
+    let untracked: Vec<PathBuf> = files
+        .iter()
+        .filter(|f| f.untracked())
+        .map(|f| f.path.clone())
+        .collect();
     if !tracked.is_empty() {
         with_pathspec(top, &["checkout", "-q"], &tracked)?;
     }
     if !untracked.is_empty() {
-        trash::delete_all(&untracked).map_err(|e| Error::Failed(format!("Could not move to the Recycle Bin: {e}")))?;
+        trash::delete_all(&untracked)
+            .map_err(|e| Error::Failed(format!("Could not move to the Recycle Bin: {e}")))?;
     }
     Ok(())
 }
@@ -375,7 +409,13 @@ pub fn branches(top: &Path) -> Result<Vec<BranchRef>, Error> {
     let format = format!("%(refname){UNIT}%(refname:short){UNIT}%(HEAD){UNIT}%(symref)");
     let out = check(
         top,
-        &["for-each-ref", &format!("--format={format}"), "--sort=-committerdate", "refs/heads", "refs/remotes"],
+        &[
+            "for-each-ref",
+            &format!("--format={format}"),
+            "--sort=-committerdate",
+            "refs/heads",
+            "refs/remotes",
+        ],
         None,
     )?;
     Ok(out
@@ -383,7 +423,9 @@ pub fn branches(top: &Path) -> Result<Vec<BranchRef>, Error> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split(UNIT).collect();
-            let [refname, name, head, symref] = parts[..] else { return None };
+            let [refname, name, head, symref] = parts[..] else {
+                return None;
+            };
             (symref.is_empty()).then(|| BranchRef {
                 name: name.to_string(),
                 remote: refname.starts_with("refs/remotes/"),
@@ -398,7 +440,10 @@ pub fn switch(top: &Path, branch: &BranchRef) -> Result<(), Error> {
     if !branch.remote {
         return check(top, &["switch", &branch.name], None).map(drop);
     }
-    let local = branch.name.split_once('/').map_or(branch.name.as_str(), |(_, rest)| rest);
+    let local = branch
+        .name
+        .split_once('/')
+        .map_or(branch.name.as_str(), |(_, rest)| rest);
     let exists = branches(top)?.iter().any(|b| !b.remote && b.name == local);
     if exists {
         check(top, &["switch", local], None).map(drop)
@@ -451,7 +496,9 @@ pub struct Commit {
 /// children before parents, so a graph can be laid out from them. On an
 /// unborn branch git fails: callers look at `Status::branch` first.
 pub fn log(top: &Path, revs: &[String], n: usize, skip: usize) -> Result<Vec<Commit>, Error> {
-    let format = format!("--format=%H{UNIT}%h{UNIT}%P{UNIT}%an{UNIT}%ae{UNIT}%at{UNIT}%ad{UNIT}%D{UNIT}%s{UNIT}%b{RECORD}");
+    let format = format!(
+        "--format=%H{UNIT}%h{UNIT}%P{UNIT}%an{UNIT}%ae{UNIT}%at{UNIT}%ad{UNIT}%D{UNIT}%s{UNIT}%b{RECORD}"
+    );
     let (n, skip) = (n.to_string(), format!("--skip={skip}"));
     let mut args = vec![
         "log",
@@ -475,7 +522,21 @@ pub fn parse_log(raw: &str) -> Vec<Commit> {
         .filter_map(|record| {
             let record = record.trim_start_matches(['\n', '\r']);
             let parts: Vec<&str> = record.splitn(10, UNIT).collect();
-            let [hash, short, parents, author, email, date, when, decorations, subject, body] = parts[..] else { return None };
+            let [
+                hash,
+                short,
+                parents,
+                author,
+                email,
+                date,
+                when,
+                decorations,
+                subject,
+                body,
+            ] = parts[..]
+            else {
+                return None;
+            };
             let (refs, detached_head) = parse_decorations(decorations);
             Some(Commit {
                 hash: hash.into(),
@@ -521,7 +582,11 @@ pub fn parse_decorations(raw: &str) -> (Vec<CommitRef>, bool) {
         } else {
             continue;
         };
-        refs.push(CommitRef { kind, name: name.to_string(), head });
+        refs.push(CommitRef {
+            kind,
+            name: name.to_string(),
+            head,
+        });
     }
     (refs, detached)
 }
@@ -529,17 +594,28 @@ pub fn parse_decorations(raw: &str) -> (Vec<CommitRef>, bool) {
 /// The branch the remote checks out (`origin/main`, from `origin/HEAD`),
 /// else a local `main` or `master`.
 pub fn default_branch(top: &Path) -> Option<String> {
-    if let Ok(out) = run(top, &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"], None)
-        && out.ok()
+    if let Ok(out) = run(
+        top,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        None,
+    ) && out.ok()
         && let Some(name) = out.stdout.trim().strip_prefix("refs/remotes/")
     {
         return Some(name.to_string());
     }
-    ["main", "master"].into_iter().find(|b| is_commit(top, &format!("refs/heads/{b}"))).map(str::to_string)
+    ["main", "master"]
+        .into_iter()
+        .find(|b| is_commit(top, &format!("refs/heads/{b}")))
+        .map(str::to_string)
 }
 
 fn is_commit(top: &Path, rev: &str) -> bool {
-    run(top, &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")], None).is_ok_and(|out| out.ok())
+    run(
+        top,
+        &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")],
+        None,
+    )
+    .is_ok_and(|out| out.ok())
 }
 
 /// What the commit list shows, as VS Code's graph does: HEAD, its upstream
@@ -558,7 +634,13 @@ pub fn history_revs(status: &Status, default_branch: Option<&str>) -> Vec<String
 
 /// The URL of `origin`, else of the first remote.
 pub fn remote_url(top: &Path) -> Option<String> {
-    let url = |name: &str| run(top, &["remote", "get-url", name], None).ok().filter(|out| out.ok()).map(|out| out.stdout.trim().to_string()).filter(|u| !u.is_empty());
+    let url = |name: &str| {
+        run(top, &["remote", "get-url", name], None)
+            .ok()
+            .filter(|out| out.ok())
+            .map(|out| out.stdout.trim().to_string())
+            .filter(|u| !u.is_empty())
+    };
     url("origin").or_else(|| {
         let out = run(top, &["remote"], None).ok()?;
         let first = out.stdout.lines().map(str::trim).find(|r| !r.is_empty())?;
@@ -574,19 +656,35 @@ pub fn github_repo(url: &str) -> Option<(String, String)> {
         rest
     } else {
         let without_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
-        let without_user = without_scheme.split_once('@').map_or(without_scheme, |(_, rest)| rest);
+        let without_user = without_scheme
+            .split_once('@')
+            .map_or(without_scheme, |(_, rest)| rest);
         without_user.strip_prefix("github.com/")?
     };
     let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let (owner, repo) = rest.split_once('/')?;
-    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| (owner.to_string(), repo.to_string()))
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/'))
+        .then(|| (owner.to_string(), repo.to_string()))
 }
 
 /// `2026-10-06 21:30` (as [`log`] asks git for) as VS Code shows it:
 /// `October 6, 2026 at 9:30 PM`.
 pub fn long_date(when: &str) -> Option<String> {
-    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
     let (date, time) = when.trim().split_once(' ')?;
     let mut date = date.split('-').map(|n| n.parse::<u32>().ok());
     let (year, month, day) = (date.next()??, date.next()??, date.next()??);
@@ -599,7 +697,9 @@ pub fn long_date(when: &str) -> Option<String> {
         12 => (12, "PM"),
         _ => (hour - 12, "PM"),
     };
-    Some(format!("{month} {day}, {year} at {hour12}:{minute:02} {half}"))
+    Some(format!(
+        "{month} {day}, {year} at {hour12}:{minute:02} {half}"
+    ))
 }
 
 /// A file as committed at `rev` (`HEAD`, or `` for the index), for diffs:
@@ -613,11 +713,20 @@ pub fn show_in(top: &Path, rev: &str, rel: &str) -> Result<Option<String>, Error
     }
     // What git says for a path not in the index or the tree, and for a
     // revision it does not have (the diff shows that side empty too).
-    const MISSING: [&str; 5] = ["does not exist", "exists on disk, but not in", "invalid object name", "not at stage", "unknown revision"];
+    const MISSING: [&str; 5] = [
+        "does not exist",
+        "exists on disk, but not in",
+        "invalid object name",
+        "not at stage",
+        "unknown revision",
+    ];
     if MISSING.iter().any(|m| out.stderr.contains(m)) {
         Ok(None)
     } else {
-        Err(Error::Failed(format!("git show {spec}: {}", out.stderr.trim())))
+        Err(Error::Failed(format!(
+            "git show {spec}: {}",
+            out.stderr.trim()
+        )))
     }
 }
 
@@ -632,10 +741,31 @@ pub struct CommitFile {
 
 /// The files `hash` changed against its first parent `parent` (everything,
 /// for a root commit).
-pub fn commit_files(top: &Path, hash: &str, parent: Option<&str>) -> Result<Vec<CommitFile>, Error> {
+pub fn commit_files(
+    top: &Path,
+    hash: &str,
+    parent: Option<&str>,
+) -> Result<Vec<CommitFile>, Error> {
     let out = match parent {
-        Some(parent) => check(top, &["diff", "--name-status", "-M", "-z", parent, hash], None)?,
-        None => check(top, &["diff-tree", "--no-commit-id", "-r", "-M", "--root", "--name-status", "-z", hash], None)?,
+        Some(parent) => check(
+            top,
+            &["diff", "--name-status", "-M", "-z", parent, hash],
+            None,
+        )?,
+        None => check(
+            top,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "-r",
+                "-M",
+                "--root",
+                "--name-status",
+                "-z",
+                hash,
+            ],
+            None,
+        )?,
     };
     Ok(parse_name_status(&out.stdout))
 }
@@ -646,7 +776,9 @@ pub fn parse_name_status(raw: &str) -> Vec<CommitFile> {
     let mut files = Vec::new();
     let mut parts = raw.split('\0').filter(|p| !p.is_empty());
     while let Some(code) = parts.next() {
-        let Some(status) = code.chars().next() else { continue };
+        let Some(status) = code.chars().next() else {
+            continue;
+        };
         let Some(first) = parts.next() else { break };
         let (old_rel, rel) = match status {
             'R' | 'C' => match parts.next() {
@@ -655,7 +787,11 @@ pub fn parse_name_status(raw: &str) -> Vec<CommitFile> {
             },
             _ => (first.to_string(), first.to_string()),
         };
-        files.push(CommitFile { status, rel, old_rel });
+        files.push(CommitFile {
+            status,
+            rel,
+            old_rel,
+        });
     }
     files
 }
@@ -673,7 +809,19 @@ pub struct Stat {
 pub fn commit_stat(top: &Path, hash: &str, parent: Option<&str>) -> Result<Stat, Error> {
     let out = match parent {
         Some(parent) => check(top, &["diff", "--shortstat", "-M", parent, hash], None)?,
-        None => check(top, &["diff-tree", "--root", "-r", "-M", "--no-commit-id", "--shortstat", hash], None)?,
+        None => check(
+            top,
+            &[
+                "diff-tree",
+                "--root",
+                "-r",
+                "-M",
+                "--no-commit-id",
+                "--shortstat",
+                hash,
+            ],
+            None,
+        )?,
     };
     Ok(parse_shortstat(&out.stdout))
 }
@@ -683,7 +831,11 @@ pub fn commit_stat(top: &Path, hash: &str, parent: Option<&str>) -> Result<Stat,
 pub fn parse_shortstat(raw: &str) -> Stat {
     let mut stat = Stat::default();
     for part in raw.lines().last().unwrap_or("").split(',').map(str::trim) {
-        let n: u32 = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let n: u32 = part
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
         if part.contains("file") {
             stat.files = n;
         } else if part.contains("insertion") {
@@ -717,8 +869,22 @@ mod commit_file_tests {
     #[test]
     fn plain_and_renamed_files() {
         let files = parse_name_status("M\0src/a.rs\0R087\0old.rs\0new.rs\0A\0b.txt\0");
-        assert_eq!(files[0], CommitFile { status: 'M', rel: "src/a.rs".into(), old_rel: "src/a.rs".into() });
-        assert_eq!(files[1], CommitFile { status: 'R', rel: "new.rs".into(), old_rel: "old.rs".into() });
+        assert_eq!(
+            files[0],
+            CommitFile {
+                status: 'M',
+                rel: "src/a.rs".into(),
+                old_rel: "src/a.rs".into()
+            }
+        );
+        assert_eq!(
+            files[1],
+            CommitFile {
+                status: 'R',
+                rel: "new.rs".into(),
+                old_rel: "old.rs".into()
+            }
+        );
         assert_eq!(files[2].status, 'A');
     }
 }
@@ -754,14 +920,31 @@ mod tests {
         assert_eq!((status.branch.ahead, status.branch.behind), (2, 1));
         assert!(status.branch.upstream_exists);
         let rels: Vec<&str> = status.files.iter().map(|f| f.rel.as_str()).collect();
-        assert_eq!(rels, ["conflict.txt", "docs/new file.md", "lib/new.rs", "notes.txt", "src/main.rs"]);
+        assert_eq!(
+            rels,
+            [
+                "conflict.txt",
+                "docs/new file.md",
+                "lib/new.rs",
+                "notes.txt",
+                "src/main.rs"
+            ]
+        );
 
-        let main = status.files.iter().find(|f| f.rel == "src/main.rs").unwrap();
+        let main = status
+            .files
+            .iter()
+            .find(|f| f.rel == "src/main.rs")
+            .unwrap();
         assert!(main.changed() && !main.staged());
         assert_eq!(main.letter(), 'M');
         assert_eq!(main.path, top().join("src").join("main.rs"));
 
-        let added = status.files.iter().find(|f| f.rel == "docs/new file.md").unwrap();
+        let added = status
+            .files
+            .iter()
+            .find(|f| f.rel == "docs/new file.md")
+            .unwrap();
         assert!(added.staged() && !added.changed());
         assert_eq!(added.letter(), 'A');
 
@@ -769,7 +952,11 @@ mod tests {
         assert_eq!(renamed.renamed_from.as_deref(), Some("lib/old.rs"));
         assert_eq!(renamed.letter(), 'R');
 
-        let conflict = status.files.iter().find(|f| f.rel == "conflict.txt").unwrap();
+        let conflict = status
+            .files
+            .iter()
+            .find(|f| f.rel == "conflict.txt")
+            .unwrap();
         assert!(conflict.conflict && !conflict.staged() && !conflict.changed());
         assert_eq!(conflict.letter(), '!');
 
@@ -790,11 +977,20 @@ mod tests {
 
     #[test]
     fn history_revs_follow_the_status() {
-        let mut status = parse_status("# branch.oid abc\0# branch.head main\0# branch.upstream origin/main\0", &top());
+        let mut status = parse_status(
+            "# branch.oid abc\0# branch.head main\0# branch.upstream origin/main\0",
+            &top(),
+        );
         // The upstream is gone (no ahead/behind): not listed.
-        assert_eq!(history_revs(&status, Some("origin/main")), ["HEAD", "origin/main"]);
+        assert_eq!(
+            history_revs(&status, Some("origin/main")),
+            ["HEAD", "origin/main"]
+        );
         status.branch.upstream_exists = true;
-        assert_eq!(history_revs(&status, Some("origin/dev")), ["HEAD", "origin/main", "origin/dev"]);
+        assert_eq!(
+            history_revs(&status, Some("origin/dev")),
+            ["HEAD", "origin/main", "origin/dev"]
+        );
         assert_eq!(history_revs(&status, None), ["HEAD", "origin/main"]);
     }
 
@@ -808,21 +1004,58 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].parents, ["def", "123"]);
         assert_eq!(commits[0].body, "A body.\n\nMore.");
-        assert_eq!(commits[0].refs, [CommitRef { kind: RefKind::Local, name: "main".into(), head: true }]);
-        assert_eq!((commits[1].author.as_str(), commits[1].email.as_str(), commits[1].date), ("Bob", "bob@x.io", 200));
-        assert!(commits[1].parents.is_empty() && commits[1].body.is_empty() && commits[1].refs.is_empty());
+        assert_eq!(
+            commits[0].refs,
+            [CommitRef {
+                kind: RefKind::Local,
+                name: "main".into(),
+                head: true
+            }]
+        );
+        assert_eq!(
+            (
+                commits[1].author.as_str(),
+                commits[1].email.as_str(),
+                commits[1].date
+            ),
+            ("Bob", "bob@x.io", 200)
+        );
+        assert!(
+            commits[1].parents.is_empty()
+                && commits[1].body.is_empty()
+                && commits[1].refs.is_empty()
+        );
         assert_eq!(commits[1].when, "2026-10-05 09:05");
     }
 
     #[test]
     fn parses_decorations() {
-        let (refs, detached) = parse_decorations("HEAD -> refs/heads/main, tag: refs/tags/v0.6.0, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/stash");
+        let (refs, detached) = parse_decorations(
+            "HEAD -> refs/heads/main, tag: refs/tags/v0.6.0, refs/remotes/origin/main, refs/remotes/origin/HEAD, refs/stash",
+        );
         assert!(!detached);
-        let names: Vec<(RefKind, &str, bool)> = refs.iter().map(|r| (r.kind, r.name.as_str(), r.head)).collect();
-        assert_eq!(names, [(RefKind::Local, "main", true), (RefKind::Tag, "v0.6.0", false), (RefKind::Remote, "origin/main", false)]);
+        let names: Vec<(RefKind, &str, bool)> = refs
+            .iter()
+            .map(|r| (r.kind, r.name.as_str(), r.head))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (RefKind::Local, "main", true),
+                (RefKind::Tag, "v0.6.0", false),
+                (RefKind::Remote, "origin/main", false)
+            ]
+        );
         let (refs, detached) = parse_decorations("HEAD, refs/heads/feature");
         assert!(detached);
-        assert_eq!(refs, [CommitRef { kind: RefKind::Local, name: "feature".into(), head: false }]);
+        assert_eq!(
+            refs,
+            [CommitRef {
+                kind: RefKind::Local,
+                name: "feature".into(),
+                head: false
+            }]
+        );
         assert_eq!(parse_decorations(""), (Vec::new(), false));
     }
 
@@ -841,17 +1074,40 @@ mod tests {
     #[test]
     fn parses_shortstat() {
         let stat = parse_shortstat(" 2 files changed, 23 insertions(+), 2 deletions(-)\n");
-        assert_eq!(stat, Stat { files: 2, insertions: 23, deletions: 2 });
+        assert_eq!(
+            stat,
+            Stat {
+                files: 2,
+                insertions: 23,
+                deletions: 2
+            }
+        );
         let stat = parse_shortstat(" 1 file changed, 1 insertion(+)\n");
-        assert_eq!(stat, Stat { files: 1, insertions: 1, deletions: 0 });
+        assert_eq!(
+            stat,
+            Stat {
+                files: 1,
+                insertions: 1,
+                deletions: 0
+            }
+        );
         assert_eq!(parse_shortstat(""), Stat::default());
     }
 
     #[test]
     fn long_dates_read_like_vscode() {
-        assert_eq!(long_date("2026-10-06 21:30").as_deref(), Some("October 6, 2026 at 9:30 PM"));
-        assert_eq!(long_date("2026-01-01 00:05").as_deref(), Some("January 1, 2026 at 12:05 AM"));
-        assert_eq!(long_date("2026-12-31 12:00").as_deref(), Some("December 31, 2026 at 12:00 PM"));
+        assert_eq!(
+            long_date("2026-10-06 21:30").as_deref(),
+            Some("October 6, 2026 at 9:30 PM")
+        );
+        assert_eq!(
+            long_date("2026-01-01 00:05").as_deref(),
+            Some("January 1, 2026 at 12:05 AM")
+        );
+        assert_eq!(
+            long_date("2026-12-31 12:00").as_deref(),
+            Some("December 31, 2026 at 12:00 PM")
+        );
         assert_eq!(long_date("2026-13-01 12:00"), None);
         assert_eq!(long_date("garbage"), None);
     }
@@ -868,9 +1124,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("den-git-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let Ok(out) = run(&dir, &["init", "-q", "-b", "main"], None) else { return }; // no git here
+        let Ok(out) = run(&dir, &["init", "-q", "-b", "main"], None) else {
+            return;
+        }; // no git here
         assert!(out.ok());
-        for args in [["config", "user.email", "t@example.com"], ["config", "user.name", "Test"]] {
+        for args in [
+            ["config", "user.email", "t@example.com"],
+            ["config", "user.name", "Test"],
+        ] {
             check(&dir, &args, None).unwrap();
         }
         std::fs::write(dir.join("a.txt"), "one").unwrap();
@@ -890,8 +1151,22 @@ mod tests {
         assert_eq!(commits[0].subject, "first");
         assert_eq!(commits[0].email, "t@example.com");
         assert!(commits[0].parents.is_empty());
-        assert_eq!(commits[0].refs, [CommitRef { kind: RefKind::Local, name: "main".into(), head: true }]);
-        assert_eq!(commit_stat(&top, &commits[0].hash, None).unwrap(), Stat { files: 1, insertions: 1, deletions: 0 });
+        assert_eq!(
+            commits[0].refs,
+            [CommitRef {
+                kind: RefKind::Local,
+                name: "main".into(),
+                head: true
+            }]
+        );
+        assert_eq!(
+            commit_stat(&top, &commits[0].hash, None).unwrap(),
+            Stat {
+                files: 1,
+                insertions: 1,
+                deletions: 0
+            }
+        );
 
         // A branch with a tag, merged back: the graph's shape and decorations.
         check(&top, &["switch", "-q", "-c", "topic"], None).unwrap();
@@ -903,25 +1178,62 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one more").unwrap();
         stage(&top, &["a.txt".into()]).unwrap();
         commit(&top, "main again", false).unwrap();
-        check(&top, &["merge", "--no-ff", "-q", "-m", "merge topic", "topic"], None).unwrap();
+        check(
+            &top,
+            &["merge", "--no-ff", "-q", "-m", "merge topic", "topic"],
+            None,
+        )
+        .unwrap();
         let commits = log(&top, &["HEAD".into()], 10, 0).unwrap();
         let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects[0], "merge topic");
         assert_eq!(commits[0].parents.len(), 2);
         assert_eq!(subjects[3], "first");
         let topic = commits.iter().find(|c| c.subject == "topic").unwrap();
-        assert!(topic.refs.iter().any(|r| r.kind == RefKind::Tag && r.name == "v1"));
-        assert!(topic.refs.iter().any(|r| r.kind == RefKind::Local && r.name == "topic" && !r.head));
-        assert_eq!(commit_stat(&top, &commits[0].hash, commits[0].parents.first().map(String::as_str)).unwrap().files, 1);
+        assert!(
+            topic
+                .refs
+                .iter()
+                .any(|r| r.kind == RefKind::Tag && r.name == "v1")
+        );
+        assert!(
+            topic
+                .refs
+                .iter()
+                .any(|r| r.kind == RefKind::Local && r.name == "topic" && !r.head)
+        );
+        assert_eq!(
+            commit_stat(
+                &top,
+                &commits[0].hash,
+                commits[0].parents.first().map(String::as_str)
+            )
+            .unwrap()
+            .files,
+            1
+        );
 
         // Paths go to git on stdin, as they are: a space, a non-ASCII letter.
         std::fs::write(dir.join("with space.txt"), "s").unwrap();
         std::fs::write(dir.join("ü.txt"), "u").unwrap();
         stage(&top, &["with space.txt".into(), "ü.txt".into()]).unwrap();
-        assert_eq!(super::status(&top).unwrap().files.iter().filter(|f| f.staged()).count(), 2);
+        assert_eq!(
+            super::status(&top)
+                .unwrap()
+                .files
+                .iter()
+                .filter(|f| f.staged())
+                .count(),
+            2
+        );
         commit(&top, "names", false).unwrap();
         let head = log(&top, &["HEAD".into()], 1, 0).unwrap().remove(0);
-        let names: Vec<String> = commit_files(&top, &head.hash, head.parents.first().map(String::as_str)).unwrap().into_iter().map(|f| f.rel).collect();
+        let names: Vec<String> =
+            commit_files(&top, &head.hash, head.parents.first().map(String::as_str))
+                .unwrap()
+                .into_iter()
+                .map(|f| f.rel)
+                .collect();
         assert_eq!(names, ["with space.txt", "ü.txt"]);
         // A staged rename is unstaged as one: the old path comes back deleted,
         // the new one untracked.
@@ -930,20 +1242,41 @@ mod tests {
         let renamed = status.files.iter().find(|f| f.rel == "moved.txt").unwrap();
         assert_eq!(renamed.renamed_from.as_deref(), Some("with space.txt"));
         unstage(&top, &["moved.txt".into(), "with space.txt".into()]).unwrap();
-        let letters: Vec<(String, char)> = super::status(&top).unwrap().files.iter().map(|f| (f.rel.clone(), f.letter())).collect();
-        assert!(letters.contains(&("moved.txt".into(), 'U')) && letters.contains(&("with space.txt".into(), 'D')), "{letters:?}");
+        let letters: Vec<(String, char)> = super::status(&top)
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| (f.rel.clone(), f.letter()))
+            .collect();
+        assert!(
+            letters.contains(&("moved.txt".into(), 'U'))
+                && letters.contains(&("with space.txt".into(), 'D')),
+            "{letters:?}"
+        );
         std::fs::rename(dir.join("moved.txt"), dir.join("with space.txt")).unwrap();
 
         std::fs::write(dir.join("a.txt"), "two").unwrap();
         let changed = super::status(&top).unwrap().files;
         discard(&top, &changed).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one more");
-        assert_eq!(show_in(&top, "HEAD", "a.txt").unwrap().as_deref(), Some("one more"));
-        assert_eq!(show_in(&top, "", "a.txt").unwrap().as_deref(), Some("one more"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "one more"
+        );
+        assert_eq!(
+            show_in(&top, "HEAD", "a.txt").unwrap().as_deref(),
+            Some("one more")
+        );
+        assert_eq!(
+            show_in(&top, "", "a.txt").unwrap().as_deref(),
+            Some("one more")
+        );
         assert_eq!(show_in(&top, "HEAD", "nope.txt").unwrap(), None);
         assert_eq!(show_in(&top, "", "nope.txt").unwrap(), None);
         // `:./name` is the file in the folder git runs in (the gutter marks use it).
-        assert_eq!(show_in(&top, "", "./a.txt").unwrap().as_deref(), Some("one more"));
+        assert_eq!(
+            show_in(&top, "", "./a.txt").unwrap().as_deref(),
+            Some("one more")
+        );
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         assert_eq!(show_in(&dir.join("sub"), "", "./a.txt"), Ok(None));
         assert_eq!(show_in(&top, "no-such-rev", "a.txt"), Ok(None));

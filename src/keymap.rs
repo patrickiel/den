@@ -59,21 +59,38 @@ pub fn init(cx: &mut App) {
     let mut commands = den_commands();
     for (extension, name, command) in crate::extensions::commands(cx) {
         let mut keys = normalize(&command.keybinding);
-        if let Err(err) = keys.split_whitespace().try_for_each(|key| Keystroke::parse(key).map(drop)) {
-            let message = format!("the keybinding \"{}\" of {} is not one den reads: {err}", command.keybinding, command.id);
+        if let Err(err) = keys
+            .split_whitespace()
+            .try_for_each(|key| Keystroke::parse(key).map(drop))
+        {
+            let message = format!(
+                "the keybinding \"{}\" of {} is not one den reads: {err}",
+                command.keybinding, command.id
+            );
             crate::backend::extensions::log(&extension, &message);
             keys.clear();
         }
         commands.push(Command {
             id: format!("{extension}.{}", command.id),
             title: format!("{name}: {}", command.title),
-            action: Box::new(crate::extensions::RunCommand { extension, command: command.id }),
+            action: Box::new(crate::extensions::RunCommand {
+                extension,
+                command: command.id,
+            }),
             context: None,
-            defaults: if keys.is_empty() { Vec::new() } else { vec![keys] },
+            defaults: if keys.is_empty() {
+                Vec::new()
+            } else {
+                vec![keys]
+            },
             shown: Vec::new(),
         });
     }
-    cx.set_global(Keymap { commands, base, applied: None });
+    cx.set_global(Keymap {
+        commands,
+        base,
+        applied: None,
+    });
     apply(cx);
     cx.observe_global::<Settings>(apply).detach();
     // A key such as Ctrl+Shift+` is another key on another layout.
@@ -86,12 +103,16 @@ pub fn init(cx: &mut App) {
 
 /// Every command, in the order Keyboard Shortcuts lists them.
 pub fn commands(cx: &App) -> &[Command] {
-    cx.try_global::<Keymap>().map_or(&[], |keymap| &keymap.commands)
+    cx.try_global::<Keymap>()
+        .map_or(&[], |keymap| &keymap.commands)
 }
 
 /// The keys `action` has, as the platform shows them (its first binding).
 pub fn keys_for(action: &dyn Action, cx: &App) -> Option<String> {
-    commands(cx).iter().find(|c| c.action.partial_eq(action)).and_then(|c| c.shown.first().cloned())
+    commands(cx)
+        .iter()
+        .find(|c| c.action.partial_eq(action))
+        .and_then(|c| c.shown.first().cloned())
 }
 
 /// The modifiers held for `action`'s keys: those of its first binding that
@@ -100,7 +121,10 @@ pub fn keys_for(action: &dyn Action, cx: &App) -> Option<String> {
 pub fn modifiers_of(action: &dyn Action, cx: &App) -> Option<Modifiers> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
-    let modifiers = keymap.bindings_for_action(action).find(|b| b.keystrokes().len() == 1).map(|b| *b.keystrokes()[0].modifiers());
+    let modifiers = keymap
+        .bindings_for_action(action)
+        .find(|b| b.keystrokes().len() == 1)
+        .map(|b| *b.keystrokes()[0].modifiers());
     modifiers.filter(Modifiers::modified)
 }
 
@@ -146,17 +170,31 @@ fn apply(cx: &mut App) {
 
 /// The whole keymap: `base`, then the commands' keys (the user's over the
 /// defaults), noting in each command the keys it got.
-fn build(commands: &mut [Command], user: &BTreeMap<String, Vec<String>>, base: &[KeyBinding], mapper: &dyn PlatformKeyboardMapper) -> Vec<KeyBinding> {
+fn build(
+    commands: &mut [Command],
+    user: &BTreeMap<String, Vec<String>>,
+    base: &[KeyBinding],
+    mapper: &dyn PlatformKeyboardMapper,
+) -> Vec<KeyBinding> {
     let mut bindings = base.to_vec();
     let mut contextual = Vec::new();
     // Everywhere first, then the contexts: of a key bound both ways, the
     // binding added later wins, so a terminal's own keys win in a terminal.
     for pass in [false, true] {
         for command in commands.iter_mut().filter(|c| c.context.is_some() == pass) {
-            let predicate = command.context.map(|c| Rc::new(KeyBindingContextPredicate::parse(c).expect("a valid key context")));
+            let predicate = command.context.map(|c| {
+                Rc::new(KeyBindingContextPredicate::parse(c).expect("a valid key context"))
+            });
             command.shown.clear();
             for keys in keys_of(command, user).to_vec() {
-                match KeyBinding::load(&normalize(&keys), command.action.boxed_clone(), predicate.clone(), false, None, mapper) {
+                match KeyBinding::load(
+                    &normalize(&keys),
+                    command.action.boxed_clone(),
+                    predicate.clone(),
+                    false,
+                    None,
+                    mapper,
+                ) {
                     Ok(binding) => {
                         command.shown.push(display(binding.keystrokes()));
                         if pass {
@@ -164,7 +202,10 @@ fn build(commands: &mut [Command], user: &BTreeMap<String, Vec<String>>, base: &
                         }
                         bindings.push(binding);
                     }
-                    Err(err) => eprintln!("den: the keys \"{keys}\" of {} are not ones den reads: {err}", command.id),
+                    Err(err) => eprintln!(
+                        "den: the keys \"{keys}\" of {} are not ones den reads: {err}",
+                        command.id
+                    ),
                 }
             }
         }
@@ -177,13 +218,19 @@ fn build(commands: &mut [Command], user: &BTreeMap<String, Vec<String>>, base: &
             continue;
         }
         let stroke = binding.keystrokes()[0].inner();
-        let Some(text) = crate::terminal::control_text(stroke) else { continue };
+        let Some(text) = crate::terminal::control_text(stroke) else {
+            continue;
+        };
         if !contextual.contains(stroke) && !passed.iter().any(|(s, _)| s == stroke) {
             passed.push((stroke.clone(), text));
         }
     }
     for (stroke, text) in passed {
-        bindings.push(KeyBinding::new(&stroke.unparse(), crate::terminal::SendText(text), Some(crate::terminal::TERMINAL)));
+        bindings.push(KeyBinding::new(
+            &stroke.unparse(),
+            crate::terminal::SendText(text),
+            Some(crate::terminal::TERMINAL),
+        ));
     }
     bindings
 }
@@ -208,7 +255,11 @@ pub fn normalize(keys: &str) -> String {
                 Some(body) => (body, true),
                 None => (stroke, false),
             };
-            let mut parts: Vec<String> = body.split('+').filter(|p| !p.is_empty()).map(word).collect();
+            let mut parts: Vec<String> = body
+                .split('+')
+                .filter(|p| !p.is_empty())
+                .map(word)
+                .collect();
             if plus {
                 parts.push("+".into());
             }
@@ -221,15 +272,32 @@ pub fn normalize(keys: &str) -> String {
 /// Keys, in either notation, as keycaps, one list per keystroke of a chord; `None` when den
 /// can't read them.
 pub fn shown_caps(keys: &str, cx: &App) -> Option<Vec<Vec<String>>> {
-    let binding = KeyBinding::load(&normalize(keys), Box::new(NoAction), None, false, None, cx.keyboard_mapper().as_ref()).ok()?;
+    let binding = KeyBinding::load(
+        &normalize(keys),
+        Box::new(NoAction),
+        None,
+        false,
+        None,
+        cx.keyboard_mapper().as_ref(),
+    )
+    .ok()?;
     let strokes = binding.keystrokes();
-    (!strokes.is_empty()).then(|| strokes.iter().map(|s| stroke_caps(s.modifiers(), key_name(s.key()))).collect())
+    (!strokes.is_empty()).then(|| {
+        strokes
+            .iter()
+            .map(|s| stroke_caps(s.modifiers(), key_name(s.key())))
+            .collect()
+    })
 }
 
 /// Keystrokes as the platform shows them:`Ctrl+K Ctrl+S` on Windows,
 /// `⌘K ⌘S` on macOS, as VS Code writes them.
 pub fn display(strokes: &[KeybindingKeystroke]) -> String {
-    strokes.iter().map(|s| display_stroke(s.modifiers(), s.key())).collect::<Vec<_>>().join(" ")
+    strokes
+        .iter()
+        .map(|s| display_stroke(s.modifiers(), s.key()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn display_stroke(m: &Modifiers, key: &str) -> String {
@@ -266,7 +334,11 @@ fn key_name(key: &str) -> String {
         "space" => "Space",
         _ => "",
     };
-    if named.is_empty() { key.to_uppercase() } else { named.to_string() }
+    if named.is_empty() {
+        key.to_uppercase()
+    } else {
+        named.to_string()
+    }
 }
 
 /// A keystroke's keycaps: on macOS one (`⇧⌘P`, as its menus write it), elsewhere
@@ -275,18 +347,30 @@ fn stroke_caps(m: &Modifiers, key: String) -> Vec<String> {
     if crate::ui::COMMAND_KEY {
         // Apple's order: ⌃⌥⇧⌘.
         let mut cap = String::new();
-        for (on, symbol) in [(m.control, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.platform, "⌘"), (m.function, "fn")] {
+        for (on, symbol) in [
+            (m.control, "⌃"),
+            (m.alt, "⌥"),
+            (m.shift, "⇧"),
+            (m.platform, "⌘"),
+            (m.function, "fn"),
+        ] {
             if on {
                 cap.push_str(symbol);
             }
         }
         vec![cap + &key]
     } else {
-        let mut caps: Vec<String> = [(m.control, "Ctrl"), (m.shift, "Shift"), (m.alt, "Alt"), (m.platform, "Win"), (m.function, "Fn")]
-            .into_iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, name)| name.to_string())
-            .collect();
+        let mut caps: Vec<String> = [
+            (m.control, "Ctrl"),
+            (m.shift, "Shift"),
+            (m.alt, "Alt"),
+            (m.platform, "Win"),
+            (m.function, "Fn"),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_string())
+        .collect();
         caps.push(key);
         caps
     }
@@ -317,76 +401,356 @@ impl Command {
 fn den_commands() -> Vec<Command> {
     use crate::*;
     let mut list = vec![
-        command("den.showCommands", "Show All Commands", ShowCommands, &["ctrl-shift-p", "f1"], &["cmd-shift-p", "f1"]),
+        command(
+            "den.showCommands",
+            "Show All Commands",
+            ShowCommands,
+            &["ctrl-shift-p", "f1"],
+            &["cmd-shift-p", "f1"],
+        ),
         // File
-        command("den.newFile", "File: New Untitled Text File", NewFile, &["ctrl-n"], &["cmd-n"]),
-        command("den.openFolder", "File: Open Folder…", OpenFolder, &["ctrl-k ctrl-o", "ctrl-shift-o"], &["cmd-k cmd-o", "cmd-shift-o"]),
-        command("den.openFolderInNewWindow", "File: Open Folder in New Window…", OpenFolderInNewWindow, &["ctrl-shift-n"], &["cmd-shift-n"]),
-        command("den.openFiles", "File: Open Files…", OpenFiles, &["ctrl-o"], &["cmd-o"]),
+        command(
+            "den.newFile",
+            "File: New Untitled Text File",
+            NewFile,
+            &["ctrl-n"],
+            &["cmd-n"],
+        ),
+        command(
+            "den.openFolder",
+            "File: Open Folder…",
+            OpenFolder,
+            &["ctrl-k ctrl-o", "ctrl-shift-o"],
+            &["cmd-k cmd-o", "cmd-shift-o"],
+        ),
+        command(
+            "den.openFolderInNewWindow",
+            "File: Open Folder in New Window…",
+            OpenFolderInNewWindow,
+            &["ctrl-shift-n"],
+            &["cmd-shift-n"],
+        ),
+        command(
+            "den.openFiles",
+            "File: Open Files…",
+            OpenFiles,
+            &["ctrl-o"],
+            &["cmd-o"],
+        ),
         command("den.save", "File: Save", SaveFile, &["ctrl-s"], &["cmd-s"]),
-        command("den.closeTab", "View: Close Tab", CloseTab, &["ctrl-w", "ctrl-f4", "ctrl-shift-w"], &["cmd-w"]),
-        command("den.closeGroup", "View: Close Group", CloseGroup, &["ctrl-k w", "ctrl-shift-q"], &["cmd-k w"]),
+        command(
+            "den.closeTab",
+            "View: Close Tab",
+            CloseTab,
+            &["ctrl-w", "ctrl-f4", "ctrl-shift-w"],
+            &["cmd-w"],
+        ),
+        command(
+            "den.closeGroup",
+            "View: Close Group",
+            CloseGroup,
+            &["ctrl-k w", "ctrl-shift-q"],
+            &["cmd-k w"],
+        ),
         // Editor
-        command("den.formatDocument", "Editor: Format Document", FormatDocument, &["shift-alt-f"], &["shift-alt-f"]),
-        command("den.goToLine", "Editor: Go to Line…", GoToLine, &["ctrl-g"], &["ctrl-g"]),
+        command(
+            "den.formatDocument",
+            "Editor: Format Document",
+            FormatDocument,
+            &["shift-alt-f"],
+            &["shift-alt-f"],
+        ),
+        command(
+            "den.goToLine",
+            "Editor: Go to Line…",
+            GoToLine,
+            &["ctrl-g"],
+            &["ctrl-g"],
+        ),
         // Preferences
-        command("den.openSettings", "Preferences: Open Settings", OpenSettings, &["ctrl-,"], &["cmd-,"]),
-        command("den.openKeyboardShortcuts", "Preferences: Keyboard Shortcuts", OpenKeyboardShortcuts, &["ctrl-k ctrl-s"], &["cmd-k cmd-s"]),
+        command(
+            "den.openSettings",
+            "Preferences: Open Settings",
+            OpenSettings,
+            &["ctrl-,"],
+            &["cmd-,"],
+        ),
+        command(
+            "den.openKeyboardShortcuts",
+            "Preferences: Keyboard Shortcuts",
+            OpenKeyboardShortcuts,
+            &["ctrl-k ctrl-s"],
+            &["cmd-k cmd-s"],
+        ),
         // Sidebar
-        command("den.toggleSidebar", "View: Toggle Sidebar", ToggleSidebar, &["ctrl-b"], &["cmd-b"]),
-        command("den.showExplorer", "View: Show Explorer", FocusExplorer, &["ctrl-shift-e"], &["cmd-shift-e"]),
-        command("den.showSearch", "View: Search in Files", FocusSearch, &["ctrl-shift-f"], &["cmd-shift-f"]),
-        command("den.replaceInFiles", "View: Replace in Files", ReplaceInFiles, &["ctrl-shift-h"], &["cmd-shift-h"]),
-        command("den.showSourceControl", "View: Show Source Control", FocusScm, &["ctrl-shift-g"], &["ctrl-shift-g"]),
-        command("den.showExtensions", "View: Show Extensions", FocusExtensions, &["ctrl-shift-x"], &["cmd-shift-x"]),
+        command(
+            "den.toggleSidebar",
+            "View: Toggle Sidebar",
+            ToggleSidebar,
+            &["ctrl-b"],
+            &["cmd-b"],
+        ),
+        command(
+            "den.showExplorer",
+            "View: Show Explorer",
+            FocusExplorer,
+            &["ctrl-shift-e"],
+            &["cmd-shift-e"],
+        ),
+        command(
+            "den.showSearch",
+            "View: Search in Files",
+            FocusSearch,
+            &["ctrl-shift-f"],
+            &["cmd-shift-f"],
+        ),
+        command(
+            "den.replaceInFiles",
+            "View: Replace in Files",
+            ReplaceInFiles,
+            &["ctrl-shift-h"],
+            &["cmd-shift-h"],
+        ),
+        command(
+            "den.showSourceControl",
+            "View: Show Source Control",
+            FocusScm,
+            &["ctrl-shift-g"],
+            &["ctrl-shift-g"],
+        ),
+        command(
+            "den.showExtensions",
+            "View: Show Extensions",
+            FocusExtensions,
+            &["ctrl-shift-x"],
+            &["cmd-shift-x"],
+        ),
         // Groups and tabs
-        command("den.splitRight", "View: Split Right", SplitRight, &["ctrl-\\", "ctrl-shift-d"], &["cmd-\\", "cmd-shift-d"]),
-        command("den.splitDown", "View: Split Down", SplitDown, &["ctrl-k ctrl-\\", "ctrl-shift--"], &["cmd-k cmd-\\", "cmd-shift--"]),
-        command("den.toggleMaximizeGroup", "View: Toggle Maximize Group", ToggleMaximizeGroup, &["ctrl-k ctrl-m"], &["cmd-k cmd-m"]),
-        command("den.toggleGroupTiles", "View: Toggle Group Tiles (Every Tab at Once)", ToggleGroupTiles, &["ctrl-k ctrl-t"], &["cmd-k cmd-t"]),
-        command("den.nextTab", "View: Next Tab", NextTab, &["ctrl-tab", "ctrl-pagedown"], &["ctrl-tab", "cmd-alt-right", "cmd-shift-]", "ctrl-pagedown"]),
-        command("den.previousTab", "View: Previous Tab", PrevTab, &["ctrl-shift-tab", "ctrl-pageup"], &["ctrl-shift-tab", "cmd-alt-left", "cmd-shift-[", "ctrl-pageup"]),
+        command(
+            "den.splitRight",
+            "View: Split Right",
+            SplitRight,
+            &["ctrl-\\", "ctrl-shift-d"],
+            &["cmd-\\", "cmd-shift-d"],
+        ),
+        command(
+            "den.splitDown",
+            "View: Split Down",
+            SplitDown,
+            &["ctrl-k ctrl-\\", "ctrl-shift--"],
+            &["cmd-k cmd-\\", "cmd-shift--"],
+        ),
+        command(
+            "den.toggleMaximizeGroup",
+            "View: Toggle Maximize Group",
+            ToggleMaximizeGroup,
+            &["ctrl-k ctrl-m"],
+            &["cmd-k cmd-m"],
+        ),
+        command(
+            "den.toggleGroupTiles",
+            "View: Toggle Group Tiles (Every Tab at Once)",
+            ToggleGroupTiles,
+            &["ctrl-k ctrl-t"],
+            &["cmd-k cmd-t"],
+        ),
+        command(
+            "den.nextTab",
+            "View: Next Tab",
+            NextTab,
+            &["ctrl-tab", "ctrl-pagedown"],
+            &["ctrl-tab", "cmd-alt-right", "cmd-shift-]", "ctrl-pagedown"],
+        ),
+        command(
+            "den.previousTab",
+            "View: Previous Tab",
+            PrevTab,
+            &["ctrl-shift-tab", "ctrl-pageup"],
+            &[
+                "ctrl-shift-tab",
+                "cmd-alt-left",
+                "cmd-shift-[",
+                "ctrl-pageup",
+            ],
+        ),
     ];
     for n in 1..=9 {
         let (windows, mac) = (format!("alt-{n}"), format!("ctrl-{n}"));
-        list.push(command(&format!("den.openTab{n}"), &format!("View: Open Tab {n}"), OpenTab(n), &[&windows], &[&mac]));
+        list.push(command(
+            &format!("den.openTab{n}"),
+            &format!("View: Open Tab {n}"),
+            OpenTab(n),
+            &[&windows],
+            &[&mac],
+        ));
     }
-    list.push(command("den.openLastTab", "View: Open Last Tab", OpenTab(0), &["alt-0"], &["ctrl-0"]));
+    list.push(command(
+        "den.openLastTab",
+        "View: Open Last Tab",
+        OpenTab(0),
+        &["alt-0"],
+        &["ctrl-0"],
+    ));
     for n in 1..=8 {
         let (windows, mac) = (format!("ctrl-{n}"), format!("cmd-{n}"));
-        list.push(command(&format!("den.focusGroup{n}"), &format!("View: Focus Group {n}"), FocusGroup(n), &[&windows], &[&mac]));
+        list.push(command(
+            &format!("den.focusGroup{n}"),
+            &format!("View: Focus Group {n}"),
+            FocusGroup(n),
+            &[&windows],
+            &[&mac],
+        ));
     }
     // The Nth pinned preset on the tab strips; no keys until the user sets some.
     for n in 1..=9 {
-        list.push(command(&format!("den.openPreset{n}"), &format!("Terminal: Open Preset {n}"), OpenPreset(n), &[], &[]));
+        list.push(command(
+            &format!("den.openPreset{n}"),
+            &format!("Terminal: Open Preset {n}"),
+            OpenPreset(n),
+            &[],
+            &[],
+        ));
     }
     list.extend([
-        command("den.focusLeft", "View: Focus Group on the Left", FocusLeft, &["ctrl-k ctrl-left"], &["cmd-k cmd-left"]),
-        command("den.focusRight", "View: Focus Group on the Right", FocusRight, &["ctrl-k ctrl-right"], &["cmd-k cmd-right"]),
-        command("den.focusUp", "View: Focus Group Above", FocusUp, &["ctrl-k ctrl-up"], &["cmd-k cmd-up"]),
-        command("den.focusDown", "View: Focus Group Below", FocusDown, &["ctrl-k ctrl-down"], &["cmd-k cmd-down"]),
-        command("den.navigateBack", "Go: Back", NavigateBack, &["alt-left"], &["ctrl--"]),
-        command("den.navigateForward", "Go: Forward", NavigateForward, &["alt-right"], &["ctrl-shift--"]),
+        command(
+            "den.focusLeft",
+            "View: Focus Group on the Left",
+            FocusLeft,
+            &["ctrl-k ctrl-left"],
+            &["cmd-k cmd-left"],
+        ),
+        command(
+            "den.focusRight",
+            "View: Focus Group on the Right",
+            FocusRight,
+            &["ctrl-k ctrl-right"],
+            &["cmd-k cmd-right"],
+        ),
+        command(
+            "den.focusUp",
+            "View: Focus Group Above",
+            FocusUp,
+            &["ctrl-k ctrl-up"],
+            &["cmd-k cmd-up"],
+        ),
+        command(
+            "den.focusDown",
+            "View: Focus Group Below",
+            FocusDown,
+            &["ctrl-k ctrl-down"],
+            &["cmd-k cmd-down"],
+        ),
+        command(
+            "den.navigateBack",
+            "Go: Back",
+            NavigateBack,
+            &["alt-left"],
+            &["ctrl--"],
+        ),
+        command(
+            "den.navigateForward",
+            "Go: Forward",
+            NavigateForward,
+            &["alt-right"],
+            &["ctrl-shift--"],
+        ),
         command("den.saveLayout", "View: Save Layout…", SaveLayout, &[], &[]),
-        command("den.resetLayout", "View: Reset Layout", ResetLayout, &[], &[]),
+        command(
+            "den.resetLayout",
+            "View: Reset Layout",
+            ResetLayout,
+            &[],
+            &[],
+        ),
         // Terminals and browsers
-        command("den.newTerminal", "Terminal: New Terminal", NewTerminal, &["ctrl-shift-`", "ctrl-shift-t"], &["ctrl-shift-`", "cmd-shift-t"]),
-        command("den.newAgent", "Terminal: New Coding Agent", NewAgent, &[], &[]),
-        command("terminal.copy", "Terminal: Copy Selection", crate::terminal::Copy, &["ctrl-shift-c"], &["cmd-c"]).only_in(crate::terminal::TERMINAL),
-        command("terminal.paste", "Terminal: Paste", crate::terminal::Paste, &["ctrl-v", "ctrl-shift-v"], &["cmd-v"]).only_in(crate::terminal::TERMINAL),
-        command("terminal.scrollPageUp", "Terminal: Scroll Up a Page", crate::terminal::ScrollPageUp, &["shift-pageup"], &["shift-pageup"]).only_in(crate::terminal::TERMINAL),
-        command("terminal.scrollPageDown", "Terminal: Scroll Down a Page", crate::terminal::ScrollPageDown, &["shift-pagedown"], &["shift-pagedown"]).only_in(crate::terminal::TERMINAL),
-        command("den.newBrowser", "Browser: New Browser", NewBrowser, &["ctrl-shift-b"], &["cmd-shift-b"]),
-        command("diff.openFile", "Diff: Open the File", crate::diff::OpenDiffedFile, &["ctrl-enter"], &["cmd-enter"]).only_in(crate::diff::DIFF),
+        command(
+            "den.newTerminal",
+            "Terminal: New Terminal",
+            NewTerminal,
+            &["ctrl-shift-`", "ctrl-shift-t"],
+            &["ctrl-shift-`", "cmd-shift-t"],
+        ),
+        command(
+            "den.newAgent",
+            "Terminal: New Coding Agent",
+            NewAgent,
+            &[],
+            &[],
+        ),
+        command(
+            "terminal.copy",
+            "Terminal: Copy Selection",
+            crate::terminal::Copy,
+            &["ctrl-shift-c"],
+            &["cmd-c"],
+        )
+        .only_in(crate::terminal::TERMINAL),
+        command(
+            "terminal.paste",
+            "Terminal: Paste",
+            crate::terminal::Paste,
+            &["ctrl-v", "ctrl-shift-v"],
+            &["cmd-v"],
+        )
+        .only_in(crate::terminal::TERMINAL),
+        command(
+            "terminal.scrollPageUp",
+            "Terminal: Scroll Up a Page",
+            crate::terminal::ScrollPageUp,
+            &["shift-pageup"],
+            &["shift-pageup"],
+        )
+        .only_in(crate::terminal::TERMINAL),
+        command(
+            "terminal.scrollPageDown",
+            "Terminal: Scroll Down a Page",
+            crate::terminal::ScrollPageDown,
+            &["shift-pagedown"],
+            &["shift-pagedown"],
+        )
+        .only_in(crate::terminal::TERMINAL),
+        command(
+            "den.newBrowser",
+            "Browser: New Browser",
+            NewBrowser,
+            &["ctrl-shift-b"],
+            &["cmd-shift-b"],
+        ),
+        command(
+            "diff.openFile",
+            "Diff: Open the File",
+            crate::diff::OpenDiffedFile,
+            &["ctrl-enter"],
+            &["cmd-enter"],
+        )
+        .only_in(crate::diff::DIFF),
         // The app
-        command("den.checkForUpdates", "den: Check for Updates…", CheckForUpdates, &[], &[]),
+        command(
+            "den.checkForUpdates",
+            "den: Check for Updates…",
+            CheckForUpdates,
+            &[],
+            &[],
+        ),
         command("den.quit", "den: Quit", Quit, &["alt-f4"], &["cmd-q"]),
     ]);
     if crate::ui::COMMAND_KEY {
         list.extend([
-            command("den.minimize", "Window: Minimize", Minimize, &[], &["cmd-m"]),
+            command(
+                "den.minimize",
+                "Window: Minimize",
+                Minimize,
+                &[],
+                &["cmd-m"],
+            ),
             command("den.hide", "den: Hide den", HideApp, &[], &["cmd-h"]),
-            command("den.hideOthers", "den: Hide Others", HideOthers, &[], &["alt-cmd-h"]),
+            command(
+                "den.hideOthers",
+                "den: Hide Others",
+                HideOthers,
+                &[],
+                &["alt-cmd-h"],
+            ),
         ]);
     }
     list
@@ -395,50 +759,78 @@ fn den_commands() -> Vec<Command> {
 /// The command palette: every command, by name, with its keys.
 pub fn open_palette(window: &mut Window, cx: &mut App) {
     use gpui_kit::component::{
-        ActiveTheme as _, WindowExt as _, h_flex,
+        ActiveTheme as _, WindowExt as _,
         command::{Command as Palette, CommandItem, CommandState},
+        h_flex,
     };
     /// A command's title, keys and action.
     type Entry = (SharedString, Option<String>, Box<dyn Action>);
     let state = cx.new(|cx| CommandState::new(window, cx));
-    let entries: Rc<Vec<Entry>> =
-        Rc::new(commands(cx).iter().map(|c| (SharedString::from(c.title.clone()), c.shown.first().cloned(), c.action.boxed_clone())).collect());
+    let entries: Rc<Vec<Entry>> = Rc::new(
+        commands(cx)
+            .iter()
+            .map(|c| {
+                (
+                    SharedString::from(c.title.clone()),
+                    c.shown.first().cloned(),
+                    c.action.boxed_clone(),
+                )
+            })
+            .collect(),
+    );
     window.open_dialog(cx, {
         let state = state.clone();
         move |dialog, _, _| {
             let items = entries.iter().map(|(title, keys, _)| {
                 let (title, keys) = (title.clone(), keys.clone());
-                CommandItem::new().label(title.clone()).keywords(keys.clone()).child(move |_, cx| {
-                    h_flex()
-                        .w_full()
-                        .gap_4()
-                        .justify_between()
-                        .child(div().min_w_0().truncate().child(title.clone()))
-                        .children(keys.clone().map(|keys| div().flex_none().text_xs().text_color(cx.theme().muted_foreground).child(keys)))
-                })
+                CommandItem::new()
+                    .label(title.clone())
+                    .keywords(keys.clone())
+                    .child(move |_, cx| {
+                        h_flex()
+                            .w_full()
+                            .gap_4()
+                            .justify_between()
+                            .child(div().min_w_0().truncate().child(title.clone()))
+                            .children(keys.clone().map(|keys| {
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(keys)
+                            }))
+                    })
             });
             let entries = entries.clone();
-            dialog.w(px(640.)).margin_top(px(48.)).close_button(false).child(
-                Palette::new(&state)
-                    .items(items)
-                    .placeholder("Type the name of a command")
-                    .bordered(false)
-                    .on_confirm(move |ix, window, cx| {
-                        let Some((_, _, action)) = entries.get(ix.row) else { return };
-                        let action = action.boxed_clone();
-                        window.close_dialog(cx);
-                        // Where the keys would have sent it, once the dialog is gone.
-                        window.defer(cx, move |window, cx| {
-                            if let Some(focus) = crate::workspace::action_target(window, cx) {
-                                focus.dispatch_action(&*action, window, cx);
-                            }
-                        });
-                    })
-                    .on_cancel(|window, cx| window.close_dialog(cx)),
-            )
+            dialog
+                .w(px(640.))
+                .margin_top(px(48.))
+                .close_button(false)
+                .child(
+                    Palette::new(&state)
+                        .items(items)
+                        .placeholder("Type the name of a command")
+                        .bordered(false)
+                        .on_confirm(move |ix, window, cx| {
+                            let Some((_, _, action)) = entries.get(ix.row) else {
+                                return;
+                            };
+                            let action = action.boxed_clone();
+                            window.close_dialog(cx);
+                            // Where the keys would have sent it, once the dialog is gone.
+                            window.defer(cx, move |window, cx| {
+                                if let Some(focus) = crate::workspace::action_target(window, cx) {
+                                    focus.dispatch_action(&*action, window, cx);
+                                }
+                            });
+                        })
+                        .on_cancel(|window, cx| window.close_dialog(cx)),
+                )
         }
     });
-    window.defer(cx, move |window, cx| state.update(cx, |state, cx| state.focus(window, cx)));
+    window.defer(cx, move |window, cx| {
+        state.update(cx, |state, cx| state.focus(window, cx))
+    });
 }
 
 #[cfg(test)]
@@ -465,7 +857,18 @@ mod tests {
         for command in &commands {
             assert!(ids.insert(command.id.clone()), "{} twice", command.id);
             for keys in &command.defaults {
-                assert!(KeyBinding::load(keys, command.action.boxed_clone(), None, false, None, &DummyKeyboardMapper).is_ok(), "{keys}");
+                assert!(
+                    KeyBinding::load(
+                        keys,
+                        command.action.boxed_clone(),
+                        None,
+                        false,
+                        None,
+                        &DummyKeyboardMapper
+                    )
+                    .is_ok(),
+                    "{keys}"
+                );
             }
         }
     }
@@ -475,7 +878,9 @@ mod tests {
         let mut seen = std::collections::HashMap::new();
         for command in den_commands() {
             for keys in &command.defaults {
-                if let Some(other) = seen.insert((command.context, normalize(keys)), command.id.clone()) {
+                if let Some(other) =
+                    seen.insert((command.context, normalize(keys)), command.id.clone())
+                {
                     panic!("{keys} is {other}'s and {}'s", command.id);
                 }
             }
@@ -484,16 +889,34 @@ mod tests {
 
     /// What `keys` run where `context` (a terminal, `None` elsewhere) has the
     /// keyboard: the winning action, and whether more keys may follow.
-    fn run(keymap: &gpui_kit::Keymap, keys: &str, context: Option<&str>) -> (Option<Box<dyn gpui_kit::Action>>, bool) {
-        let input: Vec<_> = keys.split(' ').map(|k| gpui_kit::Keystroke::parse(k).unwrap()).collect();
-        let stack: Vec<_> = context.into_iter().map(|c| gpui_kit::KeyContext::parse(c).unwrap()).collect();
+    fn run(
+        keymap: &gpui_kit::Keymap,
+        keys: &str,
+        context: Option<&str>,
+    ) -> (Option<Box<dyn gpui_kit::Action>>, bool) {
+        let input: Vec<_> = keys
+            .split(' ')
+            .map(|k| gpui_kit::Keystroke::parse(k).unwrap())
+            .collect();
+        let stack: Vec<_> = context
+            .into_iter()
+            .map(|c| gpui_kit::KeyContext::parse(c).unwrap())
+            .collect();
         let (bindings, pending) = keymap.bindings_for_input(&input, &stack);
         (bindings.first().map(|b| b.action().boxed_clone()), pending)
     }
 
     fn keymap(user: &[(&str, &[&str])]) -> gpui_kit::Keymap {
-        let user = user.iter().map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect())).collect();
-        gpui_kit::Keymap::new(super::build(&mut den_commands(), &user, &[], &DummyKeyboardMapper))
+        let user = user
+            .iter()
+            .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
+            .collect();
+        gpui_kit::Keymap::new(super::build(
+            &mut den_commands(),
+            &user,
+            &[],
+            &DummyKeyboardMapper,
+        ))
     }
 
     #[test]
@@ -505,27 +928,94 @@ mod tests {
         let terminal = Some(crate::terminal::TERMINAL);
         // Claude Code's Ctrl+O, and Ctrl+W deleting a word.
         let (action, _) = run(&keymap, "ctrl-o", terminal);
-        assert!(action.unwrap().partial_eq(&crate::terminal::SendText("\x0f".into())));
+        assert!(
+            action
+                .unwrap()
+                .partial_eq(&crate::terminal::SendText("\x0f".into()))
+        );
         let (action, _) = run(&keymap, "ctrl-w", terminal);
-        assert!(action.unwrap().partial_eq(&crate::terminal::SendText("\x17".into())));
+        assert!(
+            action
+                .unwrap()
+                .partial_eq(&crate::terminal::SendText("\x17".into()))
+        );
         // Elsewhere they are den's.
-        assert!(run(&keymap, "ctrl-o", None).0.unwrap().partial_eq(&crate::OpenFiles));
-        assert!(run(&keymap, "ctrl-w", None).0.unwrap().partial_eq(&crate::CloseTab));
+        assert!(
+            run(&keymap, "ctrl-o", None)
+                .0
+                .unwrap()
+                .partial_eq(&crate::OpenFiles)
+        );
+        assert!(
+            run(&keymap, "ctrl-w", None)
+                .0
+                .unwrap()
+                .partial_eq(&crate::CloseTab)
+        );
         // The terminal's own Ctrl+V, keys with Shift, and Ctrl+digit stay commands.
-        assert!(run(&keymap, "ctrl-v", terminal).0.unwrap().partial_eq(&crate::terminal::Paste));
-        assert!(run(&keymap, "ctrl-1", terminal).0.unwrap().partial_eq(&crate::FocusGroup(1)));
-        assert!(run(&keymap, "ctrl-shift-w", terminal).0.unwrap().partial_eq(&crate::CloseTab));
+        assert!(
+            run(&keymap, "ctrl-v", terminal)
+                .0
+                .unwrap()
+                .partial_eq(&crate::terminal::Paste)
+        );
+        assert!(
+            run(&keymap, "ctrl-1", terminal)
+                .0
+                .unwrap()
+                .partial_eq(&crate::FocusGroup(1))
+        );
+        assert!(
+            run(&keymap, "ctrl-shift-w", terminal)
+                .0
+                .unwrap()
+                .partial_eq(&crate::CloseTab)
+        );
         // Ctrl+K waits for the chord's second key.
         assert!(matches!(run(&keymap, "ctrl-k", terminal), (None, true)));
-        assert!(run(&keymap, "ctrl-k ctrl-o", terminal).0.unwrap().partial_eq(&crate::OpenFolder));
+        assert!(
+            run(&keymap, "ctrl-k ctrl-o", terminal)
+                .0
+                .unwrap()
+                .partial_eq(&crate::OpenFolder)
+        );
     }
 
     #[test]
     fn the_users_keys_replace_the_defaults() {
         let keymap = keymap(&[("den.newTerminal", &["ctrl+alt+t"]), ("den.save", &[])]);
-        assert!(run(&keymap, "ctrl-alt-t", None).0.unwrap().partial_eq(&crate::NewTerminal));
-        assert!(run(&keymap, if crate::ui::COMMAND_KEY { "cmd-shift-t" } else { "ctrl-shift-t" }, None).0.is_none());
-        assert!(run(&keymap, if crate::ui::COMMAND_KEY { "cmd-s" } else { "ctrl-s" }, None).0.is_none());
+        assert!(
+            run(&keymap, "ctrl-alt-t", None)
+                .0
+                .unwrap()
+                .partial_eq(&crate::NewTerminal)
+        );
+        assert!(
+            run(
+                &keymap,
+                if crate::ui::COMMAND_KEY {
+                    "cmd-shift-t"
+                } else {
+                    "ctrl-shift-t"
+                },
+                None
+            )
+            .0
+            .is_none()
+        );
+        assert!(
+            run(
+                &keymap,
+                if crate::ui::COMMAND_KEY {
+                    "cmd-s"
+                } else {
+                    "ctrl-s"
+                },
+                None
+            )
+            .0
+            .is_none()
+        );
     }
 
     #[test]

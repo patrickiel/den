@@ -21,8 +21,8 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use serde_json::{Value, json};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
+use serde_json::{Value, json};
 use wry::{
     NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
@@ -45,8 +45,16 @@ pub fn normalize_url(input: &str) -> String {
     let lower = text.to_lowercase();
     // "localhost:3000" looks like a scheme too; only "x://" and the schemes
     // without slashes count.
-    let scheme = lower.split_once("://").is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c)));
-    if scheme || ["about:", "data:", "mailto:", "javascript:"].iter().any(|p| lower.starts_with(p)) {
+    let scheme = lower.split_once("://").is_some_and(|(s, _)| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    });
+    if scheme
+        || ["about:", "data:", "mailto:", "javascript:"]
+            .iter()
+            .any(|p| lower.starts_with(p))
+    {
         return text.to_string();
     }
     let search = || format!("https://www.google.com/search?q={}", encode(text));
@@ -54,7 +62,10 @@ pub fn normalize_url(input: &str) -> String {
         return search();
     }
     let host = text.split('/').next().unwrap_or("");
-    let host = host.rsplit_once(':').filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+    let host = host
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .map_or(host, |(h, _)| h);
     let loopback = host.starts_with("127.") && host.split('.').count() == 4;
     if host == "localhost" || loopback {
         return format!("http://{text}");
@@ -68,7 +79,9 @@ pub fn normalize_url(input: &str) -> String {
 fn encode(text: &str) -> String {
     text.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -128,9 +141,15 @@ fn profile_dir() -> PathBuf {
 
 impl BrowserPanel {
     pub fn new(url: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let url = url.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| Settings::get(cx).browser_home.clone());
+        let url = url
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| Settings::get(cx).browser_home.clone());
         let url = normalize_url(&url);
-        let url_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search or type a URL").default_value(url.clone()));
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search or type a URL")
+                .default_value(url.clone())
+        });
         let (tx, mut rx) = mpsc::unbounded::<PageEvent>();
         let (title_tx, load_tx, window_tx) = (tx.clone(), tx.clone(), tx);
         // WebView2 is created with a nested message loop (wry waits for its
@@ -146,10 +165,15 @@ impl BrowserPanel {
                     let mut context = WebContext::new(Some(profile_dir()));
                     WebViewBuilder::new_with_web_context(&mut context)
                         .with_url(&start_url)
-                        .with_bounds(Rect { position: LogicalPosition::new(0, 0).into(), size: LogicalSize::new(1, 1).into() })
+                        .with_bounds(Rect {
+                            position: LogicalPosition::new(0, 0).into(),
+                            size: LogicalSize::new(1, 1).into(),
+                        })
                         .with_visible(false)
                         .with_focused(false)
-                        .with_document_title_changed_handler(move |title| _ = title_tx.unbounded_send(PageEvent::Title(title)))
+                        .with_document_title_changed_handler(move |title| {
+                            _ = title_tx.unbounded_send(PageEvent::Title(title))
+                        })
                         .with_on_page_load_handler(move |event, url| {
                             let event = match event {
                                 PageLoadEvent::Started => PageEvent::Loading(url),
@@ -169,7 +193,15 @@ impl BrowserPanel {
             let alive = this.update(cx, |this, cx| {
                 match built {
                     Ok(webview) => this.webview = Some(Rc::new(webview)),
-                    Err(err) => this.error = Some(format!("Cannot start the browser ({}): {err}", if cfg!(windows) { "WebView2" } else { "WebKit" }).into()),
+                    Err(err) => {
+                        this.error = Some(
+                            format!(
+                                "Cannot start the browser ({}): {err}",
+                                if cfg!(windows) { "WebView2" } else { "WebKit" }
+                            )
+                            .into(),
+                        )
+                    }
                 }
                 cx.notify();
             });
@@ -177,17 +209,24 @@ impl BrowserPanel {
                 return;
             }
             while let Some(event) = rx.next().await {
-                if this.update(cx, |this, cx| this.page_event(event, cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| this.page_event(event, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
         });
-        let _subscriptions = vec![cx.subscribe_in(&url_input, window, |this, input, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let text = input.read(cx).value().to_string();
-                this.navigate(&text, window, cx);
-            }
-        })];
+        let _subscriptions = vec![cx.subscribe_in(
+            &url_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let text = input.read(cx).value().to_string();
+                    this.navigate(&text, window, cx);
+                }
+            },
+        )];
         Self {
             focus_handle: cx.focus_handle(),
             webview: None,
@@ -221,7 +260,9 @@ impl BrowserPanel {
         let url = self.url.clone();
         let input = self.url_input.clone();
         cx.defer(move |cx| {
-            let Some(window) = cx.active_window() else { return };
+            let Some(window) = cx.active_window() else {
+                return;
+            };
             _ = window.update(cx, |_, window, cx| {
                 if !input.read(cx).focus_handle(cx).is_focused(window) {
                     input.update(cx, |input, cx| input.set_value(url, window, cx));
@@ -269,7 +310,6 @@ impl BrowserPanel {
             _ = webview.set_visible(shown && self.bounds.get().is_some());
         }
     }
-
 
     /// The page is a child of native window `from`, which is closing (its
     /// tab moved out of a floating window): it moves to `to` now, as a
@@ -319,8 +359,19 @@ impl Pane for BrowserPanel {
         if !title.is_empty() {
             return title.chars().take(40).collect::<String>().into();
         }
-        let host = self.url.split("://").nth(1).unwrap_or(&self.url).split('/').next().unwrap_or("");
-        if host.is_empty() { "Browser".into() } else { host.to_string().into() }
+        let host = self
+            .url
+            .split("://")
+            .nth(1)
+            .unwrap_or(&self.url)
+            .split('/')
+            .next()
+            .unwrap_or("");
+        if host.is_empty() {
+            "Browser".into()
+        } else {
+            host.to_string().into()
+        }
     }
 
     fn dump(&self, _: &App) -> Value {
@@ -331,8 +382,19 @@ impl Pane for BrowserPanel {
 impl Render for BrowserPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let tool = |id: &'static str, icon: IconName, tip: &'static str| Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip);
-        let (bounds, shown, webview, parent) = (self.bounds.clone(), self.shown.clone(), self.webview.clone(), self.parent.clone());
+        let tool = |id: &'static str, icon: IconName, tip: &'static str| {
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(Icon::new(icon))
+                .tooltip(tip)
+        };
+        let (bounds, shown, webview, parent) = (
+            self.bounds.clone(),
+            self.shown.clone(),
+            self.webview.clone(),
+            self.parent.clone(),
+        );
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -344,21 +406,52 @@ impl Render for BrowserPanel {
                     .py_1()
                     .border_b_1()
                     .border_color(theme.border)
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.take_focus()))
-                    .child(tool("back", IconName::ArrowLeft, "Back").on_click(cx.listener(|this, _, _, _| this.script("history.back()"))))
-                    .child(tool("forward", IconName::ArrowRight, "Forward").on_click(cx.listener(|this, _, _, _| this.script("history.forward()"))))
-                    .child(
-                        tool("reload", if self.loading { IconName::X } else { IconName::RotateCw }, if self.loading { "Stop" } else { "Reload" })
-                            .on_click(cx.listener(|this, _, _, _| this.script(if this.loading { "window.stop()" } else { "location.reload()" }))),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.take_focus()),
                     )
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.url_input).small())),
+                    .child(
+                        tool("back", IconName::ArrowLeft, "Back")
+                            .on_click(cx.listener(|this, _, _, _| this.script("history.back()"))),
+                    )
+                    .child(
+                        tool("forward", IconName::ArrowRight, "Forward").on_click(
+                            cx.listener(|this, _, _, _| this.script("history.forward()")),
+                        ),
+                    )
+                    .child(
+                        tool(
+                            "reload",
+                            if self.loading {
+                                IconName::X
+                            } else {
+                                IconName::RotateCw
+                            },
+                            if self.loading { "Stop" } else { "Reload" },
+                        )
+                        .on_click(cx.listener(|this, _, _, _| {
+                            this.script(if this.loading {
+                                "window.stop()"
+                            } else {
+                                "location.reload()"
+                            })
+                        })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.url_input).small()),
+                    ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .when_some(self.error.clone(), |this, error| this.child(div().p_4().text_color(theme.danger).child(error)))
+                    .when_some(self.error.clone(), |this, error| {
+                        this.child(div().p_4().text_color(theme.danger).child(error))
+                    })
                     .child(
                         // Puts the native page where this area is drawn.
                         canvas(
@@ -370,7 +463,8 @@ impl Render for BrowserPanel {
                                 #[cfg(windows)]
                                 if let Some(hwnd) = hwnd(window)
                                     && parent.get() != Some(hwnd)
-                                    && wry::WebViewExtWindows::reparent(webview.as_ref(), hwnd).is_ok()
+                                    && wry::WebViewExtWindows::reparent(webview.as_ref(), hwnd)
+                                        .is_ok()
                                 {
                                     parent.set(Some(hwnd));
                                     bounds.set(None);
@@ -380,8 +474,16 @@ impl Render for BrowserPanel {
                                 if bounds.get() != Some(area) {
                                     bounds.set(Some(area));
                                     _ = webview.set_bounds(Rect {
-                                        position: LogicalPosition::new(area.left().as_f32(), area.top().as_f32()).into(),
-                                        size: LogicalSize::new(area.size.width.as_f32().max(1.), area.size.height.as_f32().max(1.)).into(),
+                                        position: LogicalPosition::new(
+                                            area.left().as_f32(),
+                                            area.top().as_f32(),
+                                        )
+                                        .into(),
+                                        size: LogicalSize::new(
+                                            area.size.width.as_f32().max(1.),
+                                            area.size.height.as_f32().max(1.),
+                                        )
+                                        .into(),
                                     });
                                 }
                                 if shown.get() {
@@ -404,8 +506,14 @@ mod tests {
         assert_eq!(normalize_url("https://x.dev/a"), "https://x.dev/a");
         assert_eq!(normalize_url("localhost:5173"), "http://localhost:5173");
         assert_eq!(normalize_url("127.0.0.1:8080/x"), "http://127.0.0.1:8080/x");
-        assert_eq!(normalize_url("example.com/docs"), "https://example.com/docs");
-        assert_eq!(normalize_url("rust gpui"), "https://www.google.com/search?q=rust%20gpui");
+        assert_eq!(
+            normalize_url("example.com/docs"),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            normalize_url("rust gpui"),
+            "https://www.google.com/search?q=rust%20gpui"
+        );
         assert_eq!(normalize_url("about:blank"), "about:blank");
         assert_eq!(normalize_url("  "), "");
     }

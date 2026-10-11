@@ -82,7 +82,10 @@ fn recent_messages(top: &Path, n: usize) -> Vec<Message> {
     git::log(top, &["HEAD".into()], n, 0)
         .unwrap_or_default()
         .into_iter()
-        .map(|c| Message { subject: c.subject.trim().to_string(), body: c.body })
+        .map(|c| Message {
+            subject: c.subject.trim().to_string(),
+            body: c.body,
+        })
         .filter(|m| !m.subject.is_empty())
         .collect()
 }
@@ -102,20 +105,27 @@ fn top_counts(values: impl Iterator<Item = String>, n: usize) -> Vec<String> {
 /// Plain style rules read off previous messages (deterministic: a small model
 /// writes poor style guides, but follows explicit rules well).
 pub fn derive_style_prompt(messages: &[Message]) -> String {
-    static CONVENTIONAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\w+)(?:\(([^)]+)\))?!?: ").expect("valid"));
-    let subjects: Vec<&str> = messages.iter().map(|m| m.subject.as_str()).filter(|s| !s.is_empty()).collect();
+    static CONVENTIONAL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(\w+)(?:\(([^)]+)\))?!?: ").expect("valid"));
+    let subjects: Vec<&str> = messages
+        .iter()
+        .map(|m| m.subject.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
     if subjects.len() < 3 {
         return ai::DEFAULT_COMMIT_STYLE.to_string();
     }
     let ratio = |n: usize| n as f32 / subjects.len() as f32;
-    let conv: Vec<Option<regex::Captures>> = subjects.iter().map(|s| CONVENTIONAL.captures(s)).collect();
+    let conv: Vec<Option<regex::Captures>> =
+        subjects.iter().map(|s| CONVENTIONAL.captures(s)).collect();
     let conv_count = conv.iter().filter(|c| c.is_some()).count();
     let descriptions: Vec<String> = subjects
         .iter()
         .zip(&conv)
         .map(|(s, c)| {
             let rest = c.as_ref().map_or(*s, |c| &s[c[0].len()..]);
-            rest.trim_start_matches(|ch: char| !ch.is_alphanumeric()).to_string()
+            rest.trim_start_matches(|ch: char| !ch.is_alphanumeric())
+                .to_string()
         })
         .collect();
     let mut rules = Vec::new();
@@ -128,17 +138,34 @@ pub fn derive_style_prompt(messages: &[Message]) -> String {
             }
         }
         let scoped_count = conv.iter().flatten().filter(|c| c.get(2).is_some()).count();
-        let scopes = top_counts(conv.iter().flatten().filter_map(|c| c.get(2).map(|m| m.as_str().to_string())), 8);
+        let scopes = top_counts(
+            conv.iter()
+                .flatten()
+                .filter_map(|c| c.get(2).map(|m| m.as_str().to_string())),
+            8,
+        );
         let scoped = !scopes.is_empty() && scoped_count as f32 / conv_count as f32 >= 0.3;
-        format = if scoped { "<type>(<scope>): <summary>".into() } else { "<type>: <summary>".into() };
+        format = if scoped {
+            "<type>(<scope>): <summary>".into()
+        } else {
+            "<type>: <summary>".into()
+        };
         rules.push(format!("type: {}", types.join(" | ")));
         if scoped {
-            rules.push(format!("scope: the area that changed, e.g. {}", scopes.join(", ")));
+            rules.push(format!(
+                "scope: the area that changed, e.g. {}",
+                scopes.join(", ")
+            ));
         }
     }
     let gitmoji = subjects
         .iter()
-        .filter(|s| s.starts_with(':') || s.chars().next().is_some_and(|c| (c as u32) >= 0x1F000 || ('\u{2600}'..='\u{27BF}').contains(&c)))
+        .filter(|s| {
+            s.starts_with(':')
+                || s.chars().next().is_some_and(|c| {
+                    (c as u32) >= 0x1F000 || ('\u{2600}'..='\u{27BF}').contains(&c)
+                })
+        })
         .count();
     if ratio(gitmoji) >= 0.3 {
         format = format!("<gitmoji> {format}");
@@ -147,11 +174,28 @@ pub fn derive_style_prompt(messages: &[Message]) -> String {
     lengths.sort();
     let median = lengths[lengths.len() / 2];
     let limit = (((median + 10) as f32 / 5.).round() as usize * 5).clamp(40, 72);
-    let lower = descriptions.iter().filter(|d| d.chars().next().is_some_and(char::is_lowercase)).count();
-    let upper = descriptions.iter().filter(|d| d.chars().next().is_some_and(char::is_uppercase)).count();
-    let first_word = |d: &String| d.split(|c: char| !c.is_alphabetic()).next().unwrap_or("").to_lowercase();
-    let past = descriptions.iter().filter(|d| first_word(d).ends_with("ed")).count();
-    let gerund = descriptions.iter().filter(|d| first_word(d).ends_with("ing")).count();
+    let lower = descriptions
+        .iter()
+        .filter(|d| d.chars().next().is_some_and(char::is_lowercase))
+        .count();
+    let upper = descriptions
+        .iter()
+        .filter(|d| d.chars().next().is_some_and(char::is_uppercase))
+        .count();
+    let first_word = |d: &String| {
+        d.split(|c: char| !c.is_alphabetic())
+            .next()
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    let past = descriptions
+        .iter()
+        .filter(|d| first_word(d).ends_with("ed"))
+        .count();
+    let gerund = descriptions
+        .iter()
+        .filter(|d| first_word(d).ends_with("ing"))
+        .count();
     let periods = subjects.iter().filter(|s| s.ends_with('.')).count();
     let mood = if ratio(past) >= 0.4 {
         "past tense"
@@ -162,17 +206,38 @@ pub fn derive_style_prompt(messages: &[Message]) -> String {
     };
     rules.push(format!(
         "summary: ≤ {limit} chars, {mood}, {}, {}",
-        if lower > upper { "lowercase" } else { "capitalized" },
-        if ratio(periods) >= 0.5 { "ending with a period" } else { "no period" }
+        if lower > upper {
+            "lowercase"
+        } else {
+            "capitalized"
+        },
+        if ratio(periods) >= 0.5 {
+            "ending with a period"
+        } else {
+            "no period"
+        }
     ));
-    let bodies: Vec<&Message> = messages.iter().filter(|m| !m.body.trim().is_empty()).collect();
+    let bodies: Vec<&Message> = messages
+        .iter()
+        .filter(|m| !m.body.trim().is_empty())
+        .collect();
     if (bodies.len() as f32) / (messages.len() as f32) < 0.2 {
         rules.push("Add a body (≤ 2 lines) only if the \"why\" isn't obvious".into());
-    } else if bodies.iter().filter(|m| m.body.lines().any(|l| l.trim_start().starts_with("- ") || l.trim_start().starts_with("* "))).count() as f32
+    } else if bodies
+        .iter()
+        .filter(|m| {
+            m.body
+                .lines()
+                .any(|l| l.trim_start().starts_with("- ") || l.trim_start().starts_with("* "))
+        })
+        .count() as f32
         / bodies.len() as f32
         >= 0.5
     {
-        rules.push("After a blank line, add a body of short \"- \" bullet points for the notable changes".into());
+        rules.push(
+            "After a blank line, add a body of short \"- \" bullet points for the notable changes"
+                .into(),
+        );
     } else {
         rules.push("After a blank line, add a short body saying what changed and why".into());
     }
@@ -185,11 +250,15 @@ pub fn derive_style_prompt(messages: &[Message]) -> String {
         rules.push(rule.into());
     }
     let rules: Vec<String> = rules.iter().map(|r| format!("- {r}")).collect();
-    format!("Write ONE commit message for the diff below.\n\nFormat: {format}\n{}\n\nDIFF:\n{DIFF_SLOT}", rules.join("\n"))
+    format!(
+        "Write ONE commit message for the diff below.\n\nFormat: {format}\n{}\n\nDIFF:\n{DIFF_SLOT}",
+        rules.join("\n")
+    )
 }
 
 fn read_repo_style(top: &Path) -> Option<String> {
-    static COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->\n?").expect("valid"));
+    static COMMENT: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->\n?").expect("valid"));
     let text = std::fs::read_to_string(top.join(STYLE_FILE)).ok()?;
     let style = COMMENT.replace_all(&text, "").trim().to_string();
     (!style.is_empty()).then_some(style)
@@ -201,7 +270,13 @@ fn read_repo_style(top: &Path) -> Option<String> {
 pub fn style_file(top: &Path, fallback: &str, derive: bool) -> std::path::PathBuf {
     if derive || read_repo_style(top).is_none() {
         let history = recent_messages(top, 50);
-        let style = if history.len() >= 3 { derive_style_prompt(&history) } else if fallback.trim().is_empty() { ai::DEFAULT_COMMIT_STYLE.to_string() } else { fallback.to_string() };
+        let style = if history.len() >= 3 {
+            derive_style_prompt(&history)
+        } else if fallback.trim().is_empty() {
+            ai::DEFAULT_COMMIT_STYLE.to_string()
+        } else {
+            fallback.to_string()
+        };
         write_repo_style(top, &style);
     }
     top.join(STYLE_FILE)
@@ -238,7 +313,9 @@ fn diff_entries(top: &Path, staged: bool) -> Result<Vec<Entry>, String> {
     let run = |extra: &str| {
         let mut args = args.clone();
         args.push(extra);
-        git::check(top, &args, None).map(|o| o.stdout).map_err(|e| e.to_string())
+        git::check(top, &args, None)
+            .map(|o| o.stdout)
+            .map_err(|e| e.to_string())
     };
     let names = run("--name-status")?;
     let counts = run("--numstat")?;
@@ -247,14 +324,27 @@ fn diff_entries(top: &Path, staged: bool) -> Result<Vec<Entry>, String> {
     while let Some(code) = parts.next() {
         let status = code.chars().next().unwrap_or('M');
         let first = parts.next().unwrap_or_default().to_string();
-        let (old_path, path) = if matches!(status, 'R' | 'C') { (Some(first), parts.next().unwrap_or_default().to_string()) } else { (None, first) };
-        entries.push(Entry { path, old_path, status, add: 0, del: 0, binary: false });
+        let (old_path, path) = if matches!(status, 'R' | 'C') {
+            (Some(first), parts.next().unwrap_or_default().to_string())
+        } else {
+            (None, first)
+        };
+        entries.push(Entry {
+            path,
+            old_path,
+            status,
+            add: 0,
+            del: 0,
+            binary: false,
+        });
     }
     // numstat: "add\tdel\tpath\0", or for a rename "add\tdel\t\0old\0new\0".
     let mut fields = counts.split('\0').peekable();
     while let Some(head) = fields.next() {
         let mut cols = head.splitn(3, '\t');
-        let (Some(add), Some(del), Some(path)) = (cols.next(), cols.next(), cols.next()) else { continue };
+        let (Some(add), Some(del), Some(path)) = (cols.next(), cols.next(), cols.next()) else {
+            continue;
+        };
         let path = if path.is_empty() {
             fields.next();
             fields.next().unwrap_or_default().to_string()
@@ -279,7 +369,10 @@ fn cap_text(text: &str, max: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    let cut = text[..end].rfind('\n').filter(|&c| c > max / 2).unwrap_or(end);
+    let cut = text[..end]
+        .rfind('\n')
+        .filter(|&c| c > max / 2)
+        .unwrap_or(end);
     let kept = &text[..cut];
     let rest = text[cut..].lines().count();
     format!("{kept}\n[... {rest} more lines of this file omitted]\n")
@@ -287,9 +380,13 @@ fn cap_text(text: &str, max: usize) -> String {
 
 /// `git diff` output per file, keyed by the new path.
 fn split_diff(text: &str) -> Vec<(String, String)> {
-    static INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^index [0-9a-f]+\.\.[0-9a-f]+.*\n").expect("valid"));
+    static INDEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^index [0-9a-f]+\.\.[0-9a-f]+.*\n").expect("valid"));
     let mut out = Vec::new();
-    let mut starts: Vec<usize> = text.match_indices("\ndiff --git ").map(|(i, _)| i + 1).collect();
+    let mut starts: Vec<usize> = text
+        .match_indices("\ndiff --git ")
+        .map(|(i, _)| i + 1)
+        .collect();
     if text.starts_with("diff --git ") {
         starts.insert(0, 0);
     }
@@ -299,7 +396,11 @@ fn split_diff(text: &str) -> Vec<(String, String)> {
             .lines()
             .find_map(|l| l.strip_prefix("+++ b/"))
             .or_else(|| part.lines().find_map(|l| l.strip_prefix("rename to ")))
-            .or_else(|| part.lines().next().and_then(|l| l.rsplit_once(" b/").map(|(_, p)| p)))
+            .or_else(|| {
+                part.lines()
+                    .next()
+                    .and_then(|l| l.rsplit_once(" b/").map(|(_, p)| p))
+            })
             .unwrap_or("")
             .trim()
             .to_string();
@@ -310,12 +411,31 @@ fn split_diff(text: &str) -> Vec<(String, String)> {
     out
 }
 
-fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cancel, exclude: Option<&str>) -> Result<Changes, String> {
+fn collect_changes(
+    top: &Path,
+    per_file: usize,
+    max_total: usize,
+    cancel: &Cancel,
+    exclude: Option<&str>,
+) -> Result<Changes, String> {
     let staged = git::run(top, &["diff", "--cached", "--quiet"], None).is_ok_and(|o| !o.ok());
     let mut entries = diff_entries(top, staged)?;
-    if !staged && let Ok(out) = git::check(top, &["ls-files", "--others", "--exclude-standard", "-z"], None) {
+    if !staged
+        && let Ok(out) = git::check(
+            top,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            None,
+        )
+    {
         for path in out.stdout.split('\0').filter(|p| !p.is_empty()) {
-            entries.push(Entry { path: path.to_string(), old_path: None, status: '?', add: 0, del: 0, binary: false });
+            entries.push(Entry {
+                path: path.to_string(),
+                old_path: None,
+                status: '?',
+                add: 0,
+                del: 0,
+                binary: false,
+            });
         }
     }
     cancel.check()?;
@@ -327,7 +447,11 @@ fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cance
     for entry in &entries {
         // The style file's text is instructions; in the diff the model obeys
         // or describes it instead of the change.
-        if entry.binary || entry.path == STYLE_FILE || NOISE.iter().any(|r| r.is_match(&entry.path)) || entry.add + entry.del > HUGE_FILE_LINES {
+        if entry.binary
+            || entry.path == STYLE_FILE
+            || NOISE.iter().any(|r| r.is_match(&entry.path))
+            || entry.add + entry.del > HUGE_FILE_LINES
+        {
             omitted.insert(entry.path.clone());
         } else {
             wanted.push(entry.clone());
@@ -335,7 +459,8 @@ fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cance
     }
     // Biggest changes first: they matter most and go into the budget first.
     wanted.sort_by(|a, b| (b.add + b.del).cmp(&(a.add + a.del)));
-    let (untracked, tracked): (Vec<Entry>, Vec<Entry>) = wanted.into_iter().partition(|e| e.status == '?');
+    let (untracked, tracked): (Vec<Entry>, Vec<Entry>) =
+        wanted.into_iter().partition(|e| e.status == '?');
     let mut diffs = Vec::new();
     let mut total = 0;
     for slice in tracked.chunks(100) {
@@ -354,7 +479,9 @@ fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cance
             args.push(entry.path.clone());
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = git::check(top, &args, None).map(|o| o.stdout).unwrap_or_default();
+        let text = git::check(top, &args, None)
+            .map(|o| o.stdout)
+            .unwrap_or_default();
         let sections = split_diff(&text);
         cancel.check()?;
         for entry in slice {
@@ -403,7 +530,11 @@ fn collect_changes(top: &Path, per_file: usize, max_total: usize, cancel: &Cance
         total += capped.len();
         diffs.push((entry.path.clone(), capped));
     }
-    Ok(Changes { entries, diffs, omitted })
+    Ok(Changes {
+        entries,
+        diffs,
+        omitted,
+    })
 }
 
 fn stat_block(changes: &Changes) -> String {
@@ -412,7 +543,10 @@ fn stat_block(changes: &Changes) -> String {
         .iter()
         .take(STAT_LINES)
         .map(|e| {
-            let name = e.old_path.as_ref().map_or(e.path.clone(), |old| format!("{old} -> {}", e.path));
+            let name = e
+                .old_path
+                .as_ref()
+                .map_or(e.path.clone(), |old| format!("{old} -> {}", e.path));
             let counts = if e.binary {
                 "binary".to_string()
             } else if e.status == '?' {
@@ -420,12 +554,19 @@ fn stat_block(changes: &Changes) -> String {
             } else {
                 format!("+{} -{}", e.add, e.del)
             };
-            let note = if changes.omitted.contains(&e.path) && !e.binary { ", content omitted" } else { "" };
+            let note = if changes.omitted.contains(&e.path) && !e.binary {
+                ", content omitted"
+            } else {
+                ""
+            };
             format!("{} {name} ({counts}{note})", status_word(e.status))
         })
         .collect();
     if changes.entries.len() > STAT_LINES {
-        rows.push(format!("... and {} more files", changes.entries.len() - STAT_LINES));
+        rows.push(format!(
+            "... and {} more files",
+            changes.entries.len() - STAT_LINES
+        ));
     }
     rows.join("\n")
 }
@@ -434,7 +575,11 @@ fn stat_block(changes: &Changes) -> String {
 
 fn final_messages(style: &str, changes: &str) -> Vec<Value> {
     let prompt = style.trim();
-    let content = if prompt.contains(DIFF_SLOT) { prompt.replace(DIFF_SLOT, changes) } else { format!("{prompt}\n\n{changes}") };
+    let content = if prompt.contains(DIFF_SLOT) {
+        prompt.replace(DIFF_SLOT, changes)
+    } else {
+        format!("{prompt}\n\n{changes}")
+    };
     vec![json!({
         "role": "user",
         "content": format!("{content}\n\nReply with the commit message only. No quotes, no code fences, no explanations."),
@@ -459,10 +604,15 @@ fn body(messages: Vec<Value>, max_tokens: usize, temperature: f32) -> Value {
 
 /// Strip what small models like to wrap around the message.
 pub fn clean_message(raw: &str) -> String {
-    static THINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<think>.*?(</think>|$)\s*").expect("valid"));
-    static FENCE_OPEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^```[\w-]*\n?").expect("valid"));
-    static FENCE_CLOSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n?```\s*$").expect("valid"));
-    static LABEL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(\*\*)?(suggested )?commit message:?(\*\*)?:?\s*").expect("valid"));
+    static THINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?is)<think>.*?(</think>|$)\s*").expect("valid"));
+    static FENCE_OPEN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^```[\w-]*\n?").expect("valid"));
+    static FENCE_CLOSE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n?```\s*$").expect("valid"));
+    static LABEL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)^(\*\*)?(suggested )?commit message:?(\*\*)?:?\s*").expect("valid")
+    });
     static BLANKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid"));
     let text = raw.replace("\r\n", "\n");
     let text = THINK.replace_all(text.trim(), "");
@@ -471,7 +621,10 @@ pub fn clean_message(raw: &str) -> String {
     let text = LABEL.replace(&text, "").to_string();
     let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     if let Some(first) = lines.first_mut() {
-        *first = first.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string();
+        *first = first
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string();
     }
     let joined = unroll_bullets(lines).join("\n");
     BLANKS.replace_all(&joined, "\n\n").trim().to_string()
@@ -488,7 +641,11 @@ fn unroll_bullets(lines: Vec<String>) -> Vec<String> {
     if has_bullets || lines.is_empty() {
         return lines;
     }
-    let parts: Vec<&str> = SEPARATOR.split(&lines[0]).map(str::trim).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = SEPARATOR
+        .split(&lines[0])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.len() < 3 {
         return lines;
     }
@@ -503,14 +660,32 @@ fn unroll_bullets(lines: Vec<String>) -> Vec<String> {
 /// counts too: a smaller request is the fix either way.
 fn is_context_error(err: &str) -> bool {
     let err = err.to_lowercase();
-    ["context", "exceed", "too long", "too large", "n_ctx", "tokens", "forcibly closed", "connection reset", "10054", "10053", "broken pipe"]
-        .iter()
-        .any(|w| err.contains(w))
+    [
+        "context",
+        "exceed",
+        "too long",
+        "too large",
+        "n_ctx",
+        "tokens",
+        "forcibly closed",
+        "connection reset",
+        "10054",
+        "10053",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|w| err.contains(w))
 }
 
 /// Write a commit message for the repository's changes. `status` says what
 /// it is doing; `text` gets the message so far while it streams.
-pub fn generate(top: &Path, config: &AiConfig, cancel: &Cancel, status: &mut dyn FnMut(String), text: &mut dyn FnMut(String)) -> Result<String, String> {
+pub fn generate(
+    top: &Path,
+    config: &AiConfig,
+    cancel: &Cancel,
+    status: &mut dyn FnMut(String),
+    text: &mut dyn FnMut(String),
+) -> Result<String, String> {
     status("Reading changes…".into());
     let history = recent_messages(top, 50);
     let mut style = read_repo_style(top);
@@ -521,7 +696,13 @@ pub fn generate(top: &Path, config: &AiConfig, cancel: &Cancel, status: &mut dyn
         style = Some(derived);
         created = true;
     }
-    let style = style.unwrap_or_else(|| if config.style.trim().is_empty() { ai::DEFAULT_COMMIT_STYLE.to_string() } else { config.style.clone() });
+    let style = style.unwrap_or_else(|| {
+        if config.style.trim().is_empty() {
+            ai::DEFAULT_COMMIT_STYLE.to_string()
+        } else {
+            config.style.clone()
+        }
+    });
     let exclude = created.then_some(STYLE_FILE);
     // The size estimate can be off for dense content (minified code, data):
     // on a context error, again with half the budget, then a quarter.
@@ -529,7 +710,9 @@ pub fn generate(top: &Path, config: &AiConfig, cancel: &Cancel, status: &mut dyn
     for scale in [1.0, 0.5, 0.25] {
         result = attempt(top, config, &style, exclude, scale, cancel, status, text);
         match &result {
-            Err(err) if *err != CANCELLED && is_context_error(err) => status("Too big for the model's context; trying smaller…".into()),
+            Err(err) if *err != CANCELLED && is_context_error(err) => {
+                status("Too big for the model's context; trying smaller…".into())
+            }
             _ => break,
         }
     }
@@ -548,7 +731,10 @@ fn attempt(
     text: &mut dyn FnMut(String),
 ) -> Result<String, String> {
     let ctx = config.context as usize;
-    let overhead: usize = final_messages(style, "").iter().map(|m| m["content"].as_str().unwrap_or("").len()).sum();
+    let overhead: usize = final_messages(style, "")
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").len())
+        .sum();
     let system_tokens = overhead.div_ceil(CHARS_PER_TOKEN);
     let scaled = |tokens: usize| ((tokens * CHARS_PER_TOKEN) as f32 * scale) as usize;
     let budget = scaled(ctx.saturating_sub(system_tokens + OUTPUT_TOKENS + 200)).max(2000);
@@ -567,7 +753,11 @@ fn attempt(
     let user = if stat.len() + diff_chars + 100 <= budget {
         let diff: Vec<&str> = changes.diffs.iter().map(|(_, d)| d.as_str()).collect();
         let diff = diff.join("\n");
-        if diff.is_empty() { format!("Files changed:\n{stat}") } else { format!("Files changed:\n{stat}\n\n{diff}") }
+        if diff.is_empty() {
+            format!("Files changed:\n{stat}")
+        } else {
+            format!("Files changed:\n{stat}\n\n{diff}")
+        }
     } else {
         // Map: summarize the diffs chunk by chunk, each file's diff whole.
         let mut chunks: Vec<Vec<&(String, String)>> = Vec::new();
@@ -589,9 +779,24 @@ fn attempt(
             status(format!("Summarizing {}/{}…", i + 1, chunks.len()));
             let names: Vec<&str> = chunk.iter().map(|(p, _)| p.as_str()).collect();
             let texts: Vec<&str> = chunk.iter().map(|(_, d)| d.as_str()).collect();
-            let content = format!("Part {} of {} of a larger change. Files in this part: {}\n\n{}", i + 1, chunks.len(), names.join(", "), texts.join("\n"));
-            let messages = vec![json!({ "role": "system", "content": MAP_SYSTEM }), json!({ "role": "user", "content": content })];
-            let summary = ai::chat(config, body(messages, MAP_OUTPUT_TOKENS, 0.1), cancel, |_| {})?;
+            let content = format!(
+                "Part {} of {} of a larger change. Files in this part: {}\n\n{}",
+                i + 1,
+                chunks.len(),
+                names.join(", "),
+                texts.join("\n")
+            );
+            let messages = vec![
+                json!({ "role": "system", "content": MAP_SYSTEM }),
+                json!({ "role": "user", "content": content }),
+            ];
+            let summary = ai::chat(
+                config,
+                top,
+                body(messages, MAP_OUTPUT_TOKENS, 0.1),
+                cancel,
+                |_| {},
+            )?;
             notes.push(summary.trim().to_string());
         }
         let mut note_text = notes.join("\n");
@@ -606,10 +811,16 @@ fn attempt(
     };
     status(WRITING.into());
     let mut raw = String::new();
-    let result = ai::chat(config, body(final_messages(style, &user), OUTPUT_TOKENS, 0.2), cancel, |piece| {
-        raw.push_str(piece);
-        text(clean_message(&raw));
-    })?;
+    let result = ai::chat(
+        config,
+        top,
+        body(final_messages(style, &user), OUTPUT_TOKENS, 0.2),
+        cancel,
+        |piece| {
+            raw.push_str(piece);
+            text(clean_message(&raw));
+        },
+    )?;
     let message = clean_message(&result);
     if message.is_empty() {
         return Err("The model returned an empty message. Try again.".into());
@@ -626,15 +837,26 @@ mod tests {
         assert_eq!(clean_message("```\nfeat: add x\n```"), "feat: add x");
         assert_eq!(clean_message("<think>hmm</think>\n\"fix: y\""), "fix: y");
         assert_eq!(clean_message("Commit message: chore: z"), "chore: z");
-        assert_eq!(clean_message("feat: a - one - two"), "feat: a\n\n- one\n- two");
+        assert_eq!(
+            clean_message("feat: a - one - two"),
+            "feat: a\n\n- one\n- two"
+        );
     }
 
     #[test]
     fn derives_conventional_style() {
-        let history: Vec<Message> = ["feat: add a", "fix(ui): mend b", "chore: release v1", "feat(ui): add c"]
-            .iter()
-            .map(|s| Message { subject: s.to_string(), body: String::new() })
-            .collect();
+        let history: Vec<Message> = [
+            "feat: add a",
+            "fix(ui): mend b",
+            "chore: release v1",
+            "feat(ui): add c",
+        ]
+        .iter()
+        .map(|s| Message {
+            subject: s.to_string(),
+            body: String::new(),
+        })
+        .collect();
         let style = derive_style_prompt(&history);
         assert!(style.contains("Format: <type>(<scope>): <summary>"));
         assert!(style.contains("lowercase"));

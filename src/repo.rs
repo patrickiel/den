@@ -23,19 +23,28 @@ pub enum RepoState {
     NoGit,
     /// The folder is not in a repository.
     NoRepo,
-    Ready { top: PathBuf, status: Arc<Status> },
+    Ready {
+        top: PathBuf,
+        status: Arc<Status>,
+    },
 }
 
 /// A path as a map key: case-insensitive where the file system is.
 pub fn key(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
-        text.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+        text.replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
     } else {
         // macOS file systems are usually case-insensitive too, but git and
         // the shell are not; paths are compared as they are.
         let text = text.trim_end_matches('/');
-        if text.is_empty() { "/".to_string() } else { text.to_string() }
+        if text.is_empty() {
+            "/".to_string()
+        } else {
+            text.to_string()
+        }
     }
 }
 
@@ -150,12 +159,17 @@ impl Repo {
 
     /// The lane of commit `ix`, for its badges' colour.
     pub fn row_lane(&self, ix: usize) -> usize {
-        self.lanes.get(ix + self.uncommitted.is_some() as usize).copied().unwrap_or(0)
+        self.lanes
+            .get(ix + self.uncommitted.is_some() as usize)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The commit's page on GitHub, when the remote is there.
     pub fn github_commit_url(&self, hash: &str) -> Option<String> {
-        self.github.as_ref().map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{hash}"))
+        self.github
+            .as_ref()
+            .map(|(owner, repo)| format!("https://github.com/{owner}/{repo}/commit/{hash}"))
     }
 
     /// Read the status and the commits again, off the UI thread.
@@ -177,9 +191,16 @@ impl Repo {
         }
         self.refreshing = true;
         // The top level known from the last time; none means everything anew.
-        let known = self.top().map(Path::to_path_buf).filter(|_| level < Refresh::Reload);
+        let known = self
+            .top()
+            .map(Path::to_path_buf)
+            .filter(|_| level < Refresh::Reload);
         let (root, count) = (self.root.clone(), self.commit_count);
-        let (default_branch, github, commits) = (self.default_branch.clone(), self.github.clone(), self.commits.clone());
+        let (default_branch, github, commits) = (
+            self.default_branch.clone(),
+            self.github.clone(),
+            self.commits.clone(),
+        );
         self._refresh = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -194,7 +215,10 @@ impl Repo {
                     };
                     let status = git::status(&top)?;
                     let (default_branch, github) = if reload {
-                        (git::default_branch(&top), git::remote_url(&top).and_then(|url| git::github_repo(&url)))
+                        (
+                            git::default_branch(&top),
+                            git::remote_url(&top).and_then(|url| git::github_repo(&url)),
+                        )
                     } else {
                         (default_branch, github)
                     };
@@ -205,12 +229,22 @@ impl Repo {
                     } else {
                         // The default branch found earlier may be gone: then HEAD alone.
                         let revs = git::history_revs(&status, default_branch.as_deref());
-                        let log = git::log(&top, &revs, count, 0).or_else(|_| git::log(&top, &["HEAD".into()], count, 0));
+                        let log = git::log(&top, &revs, count, 0)
+                            .or_else(|_| git::log(&top, &["HEAD".into()], count, 0));
                         Arc::new(log.unwrap_or_default())
                     };
                     let (layout, uncommitted) = lay_out(&status, &commits);
                     let index = index(&top, &status);
-                    Ok::<_, Error>(Some(Loaded { top, status, default_branch, github, commits, layout, uncommitted, index }))
+                    Ok::<_, Error>(Some(Loaded {
+                        top,
+                        status,
+                        default_branch,
+                        github,
+                        commits,
+                        layout,
+                        uncommitted,
+                        index,
+                    }))
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
@@ -237,7 +271,10 @@ impl Repo {
         self.uncommitted = loaded.uncommitted;
         self.default_branch = loaded.default_branch;
         self.github = loaded.github;
-        self.state = RepoState::Ready { top: loaded.top, status: Arc::new(loaded.status) };
+        self.state = RepoState::Ready {
+            top: loaded.top,
+            status: Arc::new(loaded.status),
+        };
     }
 
     /// The letter for a file in the Explorer (M, U, A, D, R, !).
@@ -256,13 +293,23 @@ impl Repo {
 
     /// Run an operation on the repository, then refresh. Its failure shows
     /// in the view with git's message; it never opens a dialog.
-    pub fn run(&mut self, label: &'static str, op: impl FnOnce(&Path) -> Result<(), Error> + Send + 'static, cx: &mut Context<Self>) {
-        let Some(top) = self.top().map(Path::to_path_buf) else { return };
+    pub fn run(
+        &mut self,
+        label: &'static str,
+        op: impl FnOnce(&Path) -> Result<(), Error> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(top) = self.top().map(Path::to_path_buf) else {
+            return;
+        };
         self.busy = Some(label);
         self.error = None;
         cx.notify();
         self._operation = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { op(&top) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { op(&top) })
+                .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 match result {
@@ -298,7 +345,13 @@ impl Repo {
     /// Commit what is staged; with nothing staged, everything (as den does
     /// once "Always" was chosen).
     /// Commit, staging every change first with `stage_all`.
-    pub fn commit(&mut self, message: String, amend: bool, stage_all: bool, cx: &mut Context<Self>) {
+    pub fn commit(
+        &mut self,
+        message: String,
+        amend: bool,
+        stage_all: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.run(
             "Committing…",
             move |top| {
@@ -320,7 +373,9 @@ impl Repo {
     }
 
     pub fn push(&mut self, cx: &mut Context<Self>) {
-        let Some(branch) = self.status().map(|s| s.branch.clone()) else { return };
+        let Some(branch) = self.status().map(|s| s.branch.clone()) else {
+            return;
+        };
         self.run("Pushing…", move |top| git::push(top, &branch), cx);
     }
 
@@ -329,7 +384,11 @@ impl Repo {
     }
 
     pub fn create_branch(&mut self, name: String, cx: &mut Context<Self>) {
-        self.run("Creating branch…", move |top| git::create_branch(top, &name), cx);
+        self.run(
+            "Creating branch…",
+            move |top| git::create_branch(top, &name),
+            cx,
+        );
     }
 
     /// Push after the commit that is running now.
@@ -347,7 +406,10 @@ impl Repo {
         self.busy = Some("Initializing…");
         cx.notify();
         self._operation = Some(cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { git::check(&root, &["init"], None) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { git::check(&root, &["init"], None) })
+                .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 if let Err(err) = result {
@@ -405,20 +467,35 @@ fn ignored_under(ignored: &HashSet<String>, top: Option<&Path>, path: &Path) -> 
 /// The paths git takes for `files`: a renamed file's old path too, so the
 /// rename moves as one.
 fn paths_of(files: Vec<FileStatus>) -> Vec<String> {
-    files.into_iter().flat_map(|f| [Some(f.rel), f.renamed_from]).flatten().collect()
+    files
+        .into_iter()
+        .flat_map(|f| [Some(f.rel), f.renamed_from])
+        .flatten()
+        .collect()
 }
 
 /// The graph's lanes through the working tree (when it has changes, as a
 /// hollow dot above HEAD) and the commits; HEAD's dot is hollow too.
 fn lay_out(status: &Status, commits: &[Commit]) -> (git_graph::Layout, Option<usize>) {
-    let head = (status.branch.oid != "(initial)" && !status.branch.oid.is_empty()).then(|| status.branch.oid.clone());
+    let head = (status.branch.oid != "(initial)" && !status.branch.oid.is_empty())
+        .then(|| status.branch.oid.clone());
     let uncommitted = (!status.files.is_empty() && head.is_some()).then_some(status.files.len());
     let head_parent: Vec<String> = head.iter().cloned().collect();
     let mut nodes = Vec::with_capacity(commits.len() + 1);
     if uncommitted.is_some() {
-        nodes.push(git_graph::Node { hash: "*", parents: &head_parent, hollow: true, uncommitted: true });
+        nodes.push(git_graph::Node {
+            hash: "*",
+            parents: &head_parent,
+            hollow: true,
+            uncommitted: true,
+        });
     }
-    nodes.extend(commits.iter().map(|c| git_graph::Node { hash: &c.hash, parents: &c.parents, hollow: head.as_deref() == Some(&c.hash), uncommitted: false }));
+    nodes.extend(commits.iter().map(|c| git_graph::Node {
+        hash: &c.hash,
+        parents: &c.parents,
+        hollow: head.as_deref() == Some(&c.hash),
+        uncommitted: false,
+    }));
     (git_graph::layout(&nodes), uncommitted)
 }
 
@@ -431,20 +508,48 @@ mod tests {
     #[test]
     fn keys_ignore_case_and_separators_on_windows() {
         if cfg!(windows) {
-            assert_eq!(key(Path::new(r"C:\Repo\Src\")), key(Path::new("c:/repo/src")));
+            assert_eq!(
+                key(Path::new(r"C:\Repo\Src\")),
+                key(Path::new("c:/repo/src"))
+            );
         }
     }
 
     #[test]
     fn index_keys_files_folders_and_ignored() {
         let top = Path::new(if cfg!(windows) { r"C:\repo" } else { "/repo" });
-        let file = FileStatus { path: top.join("src").join("a.rs"), rel: "src/a.rs".into(), index: '.', worktree: 'M', renamed_from: None, conflict: false };
-        let status = Status { files: vec![file], ignored: HashSet::from([top.join("target")]), ..Status::default() };
+        let file = FileStatus {
+            path: top.join("src").join("a.rs"),
+            rel: "src/a.rs".into(),
+            index: '.',
+            worktree: 'M',
+            renamed_from: None,
+            conflict: false,
+        };
+        let status = Status {
+            files: vec![file],
+            ignored: HashSet::from([top.join("target")]),
+            ..Status::default()
+        };
         let index = index(top, &status);
-        assert_eq!(index.letters.get(&key(&top.join("src").join("a.rs"))), Some(&'M'));
-        assert!(index.changed_dirs.contains(&key(&top.join("src"))) && index.changed_dirs.contains(&key(top)));
+        assert_eq!(
+            index.letters.get(&key(&top.join("src").join("a.rs"))),
+            Some(&'M')
+        );
+        assert!(
+            index.changed_dirs.contains(&key(&top.join("src")))
+                && index.changed_dirs.contains(&key(top))
+        );
         assert!(!index.changed_dirs.contains(&key(top.parent().unwrap())));
-        assert!(ignored_under(&index.ignored, Some(top), &top.join("target").join("debug").join("x.o")));
-        assert!(!ignored_under(&index.ignored, Some(top), &top.join("src").join("a.rs")));
+        assert!(ignored_under(
+            &index.ignored,
+            Some(top),
+            &top.join("target").join("debug").join("x.o")
+        ));
+        assert!(!ignored_under(
+            &index.ignored,
+            Some(top),
+            &top.join("src").join("a.rs")
+        ));
     }
 }

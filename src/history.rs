@@ -51,7 +51,11 @@ impl History {
     /// Step back (or forward) to the nearest entry `usable` takes, leaving
     /// the current one on the other side. The ones passed over go.
     pub fn step(&mut self, back: bool, usable: impl Fn(&Entry) -> bool) -> Option<Entry> {
-        let (from, to) = if back { (&mut self.back, &mut self.forward) } else { (&mut self.forward, &mut self.back) };
+        let (from, to) = if back {
+            (&mut self.back, &mut self.forward)
+        } else {
+            (&mut self.forward, &mut self.back)
+        };
         while let Some(entry) = from.pop() {
             if Some(&entry) == self.current.as_ref() || !usable(&entry) {
                 continue;
@@ -147,7 +151,10 @@ mod tests {
         history.closed(2, None);
         history.closed(1, Some(PathBuf::from("a.rs")));
         // 1, 2, 1 became a.rs, a.rs: one entry.
-        assert_eq!(history.step(true, any), Some(Entry::File(PathBuf::from("a.rs"))));
+        assert_eq!(
+            history.step(true, any),
+            Some(Entry::File(PathBuf::from("a.rs")))
+        );
         assert_eq!(history.step(true, any), None);
     }
 
@@ -157,7 +164,10 @@ mod tests {
         history.visit(1);
         history.visit(2);
         history.visit(3);
-        assert_eq!(history.step(true, |entry| *entry != Entry::Pane(2)), Some(Entry::Pane(1)));
+        assert_eq!(
+            history.step(true, |entry| *entry != Entry::Pane(2)),
+            Some(Entry::Pane(1))
+        );
         assert_eq!(history.step(false, any), Some(Entry::Pane(3)));
     }
 

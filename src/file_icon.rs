@@ -91,7 +91,8 @@ fn lookup(name: &str, light: bool) -> (String, Option<String>) {
     // The light theme overrides some mappings with "_light" definitions.
     let section = |field: &str, key: &str| -> Option<String> {
         let own = light.then(|| theme["light"][field][key].as_str()).flatten();
-        own.or_else(|| theme[field][key].as_str()).map(str::to_string)
+        own.or_else(|| theme[field][key].as_str())
+            .map(str::to_string)
     };
     let mut id = section("fileNames", &name);
     let mut at = name.find('.');
@@ -106,7 +107,11 @@ fn lookup(name: &str, light: bool) -> (String, Option<String>) {
     {
         id = section("languageIds", language);
     }
-    let default = if light { theme["light"]["file"].as_str().or(theme["file"].as_str()) } else { theme["file"].as_str() };
+    let default = if light {
+        theme["light"]["file"].as_str().or(theme["file"].as_str())
+    } else {
+        theme["file"].as_str()
+    };
     let def = id
         .as_deref()
         .map(|id| &theme["iconDefinitions"][id])
@@ -129,7 +134,9 @@ fn lookup(name: &str, light: bool) -> (String, Option<String>) {
 pub fn render(name: &str, size: f32, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (glyph, color) = lookup(name, !theme.is_dark());
-    let color = color.and_then(|hex| crate::preset_icon::parse_color(&hex)).unwrap_or(theme.muted_foreground);
+    let color = color
+        .and_then(|hex| crate::preset_icon::parse_color(&hex))
+        .unwrap_or(theme.muted_foreground);
     div()
         .flex()
         .flex_none()

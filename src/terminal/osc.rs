@@ -30,7 +30,10 @@ impl OscScanner {
         let mut at = 0;
         while let Some(start) = find(&data[at..], b"\x1b]").map(|i| i + at) {
             let head = start + 2;
-            let digits = data[head..].iter().take_while(|b| b.is_ascii_digit()).count();
+            let digits = data[head..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
             match data.get(head + digits) {
                 // The read ends inside the number: the rest comes later.
                 None => return self.keep(data, start, found),
@@ -42,11 +45,21 @@ impl OscScanner {
                 }
             }
             let body = head + digits + 1;
-            let Some(end) = data[body..].iter().position(|&b| b == 0x07 || b == 0x1b).map(|i| i + body) else {
+            let Some(end) = data[body..]
+                .iter()
+                .position(|&b| b == 0x07 || b == 0x1b)
+                .map(|i| i + body)
+            else {
                 return self.keep(data, start, found);
             };
-            let number = std::str::from_utf8(&data[head..head + digits]).ok().and_then(|n| n.parse().ok()).unwrap_or(u32::MAX);
-            found.push((number, String::from_utf8_lossy(&data[body..end]).into_owned()));
+            let number = std::str::from_utf8(&data[head..head + digits])
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(u32::MAX);
+            found.push((
+                number,
+                String::from_utf8_lossy(&data[body..end]).into_owned(),
+            ));
             at = end + 1;
         }
         // A read can end on the first byte of the next sequence.
@@ -77,7 +90,10 @@ pub fn cwd_of(number: u32, body: &str) -> Option<PathBuf> {
 pub fn notification_of(number: u32, body: &str) -> Option<String> {
     match number {
         9 => {
-            let numbered = body.split(';').next().is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            let numbered = body
+                .split(';')
+                .next()
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
             (!numbered).then(|| body.to_string())
         }
         777 => {
@@ -156,11 +172,21 @@ fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -171,13 +197,23 @@ mod tests {
     use std::path::PathBuf;
 
     fn last_cwd(scanner: &mut OscScanner, bytes: &[u8]) -> Option<PathBuf> {
-        scanner.scan(bytes).into_iter().filter_map(|(number, body)| cwd_of(number, &body)).next_back()
+        scanner
+            .scan(bytes)
+            .into_iter()
+            .filter_map(|(number, body)| cwd_of(number, &body))
+            .next_back()
     }
 
     #[test]
     fn windows_and_unix_uris() {
-        assert_eq!(parse_uri("file://PC/C:/Users/me%20too"), Some(PathBuf::from(r"C:\Users\me too")));
-        assert_eq!(parse_uri("file://host/home/me"), Some(PathBuf::from("/home/me")));
+        assert_eq!(
+            parse_uri("file://PC/C:/Users/me%20too"),
+            Some(PathBuf::from(r"C:\Users\me too"))
+        );
+        assert_eq!(
+            parse_uri("file://host/home/me"),
+            Some(PathBuf::from("/home/me"))
+        );
         assert_eq!(parse_uri("http://x/y"), None);
     }
 
@@ -191,20 +227,39 @@ mod tests {
     #[test]
     fn a_report_split_across_reads() {
         let mut scanner = OscScanner::default();
-        assert_eq!(last_cwd(&mut scanner, b"output\x1b]7;file://PC/C:/pro"), None);
-        assert_eq!(last_cwd(&mut scanner, b"jects\x07PS> "), Some(PathBuf::from(r"C:\projects")));
+        assert_eq!(
+            last_cwd(&mut scanner, b"output\x1b]7;file://PC/C:/pro"),
+            None
+        );
+        assert_eq!(
+            last_cwd(&mut scanner, b"jects\x07PS> "),
+            Some(PathBuf::from(r"C:\projects"))
+        );
         assert_eq!(last_cwd(&mut scanner, b"x\x1b]"), None);
-        assert_eq!(last_cwd(&mut scanner, b"7;file://PC/D:/\x07"), Some(PathBuf::from(r"D:\")));
+        assert_eq!(
+            last_cwd(&mut scanner, b"7;file://PC/D:/\x07"),
+            Some(PathBuf::from(r"D:\"))
+        );
         assert_eq!(last_cwd(&mut scanner, b"y\x1b"), None);
-        assert_eq!(last_cwd(&mut scanner, b"]7;file://PC/E:/\x07"), Some(PathBuf::from(r"E:\")));
+        assert_eq!(
+            last_cwd(&mut scanner, b"]7;file://PC/E:/\x07"),
+            Some(PathBuf::from(r"E:\"))
+        );
     }
 
     #[test]
     fn notifications_but_not_conemu_commands_or_titles() {
         let mut scanner = OscScanner::default();
         let out = b"\x1b]9;4;1;50\x07\x1b]0;a title\x07\x1b]9;Agent turn complete\x07\x1b]777;notify;Title;Body\x07\x1b]P1\x07";
-        let found: Vec<String> = scanner.scan(out).into_iter().filter_map(|(number, body)| notification_of(number, &body)).collect();
-        assert_eq!(found, vec!["Agent turn complete".to_string(), "Body".to_string()]);
+        let found: Vec<String> = scanner
+            .scan(out)
+            .into_iter()
+            .filter_map(|(number, body)| notification_of(number, &body))
+            .collect();
+        assert_eq!(
+            found,
+            vec!["Agent turn complete".to_string(), "Body".to_string()]
+        );
     }
 
     #[test]

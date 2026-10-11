@@ -24,7 +24,10 @@ use crate::{repo::Repo, scm::letter_color, ui::menu_action};
 
 pub enum ExplorerEvent {
     /// `preview` is a single click: open it, keep focus in the tree.
-    Open { path: PathBuf, preview: bool },
+    Open {
+        path: PathBuf,
+        preview: bool,
+    },
     ExpandedChanged,
     /// A terminal starting in this folder.
     OpenTerminal(PathBuf),
@@ -65,7 +68,12 @@ impl Focusable for Explorer {
 }
 
 impl Explorer {
-    pub fn new(root: PathBuf, expanded: Vec<PathBuf>, repo: Entity<Repo>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        expanded: Vec<PathBuf>,
+        repo: Entity<Repo>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
         let mut this = Self {
             root,
@@ -138,7 +146,8 @@ impl Explorer {
             rows.push(Row { entry, depth });
         }
         self.rows = rows;
-        self.selected = selected.and_then(|path| self.rows.iter().position(|row| row.entry.path == path));
+        self.selected =
+            selected.and_then(|path| self.rows.iter().position(|row| row.entry.path == path));
     }
 
     fn selected_path(&self) -> Option<PathBuf> {
@@ -229,7 +238,10 @@ impl Explorer {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let current = self.selected.unwrap_or(0);
-        let row = self.rows.get(current).map(|row| (row.entry.clone(), row.depth));
+        let row = self
+            .rows
+            .get(current)
+            .map(|row| (row.entry.clone(), row.depth));
         match event.keystroke.key.as_str() {
             "down" => self.select(self.selected.map_or(0, |ix| ix + 1), cx),
             "up" => self.select(current.saturating_sub(1), cx),
@@ -259,7 +271,9 @@ impl Explorer {
                     self.toggle(&entry.path, cx)
                 }
                 Some((_, depth)) if depth > 0 => {
-                    let parent = self.rows[..current].iter().rposition(|row| row.depth < depth);
+                    let parent = self.rows[..current]
+                        .iter()
+                        .rposition(|row| row.depth < depth);
                     if let Some(parent) = parent {
                         self.select(parent, cx);
                     }
@@ -278,33 +292,79 @@ impl Explorer {
     fn target_dir(&self) -> PathBuf {
         match self.selected.and_then(|ix| self.rows.get(ix)) {
             Some(row) if row.entry.is_dir => row.entry.path.clone(),
-            Some(row) => row.entry.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.root.clone()),
+            Some(row) => row
+                .entry
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.root.clone()),
             None => self.root.clone(),
         }
     }
 
     /// The right-click menu of a row.
     fn row_menu(menu: PopupMenu, this: WeakEntity<Self>, path: PathBuf, is_dir: bool) -> PopupMenu {
-        let dir = if is_dir { path.clone() } else { path.parent().map(Path::to_path_buf).unwrap_or_default() };
+        let dir = if is_dir {
+            path.clone()
+        } else {
+            path.parent().map(Path::to_path_buf).unwrap_or_default()
+        };
         let (d1, d2, d3) = (dir.clone(), dir.clone(), dir);
         let (p1, p2, p3, p4, p5) = (path.clone(), path.clone(), path.clone(), path.clone(), path);
-        menu.item(menu_action(&this, "New File…", move |e, w, cx| e.prompt_new(d1.clone(), false, w, cx)).icon(Icon::new(IconName::FilePlus)))
-            .item(menu_action(&this, "New Folder…", move |e, w, cx| e.prompt_new(d2.clone(), true, w, cx)).icon(Icon::new(IconName::FolderPlus)))
-            .separator()
-            .item(menu_action(&this, "Open Terminal Here", move |_, _, cx| cx.emit(ExplorerEvent::OpenTerminal(d3.clone()))).icon(Icon::new(IconName::SquareTerminal)))
-            .item(menu_action(&this, "Reveal in File Explorer", move |_, _, _| reveal(&p1)).icon(Icon::new(IconName::FolderOpen)))
-            .separator()
-            .item(menu_action(&this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))).icon(Icon::new(IconName::Copy)))
-            .item(
-                menu_action(&this, "Copy Relative Path", move |e, _, cx| {
-                    let rel = p3.strip_prefix(&e.root).unwrap_or(&p3).to_string_lossy().replace('\\', "/");
-                    cx.write_to_clipboard(ClipboardItem::new_string(rel))
-                })
-                .icon(Icon::new(IconName::Copy)),
-            )
-            .separator()
-            .item(menu_action(&this, "Rename…", move |e, w, cx| e.prompt_rename(p4.clone(), w, cx)).icon(Icon::new(IconName::Pencil)))
-            .item(menu_action(&this, "Delete", move |e, w, cx| e.confirm_delete(p5.clone(), w, cx)).icon(Icon::new(IconName::Trash)))
+        menu.item(
+            menu_action(&this, "New File…", move |e, w, cx| {
+                e.prompt_new(d1.clone(), false, w, cx)
+            })
+            .icon(Icon::new(IconName::FilePlus)),
+        )
+        .item(
+            menu_action(&this, "New Folder…", move |e, w, cx| {
+                e.prompt_new(d2.clone(), true, w, cx)
+            })
+            .icon(Icon::new(IconName::FolderPlus)),
+        )
+        .separator()
+        .item(
+            menu_action(&this, "Open Terminal Here", move |_, _, cx| {
+                cx.emit(ExplorerEvent::OpenTerminal(d3.clone()))
+            })
+            .icon(Icon::new(IconName::SquareTerminal)),
+        )
+        .item(
+            menu_action(&this, "Reveal in File Explorer", move |_, _, _| reveal(&p1))
+                .icon(Icon::new(IconName::FolderOpen)),
+        )
+        .separator()
+        .item(
+            menu_action(&this, "Copy Path", move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))
+            })
+            .icon(Icon::new(IconName::Copy)),
+        )
+        .item(
+            menu_action(&this, "Copy Relative Path", move |e, _, cx| {
+                let rel = p3
+                    .strip_prefix(&e.root)
+                    .unwrap_or(&p3)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                cx.write_to_clipboard(ClipboardItem::new_string(rel))
+            })
+            .icon(Icon::new(IconName::Copy)),
+        )
+        .separator()
+        .item(
+            menu_action(&this, "Rename…", move |e, w, cx| {
+                e.prompt_rename(p4.clone(), w, cx)
+            })
+            .icon(Icon::new(IconName::Pencil)),
+        )
+        .item(
+            menu_action(&this, "Delete", move |e, w, cx| {
+                e.confirm_delete(p5.clone(), w, cx)
+            })
+            .icon(Icon::new(IconName::Trash)),
+        )
     }
 
     /// Ask for a name, then run `then` with it.
@@ -325,21 +385,33 @@ impl Explorer {
                 let input = input.clone();
                 let this = this.clone();
                 let then = then.clone();
-                dialog.title(title).show_cancel(true).child(Input::new(&input)).on_ok(move |_, _, cx| {
-                    let name = input.read(cx).value().trim().to_string();
-                    if name.is_empty() {
-                        return false;
-                    }
-                    let then = then.clone();
-                    _ = this.update(cx, |explorer, cx| then(explorer, name, cx));
-                    true
-                })
+                dialog
+                    .title(title)
+                    .show_cancel(true)
+                    .child(Input::new(&input))
+                    .on_ok(move |_, _, cx| {
+                        let name = input.read(cx).value().trim().to_string();
+                        if name.is_empty() {
+                            return false;
+                        }
+                        let then = then.clone();
+                        _ = this.update(cx, |explorer, cx| then(explorer, name, cx));
+                        true
+                    })
             }
         });
-        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
     }
 
-    fn prompt_new(&mut self, dir: PathBuf, folder: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn prompt_new(
+        &mut self,
+        dir: PathBuf,
+        folder: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = if folder { "New Folder" } else { "New File" };
         self.prompt_name(
             title,
@@ -352,17 +424,26 @@ impl Explorer {
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map(drop)
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map(drop)
                 };
                 match result {
                     Ok(()) => {
                         explorer.expanded.insert(dir.clone());
                         explorer.paths_changed(&[path.clone()], cx);
                         if !folder {
-                            cx.emit(ExplorerEvent::Open { path, preview: false });
+                            cx.emit(ExplorerEvent::Open {
+                                path,
+                                preview: false,
+                            });
                         }
                     }
-                    Err(err) => explorer.error = Some(format!("Could not create {name}: {err}").into()),
+                    Err(err) => {
+                        explorer.error = Some(format!("Could not create {name}: {err}").into())
+                    }
                 }
                 cx.notify();
             },
@@ -372,7 +453,10 @@ impl Explorer {
     }
 
     fn prompt_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let initial = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let initial = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         self.prompt_name(
             "Rename",
             initial,
@@ -391,7 +475,10 @@ impl Explorer {
 
     /// Delete moves to the Recycle Bin, after asking.
     fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
@@ -406,7 +493,9 @@ impl Explorer {
                     _ = this.update(cx, |explorer, cx| {
                         match trash::delete(&path) {
                             Ok(()) => explorer.paths_changed(&[path], cx),
-                            Err(err) => explorer.error = Some(format!("Could not delete: {err}").into()),
+                            Err(err) => {
+                                explorer.error = Some(format!("Could not delete: {err}").into())
+                            }
                         }
                         cx.notify();
                     });
@@ -415,7 +504,12 @@ impl Explorer {
         });
     }
 
-    fn render_rows(&mut self, range: Range<usize>, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_rows(
+        &mut self,
+        range: Range<usize>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let this = cx.weak_entity();
         let focused = self.focus_handle.contains_focused(window, cx);
         let repo = self.repo.read(cx);
@@ -431,7 +525,10 @@ impl Explorer {
             })
             .collect();
         let first = range.start;
-        let colors: Vec<Option<Hsla>> = decorations.iter().map(|(letter, _, _)| letter.map(|l| letter_color(l, cx))).collect();
+        let colors: Vec<Option<Hsla>> = decorations
+            .iter()
+            .map(|(letter, _, _)| letter.map(|l| letter_color(l, cx)))
+            .collect();
         let theme = cx.theme();
         range
             .filter_map(|ix| {
@@ -440,12 +537,24 @@ impl Explorer {
                 let entry = &row.entry;
                 let (letter, changes_inside, ignored) = decorations[ix - first];
                 let color = colors[ix - first];
-                let label_color = color.unwrap_or(if ignored { theme.muted_foreground } else { theme.foreground });
+                let label_color = color.unwrap_or(if ignored {
+                    theme.muted_foreground
+                } else {
+                    theme.foreground
+                });
                 let (chevron, icon) = if entry.is_dir {
                     let open = self.expanded.contains(&entry.path);
                     (
-                        Some(if open { IconName::ChevronDown } else { IconName::ChevronRight }),
-                        Some(if open { IconName::FolderOpen } else { IconName::Folder }),
+                        Some(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        }),
+                        Some(if open {
+                            IconName::FolderOpen
+                        } else {
+                            IconName::Folder
+                        }),
                     )
                 } else {
                     (None, None)
@@ -462,28 +571,67 @@ impl Explorer {
                         .border_1()
                         .border_color(transparent_black())
                         .when(selected, |this| {
-                            this.bg(theme.list_active).when(focused, |this| {
-                                this.border_color(theme.list_active_border)
-                            })
+                            this.bg(theme.list_active)
+                                .when(focused, |this| this.border_color(theme.list_active_border))
                         })
-                        .when(!selected, |this| this.hover(|this| this.bg(theme.list_hover)))
+                        .when(!selected, |this| {
+                            this.hover(|this| this.bg(theme.list_hover))
+                        })
                         .child(
-                            div().w(px(16.)).flex_none().when_some(chevron, |this, chevron| {
-                                this.child(Icon::new(chevron).xsmall().text_color(theme.muted_foreground))
-                            }),
+                            div()
+                                .w(px(16.))
+                                .flex_none()
+                                .when_some(chevron, |this, chevron| {
+                                    this.child(
+                                        Icon::new(chevron)
+                                            .xsmall()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                }),
                         )
                         .child(match icon {
-                            Some(icon) => Icon::new(icon).small().text_color(theme.muted_foreground).into_any_element(),
-                            None => crate::file_icon::render(&entry.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), 16., cx),
+                            Some(icon) => Icon::new(icon)
+                                .small()
+                                .text_color(theme.muted_foreground)
+                                .into_any_element(),
+                            None => crate::file_icon::render(
+                                &entry
+                                    .path
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default(),
+                                16.,
+                                cx,
+                            ),
                         })
-                        .child(div().flex_1().min_w_0().truncate().text_color(label_color).when(ignored, |this| this.opacity(0.75)).child(entry.name.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(label_color)
+                                .when(ignored, |this| this.opacity(0.75))
+                                .child(entry.name.clone()),
+                        )
                         // Git status as in den: a letter for a changed file, a dot for a
                         // folder holding changes.
                         .when_some(letter.zip(color), |this, (letter, color)| {
-                            this.child(div().flex_none().text_xs().text_color(color).child(letter.to_string()))
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(color)
+                                    .child(letter.to_string()),
+                            )
                         })
                         .when(letter.is_none() && changes_inside, |this| {
-                            this.child(div().flex_none().size(px(6.)).rounded_full().bg(theme.yellow.opacity(0.8)))
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(theme.yellow.opacity(0.8)),
+                            )
                         })
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.focus_handle.focus(window, cx);
@@ -493,7 +641,9 @@ impl Explorer {
                             let this = this.clone();
                             let path = entry.path.clone();
                             let is_dir = entry.is_dir;
-                            move |menu, _, _| Explorer::row_menu(menu, this.clone(), path.clone(), is_dir)
+                            move |menu, _, _| {
+                                Explorer::row_menu(menu, this.clone(), path.clone(), is_dir)
+                            }
                         })
                         .into_any_element(),
                 )
@@ -568,11 +718,16 @@ impl Render for Explorer {
                             ),
                     ),
             )
-            .child(
-                div().when_some(self.error.clone(), |this, error| {
-                    this.child(div().px_3().py_1().text_xs().text_color(cx.theme().danger).child(error))
-                }),
-            )
+            .child(div().when_some(self.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
+            }))
             .child(
                 div()
                     .id("explorer-tree")
@@ -585,7 +740,9 @@ impl Render for Explorer {
                         uniform_list(
                             "explorer-rows",
                             self.rows.len(),
-                            cx.processor(|this, range, window, cx| this.render_rows(range, window, cx)),
+                            cx.processor(|this, range, window, cx| {
+                                this.render_rows(range, window, cx)
+                            }),
                         )
                         .track_scroll(&self.scroll)
                         .size_full(),

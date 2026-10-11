@@ -53,14 +53,21 @@ pub fn get_bytes(url: &str, limit: u64) -> Result<Vec<u8>, Error> {
         Err(e) => return Err(Error::Other(e.to_string())),
     };
     let mut bytes = Vec::new();
-    response.into_reader().take(limit).read_to_end(&mut bytes).map_err(|e| Error::Other(e.to_string()))?;
+    response
+        .into_reader()
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::Other(e.to_string()))?;
     Ok(bytes)
 }
 
 /// Where a download of `dest` grows until it is complete: `<name>.part`
 /// next to it.
 pub fn part_path(dest: &Path) -> PathBuf {
-    dest.with_file_name(format!("{}.part", dest.file_name().unwrap_or_default().to_string_lossy()))
+    dest.with_file_name(format!(
+        "{}.part",
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    ))
 }
 
 /// Write `bytes` to `path` through its `.part` file, so a reader never sees
@@ -88,11 +95,19 @@ pub fn fetch_to_file(url: &str, dest: &Path, limit: u64) -> Result<(), Error> {
 pub type Progress<'a> = &'a mut dyn FnMut(&'static str, u64, u64);
 
 /// Stream `url` into `dest` through `dest.part`, resuming a partial download.
-pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'static str, cancel: &Cancel, progress: Progress) -> Result<(), String> {
+pub(crate) fn download(
+    url: &str,
+    dest: &Path,
+    sha256: Option<&str>,
+    stage: &'static str,
+    cancel: &Cancel,
+    progress: Progress,
+) -> Result<(), String> {
     if dest.is_file() {
         return Ok(());
     }
-    std::fs::create_dir_all(dest.parent().ok_or("bad download path")?).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dest.parent().ok_or("bad download path")?)
+        .map_err(|e| e.to_string())?;
     let part = part_path(dest);
     let mut offset = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     let mut request = AGENT.get(url);
@@ -105,14 +120,20 @@ pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'st
             // The partial file is complete or stale: start over.
             let _ = std::fs::remove_file(&part);
             offset = 0;
-            AGENT.get(url).call().map_err(|e| format!("Download failed: {e}"))?
+            AGENT
+                .get(url)
+                .call()
+                .map_err(|e| format!("Download failed: {e}"))?
         }
         Err(e) => return Err(format!("Download failed: {e}")),
     };
     if response.status() != 206 {
         offset = 0; // the server ignored the range
     }
-    let len: u64 = response.header("Content-Length").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let len: u64 = response
+        .header("Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let total = if len > 0 { len + offset } else { 0 };
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -127,7 +148,9 @@ pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'st
     let mut last = Instant::now() - Duration::from_secs(1);
     loop {
         cancel.check()?;
-        let n = reader.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Download interrupted: {e}"))?;
         if n == 0 {
             break;
         }
@@ -148,7 +171,9 @@ pub(crate) fn download(url: &str, dest: &Path, sha256: Option<&str>, stage: &'st
         let got = sha256_file(&part, cancel)?;
         if !got.eq_ignore_ascii_case(want) {
             let _ = std::fs::remove_file(&part);
-            return Err(format!("The downloaded file is corrupt (checksum mismatch): {url}"));
+            return Err(format!(
+                "The downloaded file is corrupt (checksum mismatch): {url}"
+            ));
         }
     }
     std::fs::rename(&part, dest).map_err(|e| e.to_string())
@@ -166,7 +191,11 @@ fn sha256_file(path: &Path, cancel: &Cancel) -> Result<String, String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Stops a download or a request: polled between steps, and the socket of a
@@ -180,7 +209,12 @@ pub struct Cancel {
 impl Cancel {
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::SeqCst);
-        if let Some(stream) = self.stream.lock().ok().and_then(|s| s.as_ref().and_then(|s| s.try_clone().ok())) {
+        if let Some(stream) = self
+            .stream
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().and_then(|s| s.try_clone().ok()))
+        {
             let _ = stream.shutdown(Shutdown::Both);
         }
     }
@@ -190,7 +224,10 @@ impl Cancel {
     }
 
     pub fn check(&self) -> Result<(), String> {
-        if self.is_cancelled() { Err(CANCELLED.into()) } else { Ok(()) }
+        if self.is_cancelled() {
+            Err(CANCELLED.into())
+        } else {
+            Ok(())
+        }
     }
 }
-

@@ -79,7 +79,11 @@ pub fn init(cx: &mut App) {
         cx.spawn(async move |cx| {
             while let Some(event) = events.next().await {
                 _ = cx.update(|cx| {
-                    let terminal = cx.global::<Terminals>().0.get(&event.pane).and_then(WeakEntity::upgrade);
+                    let terminal = cx
+                        .global::<Terminals>()
+                        .0
+                        .get(&event.pane)
+                        .and_then(WeakEntity::upgrade);
                     if let Some(terminal) = terminal {
                         terminal.update(cx, |terminal, cx| terminal.agent_event(&event, cx));
                     }
@@ -89,20 +93,34 @@ pub fn init(cx: &mut App) {
         .detach();
     }
     crate::pane::register(cx, TERMINAL, |data, window, cx| {
-        let cwd = data["cwd"].as_str().map(PathBuf::from).filter(|dir| dir.is_dir()).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let cwd = data["cwd"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let program = data["program"].as_str().map(str::to_string);
-        let agent = data["agent"].as_bool().unwrap_or(program.as_deref() == Some("claude"));
+        let agent = data["agent"]
+            .as_bool()
+            .unwrap_or(program.as_deref() == Some("claude"));
         // A program comes back anew; Claude Code picks its conversation up
         // again: the one its hooks named, else the folder's last.
         let command = match data["resume"].as_str() {
             Some(resume) => Some(resume.to_string()),
-            None => program.as_deref().map(|program| match agent::program_of(program.split_whitespace().next().unwrap_or("")).as_str() {
-                "claude" => agent::claude_resume(Some(program), None, false),
-                _ => program.to_string(),
+            None => program.as_deref().map(|program| {
+                match agent::program_of(program.split_whitespace().next().unwrap_or("")).as_str() {
+                    "claude" => agent::claude_resume(Some(program), None, false),
+                    _ => program.to_string(),
+                }
             }),
         };
         let history = data["scrollback"].as_str().map(str::to_string);
-        let launch = Launch { cwd, program, command, history, agent };
+        let launch = Launch {
+            cwd,
+            program,
+            command,
+            history,
+            agent,
+        };
         std::rc::Rc::new(cx.new(|cx| TerminalPanel::new(launch, window, cx)))
     });
     // Tab moves the focus through the window elsewhere; here it is the
@@ -138,7 +156,11 @@ pub struct Launch {
 
 /// The program a terminal runs, by its preset's name when there is one.
 fn program_label(program: &str, cx: &App) -> String {
-    if let Some(preset) = Settings::get(cx).presets.iter().find(|p| p.command.trim() == program) {
+    if let Some(preset) = Settings::get(cx)
+        .presets
+        .iter()
+        .find(|p| p.command.trim() == program)
+    {
         return preset.name.clone();
     }
     match program {
@@ -159,12 +181,24 @@ fn shell(setting: &str) -> String {
     }
     if cfg!(windows) {
         let on_path = |exe: &str| {
-            std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(exe).is_file()))
+            std::env::var_os("PATH")
+                .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(exe).is_file()))
         };
-        if on_path("pwsh.exe") { "pwsh.exe".into() } else { "powershell.exe".into() }
+        if on_path("pwsh.exe") {
+            "pwsh.exe".into()
+        } else {
+            "powershell.exe".into()
+        }
     } else {
-        let fallback = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/sh" };
-        std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| fallback.into())
+        let fallback = if cfg!(target_os = "macos") {
+            "/bin/zsh"
+        } else {
+            "/bin/sh"
+        };
+        std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| fallback.into())
     }
 }
 
@@ -177,7 +211,11 @@ fn wsl_target(setting: &str, shell: &str, cwd: &Path) -> Option<Option<String>> 
         return None;
     }
     let automatic = setting.trim().is_empty() && std::env::var_os("TERM_SHELL").is_none();
-    let target = wsl::shell(shell).or_else(|| automatic.then(|| wsl::split(cwd).map(|(distro, _)| Some(distro))).flatten())?;
+    let target = wsl::shell(shell).or_else(|| {
+        automatic
+            .then(|| wsl::split(cwd).map(|(distro, _)| Some(distro)))
+            .flatten()
+    })?;
     Some(target.or_else(wsl::default_distro))
 }
 
@@ -190,13 +228,18 @@ pub fn is_shell(command: &str) -> bool {
         return true;
     }
     !command.contains(char::is_whitespace)
-        && matches!(exe_name(command).to_lowercase().as_str(), "bash" | "zsh" | "fish" | "nu" | "sh" | "pwsh" | "powershell" | "cmd")
+        && matches!(
+            exe_name(command).to_lowercase().as_str(),
+            "bash" | "zsh" | "fish" | "nu" | "sh" | "pwsh" | "powershell" | "cmd"
+        )
 }
 
 /// The title bash's usual prompt sets, as Ubuntu's `.bashrc` does:
 /// `me@host: ~/den` (or `me@host:~/den`).
 fn is_prompt_title(title: &str) -> bool {
-    title.split_once(':').is_some_and(|(who, _)| who.contains('@') && !who.contains(char::is_whitespace))
+    title
+        .split_once(':')
+        .is_some_and(|(who, _)| who.contains('@') && !who.contains(char::is_whitespace))
 }
 
 /// `pwsh` for `C:\…\pwsh.exe`.
@@ -230,7 +273,10 @@ struct GridSize {
 fn tail_text(term: &Term<Listener>, lines: usize, columns: usize, max: usize) -> String {
     let history = term.grid().history_size().min(max) as i32;
     let start = alacritty_terminal::index::Point::new(Line(-history), Column(0));
-    let end = alacritty_terminal::index::Point::new(Line(lines as i32 - 1), Column(columns.saturating_sub(1)));
+    let end = alacritty_terminal::index::Point::new(
+        Line(lines as i32 - 1),
+        Column(columns.saturating_sub(1)),
+    );
     let text = term.bounds_to_string(start, end);
     let lines: Vec<&str> = text.trim_end().lines().collect();
     lines[lines.len().saturating_sub(max)..].join("\n")
@@ -317,7 +363,13 @@ impl TerminalPanel {
     /// `command` is what the shell runs first (`claude --continue` when a
     /// session comes back), `program` what the tab is (`claude`).
     pub fn new(launch: Launch, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Launch { cwd, program, command, history, agent } = launch;
+        let Launch {
+            cwd,
+            program,
+            command,
+            history,
+            agent,
+        } = launch;
         let (columns, lines) = (100, 30);
         let events = Listener::default();
         let settings = Settings::get(cx).clone();
@@ -333,7 +385,11 @@ impl TerminalPanel {
             Some(program) if own_shell => program.trim().to_string(),
             _ => shell(&settings.shell),
         };
-        let wsl = wsl_target(if own_shell { &shell } else { &settings.shell }, &shell, &cwd);
+        let wsl = wsl_target(
+            if own_shell { &shell } else { &settings.shell },
+            &shell,
+            &cwd,
+        );
         let command = command.filter(|_| !own_shell);
         let shell_name = match &wsl {
             Some(distro) => distro.clone().unwrap_or_else(|| "wsl".into()),
@@ -380,7 +436,10 @@ impl TerminalPanel {
             // question is where the cursor is, and it paints from that row
             // down, so the text must have its final shape by then for the
             // prompt to follow it directly.
-            this.restore = Some((format!("{}\r\n", history.trim_end().replace('\n', "\r\n")), Vec::new()));
+            this.restore = Some((
+                format!("{}\r\n", history.trim_end().replace('\n', "\r\n")),
+                Vec::new(),
+            ));
         }
         let weak = cx.weak_entity();
         cx.global_mut::<Terminals>().0.insert(this.hook_id, weak);
@@ -405,7 +464,14 @@ impl TerminalPanel {
         ];
     }
 
-    fn spawn(&mut self, shell: &str, command: Option<String>, columns: usize, lines: usize, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    fn spawn(
+        &mut self,
+        shell: &str,
+        command: Option<String>,
+        columns: usize,
+        lines: usize,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         let pair = native_pty_system().openpty(PtySize {
             rows: lines as u16,
             cols: columns as u16,
@@ -419,7 +485,11 @@ impl TerminalPanel {
             // A folder in this distribution by its Linux path; one in another
             // distribution would not translate, so home instead.
             let start = match (wsl::split(&self.cwd), distro) {
-                (Some((cwd_distro, linux)), Some(distro)) if cwd_distro.eq_ignore_ascii_case(distro) => linux,
+                (Some((cwd_distro, linux)), Some(distro))
+                    if cwd_distro.eq_ignore_ascii_case(distro) =>
+                {
+                    linux
+                }
                 (Some(_), _) => "~".into(),
                 (None, _) => self.cwd.to_string_lossy().into(),
             };
@@ -437,7 +507,12 @@ impl TerminalPanel {
                 script.push_str(&agent::inject(self.hook_id, command, true));
                 script.push('\n');
             }
-            cmd.args(["-NoLogo", "-NoExit", "-EncodedCommand", &osc::encode_powershell(&script)]);
+            cmd.args([
+                "-NoLogo",
+                "-NoExit",
+                "-EncodedCommand",
+                &osc::encode_powershell(&script),
+            ]);
         } else if unix::configure(&mut cmd, shell, self.hook_id, command.as_deref()) {
             // zsh or bash on macOS or Linux: den's rc files do the rest.
         } else {
@@ -516,7 +591,9 @@ impl TerminalPanel {
             if let Some(dir) = osc::cwd_of(number, &body) {
                 // A shell in WSL names a Linux folder; den keeps the Windows one.
                 cwd = match &self.wsl {
-                    Some(distro) if dir.to_string_lossy().starts_with('/') => wsl::to_windows(distro.as_deref(), &dir.to_string_lossy()).or(cwd),
+                    Some(distro) if dir.to_string_lossy().starts_with('/') => {
+                        wsl::to_windows(distro.as_deref(), &dir.to_string_lossy()).or(cwd)
+                    }
                     _ => Some(dir),
                 };
             } else if let Some(message) = osc::notification_of(number, &body) {
@@ -534,17 +611,33 @@ impl TerminalPanel {
             }
         }
         for message in messages {
-            let codex = self.program.as_deref().map(|p| agent::program_of(p.split_whitespace().next().unwrap_or(p))).as_deref() == Some("codex");
+            let codex = self
+                .program
+                .as_deref()
+                .map(|p| agent::program_of(p.split_whitespace().next().unwrap_or(p)))
+                .as_deref()
+                == Some("codex");
             let kind = match message.to_lowercase() {
                 _ if !codex => AlertKind::Attention,
-                text if text.contains("approv") || text.contains("permission") || text.contains("waiting") => AlertKind::Input,
+                text if text.contains("approv")
+                    || text.contains("permission")
+                    || text.contains("waiting") =>
+                {
+                    AlertKind::Input
+                }
                 _ => AlertKind::Done,
             };
-            let message = (!message.trim().eq_ignore_ascii_case("agent turn complete")).then_some(message);
+            let message =
+                (!message.trim().eq_ignore_ascii_case("agent turn complete")).then_some(message);
             self.alert(kind, message, cx);
         }
         self.parser.advance(&mut self.term, bytes);
-        let events: Vec<TermEvent> = self.events.0.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default();
+        let events: Vec<TermEvent> = self
+            .events
+            .0
+            .lock()
+            .map(|mut e| std::mem::take(&mut *e))
+            .unwrap_or_default();
         for event in events {
             match event {
                 TermEvent::PtyWrite(text) => self.write(text.as_bytes()),
@@ -557,9 +650,14 @@ impl TerminalPanel {
                     cx.emit(PaneEvent::Changed);
                 }
                 TermEvent::Bell => self.alert(AlertKind::Attention, None, cx),
-                TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                TermEvent::ClipboardStore(_, text) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text))
+                }
                 TermEvent::ClipboardLoad(_, format) => {
-                    let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+                    let text = cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .unwrap_or_default();
                     self.write(format(&text).as_bytes());
                 }
                 TermEvent::TextAreaSizeRequest(format) => {
@@ -584,7 +682,10 @@ impl TerminalPanel {
     /// Tell the workspace the program wants the user, at most once in two seconds.
     fn alert(&mut self, kind: AlertKind, message: Option<String>, cx: &mut Context<Self>) {
         let now = std::time::Instant::now();
-        if self.last_alert.is_some_and(|last| now.duration_since(last).as_secs_f32() < 2.) {
+        if self
+            .last_alert
+            .is_some_and(|last| now.duration_since(last).as_secs_f32() < 2.)
+        {
             return;
         }
         self.last_alert = Some(now);
@@ -598,7 +699,11 @@ impl TerminalPanel {
             "start" => {
                 // A new or cleared conversation has no transcript to resume yet.
                 let source = agent::hook_field(&event.body, "source").unwrap_or_default();
-                self.claude_session = Some(if source == "startup" || source == "clear" { None } else { session });
+                self.claude_session = Some(if source == "startup" || source == "clear" {
+                    None
+                } else {
+                    session
+                });
                 return;
             }
             _ if session.is_some() => self.claude_session = Some(session),
@@ -618,7 +723,9 @@ impl TerminalPanel {
     /// leads with while it works.
     pub fn title_text(&self) -> Option<String> {
         let title = self.title.as_ref()?;
-        let text = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+        let text = title
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .trim();
         (!text.is_empty()).then(|| text.to_string())
     }
 
@@ -642,7 +749,9 @@ impl TerminalPanel {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
         // Line ends as a terminal sends them, wrapped for programs that ask.
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
@@ -654,7 +763,11 @@ impl TerminalPanel {
 
     /// Copy the selection, if there is one; `false` when there was nothing.
     fn copy(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(text) = self.term.selection_to_string().filter(|text| !text.is_empty()) else {
+        let Some(text) = self
+            .term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+        else {
             return false;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -667,7 +780,12 @@ impl TerminalPanel {
         let keystroke = &event.keystroke;
         // Ctrl+C copies while there is a selection, as in Windows Terminal
         // (Cmd+C on macOS, where Ctrl+C always interrupts).
-        if keystroke.key == "c" && keystroke.modifiers.secondary() && !keystroke.modifiers.shift && !keystroke.modifiers.alt && self.copy(cx) {
+        if keystroke.key == "c"
+            && keystroke.modifiers.secondary()
+            && !keystroke.modifiers.shift
+            && !keystroke.modifiers.alt
+            && self.copy(cx)
+        {
             cx.stop_propagation();
             return;
         }
@@ -697,7 +815,12 @@ impl TerminalPanel {
                     format!("\x1b[<{button};{};{}M", col + 1, row + 1)
                 } else {
                     let byte = |v: usize| char::from_u32(32 + v.min(222) as u32).unwrap_or(' ');
-                    format!("\x1b[M{}{}{}", byte(button as usize), byte(col + 1), byte(row + 1))
+                    format!(
+                        "\x1b[M{}{}{}",
+                        byte(button as usize),
+                        byte(col + 1),
+                        byte(row + 1)
+                    )
                 };
                 self.write(report.as_bytes());
             }
@@ -720,7 +843,12 @@ impl TerminalPanel {
 
     // -- Mouse ---------------------------------------------------------------
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_handle.focus(window, cx);
         if event.modifiers.secondary() {
             if let Some((_, _, link)) = self.link_at(event.position) {
@@ -779,7 +907,10 @@ impl TerminalPanel {
         (0..self.columns)
             .map(|col| {
                 let cell = &line[Column(col)];
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
                     ' '
                 } else {
                     cell.c
@@ -803,7 +934,8 @@ impl TerminalPanel {
             return None;
         }
         let text = self.row_text(row);
-        let found = links::find(&text, col, &self.cwd, |path| path.is_file()).map(|(range, link)| (row, range, link));
+        let found = links::find(&text, col, &self.cwd, |path| path.is_file())
+            .map(|(range, link)| (row, range, link));
         match &found {
             Some(hit) => self.link_cache = Some(hit.clone()),
             None => self.no_link_at = Some((row, col)),
@@ -820,7 +952,9 @@ impl TerminalPanel {
     fn open_link(&mut self, link: Link, cx: &mut Context<Self>) {
         match link {
             Link::Url(url) => cx.open_url(&url),
-            Link::File { path, line, column } => cx.emit(PaneEvent::OpenFile { path, line, column }),
+            Link::File { path, line, column } => {
+                cx.emit(PaneEvent::OpenFile { path, line, column })
+            }
         }
     }
 
@@ -830,11 +964,18 @@ impl TerminalPanel {
         let font = font(crate::settings::mono_font(cx));
         let text = window.text_system();
         let font_id = text.resolve_font(&font);
-        let width = text.advance(font_id, font_size, 'm').map(|s| s.width).unwrap_or(font_size * 0.6);
+        let width = text
+            .advance(font_id, font_size, 'm')
+            .map(|s| s.width)
+            .unwrap_or(font_size * 0.6);
         self.cell = size(width, (font_size * 1.2).round());
         self.origin = point(bounds.origin.x + PADDING, bounds.origin.y + PADDING / 2.);
-        let columns = ((bounds.size.width - PADDING * 2.) / self.cell.width).floor().max(2.) as usize;
-        let lines = ((bounds.size.height - PADDING) / self.cell.height).floor().max(1.) as usize;
+        let columns = ((bounds.size.width - PADDING * 2.) / self.cell.width)
+            .floor()
+            .max(2.) as usize;
+        let lines = ((bounds.size.height - PADDING) / self.cell.height)
+            .floor()
+            .max(1.) as usize;
         if (columns, lines) != (self.columns, self.lines) {
             self.columns = columns;
             self.lines = lines;
@@ -863,7 +1004,11 @@ impl TerminalPanel {
     /// output leaves it at the start of a fresh one.
     pub(crate) fn scrollback(&self, max: usize) -> String {
         let cursor = self.term.grid().cursor.point;
-        let lines = if cursor.column.0 > 0 { cursor.line.0 as usize } else { self.lines };
+        let lines = if cursor.column.0 > 0 {
+            cursor.line.0 as usize
+        } else {
+            self.lines
+        };
         tail_text(&self.term, lines, self.columns, max)
     }
 
@@ -915,12 +1060,26 @@ impl Drop for TerminalPanel {
 /// which send no key codes) alike. There is no document behind it, so the
 /// ranges are empty and IME composition only shows in the IME's own window.
 impl EntityInputHandler for TerminalPanel {
-    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
         None
     }
 
-    fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
-        Some(UTF16Selection { range: 0..0, reversed: false })
+    fn selected_text_range(
+        &mut self,
+        _: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: 0..0,
+            reversed: false,
+        })
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
@@ -929,16 +1088,39 @@ impl EntityInputHandler for TerminalPanel {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
 
-    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !text.is_empty() {
-            self.input(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes(), cx);
+            self.input(
+                text.replace("\r\n", "\r").replace('\n', "\r").as_bytes(),
+                cx,
+            );
         }
     }
 
-    fn replace_and_mark_text_in_range(&mut self, _: Option<Range<usize>>, _: &str, _: Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) {}
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        _: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
 
     /// The cursor's cell, where the IME puts its candidate window.
-    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
         let cursor = self.term.grid().cursor.point;
         let origin = point(
             self.origin.x + self.cell.width * cursor.column.0 as f32,
@@ -947,7 +1129,12 @@ impl EntityInputHandler for TerminalPanel {
         Some(Bounds::new(origin, self.cell))
     }
 
-    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
         None
     }
 }
@@ -966,7 +1153,11 @@ impl Pane for TerminalPanel {
     }
 
     fn icon(&self, _: &App) -> IconName {
-        if self.agent { IconName::Bot } else { IconName::SquareTerminal }
+        if self.agent {
+            IconName::Bot
+        } else {
+            IconName::SquareTerminal
+        }
     }
 
     /// The mark of the program running here, as den shows it: its preset's
@@ -975,7 +1166,12 @@ impl Pane for TerminalPanel {
     fn icon_element(&self, cx: &App) -> Option<AnyElement> {
         let program = if self.program_running {
             self.program.clone()?
-        } else if self.claude_session.is_some() || self.title.as_ref().is_some_and(|t| t.contains("Claude Code")) {
+        } else if self.claude_session.is_some()
+            || self
+                .title
+                .as_ref()
+                .is_some_and(|t| t.contains("Claude Code"))
+        {
             "claude".to_string()
         } else if let Some(shell) = self.program.as_ref().filter(|p| is_shell(p)) {
             shell.clone()
@@ -985,14 +1181,32 @@ impl Pane for TerminalPanel {
             return None;
         };
         let settings = Settings::get(cx);
-        if let Some(preset) = settings.presets.iter().find(|p| !p.browser && p.command.trim() == program.trim()) {
-            return Some(crate::preset_icon::render(preset, preset.icon.as_deref(), 16., cx));
+        if let Some(preset) = settings
+            .presets
+            .iter()
+            .find(|p| !p.browser && p.command.trim() == program.trim())
+        {
+            return Some(crate::preset_icon::render(
+                preset,
+                preset.icon.as_deref(),
+                16.,
+                cx,
+            ));
         }
         if wsl::shell(&program).is_some() {
-            return Some(crate::preset_icon::render(&crate::settings::Preset::new(program.clone(), program), None, 16., cx));
+            return Some(crate::preset_icon::render(
+                &crate::settings::Preset::new(program.clone(), program),
+                None,
+                16.,
+                cx,
+            ));
         }
         crate::preset_icon::has_program_logo(&program).then(|| {
-            let preset = crate::settings::Preset { agent: true, pinned: false, ..crate::settings::Preset::new(program.clone(), program.clone()) };
+            let preset = crate::settings::Preset {
+                agent: true,
+                pinned: false,
+                ..crate::settings::Preset::new(program.clone(), program.clone())
+            };
             crate::preset_icon::render(&preset, None, 16., cx)
         })
     }
@@ -1030,9 +1244,15 @@ impl Render for TerminalPanel {
             .overflow_hidden()
             .bg(colors::palette().background.unwrap_or(theme.background))
             .text_color(theme.foreground)
-            .cursor(if link_cursor { CursorStyle::PointingHand } else { CursorStyle::IBeam })
+            .cursor(if link_cursor {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_action(cx.listener(|this, action: &SendText, _, cx| this.input(action.0.as_bytes(), cx)))
+            .on_action(
+                cx.listener(|this, action: &SendText, _, cx| this.input(action.0.as_bytes(), cx)),
+            )
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
                 this.copy(cx);
             }))
@@ -1040,12 +1260,16 @@ impl Render for TerminalPanel {
             // The menu bar's Edit > Copy and Paste (macOS). Elsewhere gpui binds
             // Ctrl+C to this Copy too, before the key reaches `on_key_down`:
             // with nothing selected it interrupts, as the key does.
-            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
-                if !this.copy(cx) && !crate::ui::COMMAND_KEY {
-                    this.input(b"\x03", cx);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| this.paste(cx)))
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    if !this.copy(cx) && !crate::ui::COMMAND_KEY {
+                        this.input(b"\x03", cx);
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| this.paste(cx)),
+            )
             .on_action(cx.listener(|this, _: &ScrollPageUp, _, cx| {
                 this.term.scroll_display(Scroll::PageUp);
                 cx.notify();
@@ -1059,15 +1283,26 @@ impl Render for TerminalPanel {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             // Right-click copies a selection, else pastes, as in den.
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, _, window, cx| {
-                this.focus_handle.focus(window, cx);
-                if !this.copy(cx) {
-                    this.paste(cx);
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.focus_handle.focus(window, cx);
+                    if !this.copy(cx) {
+                        this.paste(cx);
+                    }
+                }),
+            )
             .child(TerminalElement::new(cx.entity(), focused))
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().absolute().top_0().left_0().p_2().text_color(cx.theme().danger).child(error))
+                this.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .p_2()
+                        .text_color(cx.theme().danger)
+                        .child(error),
+                )
             })
             .when(self.exited, |this| {
                 this.child(
@@ -1086,12 +1321,21 @@ impl Render for TerminalPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text};
+    use super::{
+        Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text,
+    };
 
     #[test]
     fn prompt_titles() {
-        assert!(is_prompt_title("patri@Patrick-PC: /mnt/c/Users/patri") && is_prompt_title("me@box:~/den"));
-        assert!(!is_prompt_title("✳ Claude Code") && !is_prompt_title("vim: notes.md") && !is_prompt_title("Mail me@x: hi"));
+        assert!(
+            is_prompt_title("patri@Patrick-PC: /mnt/c/Users/patri")
+                && is_prompt_title("me@box:~/den")
+        );
+        assert!(
+            !is_prompt_title("✳ Claude Code")
+                && !is_prompt_title("vim: notes.md")
+                && !is_prompt_title("Mail me@x: hi")
+        );
     }
 
     #[test]
@@ -1103,8 +1347,18 @@ mod tests {
 
     #[test]
     fn scrollback_keeps_the_last_lines() {
-        let config = Config { scrolling_history: 2000, ..Config::default() };
-        let mut term = Term::new(config, &GridSize { columns: 20, lines: 5 }, Listener::default());
+        let config = Config {
+            scrolling_history: 2000,
+            ..Config::default()
+        };
+        let mut term = Term::new(
+            config,
+            &GridSize {
+                columns: 20,
+                lines: 5,
+            },
+            Listener::default(),
+        );
         let mut parser: Processor = Processor::new();
         for i in 0..1000 {
             parser.advance(&mut term, format!("line {i}\r\n").as_bytes());
@@ -1116,7 +1370,14 @@ mod tests {
         parser.advance(&mut term, b"$ ");
         let cursor = term.grid().cursor.point.line.0 as usize;
         assert_eq!(tail_text(&term, cursor, 20, 2), "line 998\nline 999");
-        let mut fresh = Term::new(Config::default(), &GridSize { columns: 20, lines: 5 }, Listener::default());
+        let mut fresh = Term::new(
+            Config::default(),
+            &GridSize {
+                columns: 20,
+                lines: 5,
+            },
+            Listener::default(),
+        );
         parser.advance(&mut fresh, b"$ ");
         assert_eq!(tail_text(&fresh, 0, 20, 500), "");
         parser.advance(&mut fresh, b"\r\nout\r\n$ ");

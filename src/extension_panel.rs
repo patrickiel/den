@@ -70,31 +70,68 @@ impl ExtensionPanel {
         let entry = Extensions::get(cx).entry(&id).cloned();
         let readme = entry
             .as_ref()
-            .and_then(|e| Some(Readme::Text(std::fs::read_to_string(e.dir.join("README.md")).ok()?.into(), Some(e.dir.clone()))))
-            .unwrap_or_else(|| Readme::Missing(format!("{} has no README.md.", entry.as_ref().map_or(id.as_str(), |e| e.name()))));
-        let settings = entry.as_ref().and_then(|e| e.manifest.as_ref()).map(|m| m.settings.clone()).unwrap_or_default();
+            .and_then(|e| {
+                Some(Readme::Text(
+                    std::fs::read_to_string(e.dir.join("README.md"))
+                        .ok()?
+                        .into(),
+                    Some(e.dir.clone()),
+                ))
+            })
+            .unwrap_or_else(|| {
+                Readme::Missing(format!(
+                    "{} has no README.md.",
+                    entry.as_ref().map_or(id.as_str(), |e| e.name())
+                ))
+            });
+        let settings = entry
+            .as_ref()
+            .and_then(|e| e.manifest.as_ref())
+            .map(|m| m.settings.clone())
+            .unwrap_or_default();
         let values = extensions::settings_values(&id, cx);
         let mut inputs = Vec::new();
         let mut _subscriptions = Vec::new();
-        for setting in settings.iter().filter(|s| matches!(s.kind, SettingKind::Number | SettingKind::String)) {
+        for setting in settings
+            .iter()
+            .filter(|s| matches!(s.kind, SettingKind::Number | SettingKind::String))
+        {
             let text = values.get(&setting.key).map(text_of).unwrap_or_default();
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(text_of(&setting.default)).default_value(text));
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(text_of(&setting.default))
+                    .default_value(text)
+            });
             inputs.push((setting.key.clone(), input.clone()));
             let (id, setting) = (id.clone(), setting.clone());
-            _subscriptions.push(cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let text = input.read(cx).value().to_string();
-                    // A number box that doesn't hold a number keeps the last good value.
-                    if let Some(value) = parse(&setting, &text) {
-                        extensions::set_setting(&id, &setting.key, value, cx);
+            _subscriptions.push(
+                cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let text = input.read(cx).value().to_string();
+                        // A number box that doesn't hold a number keeps the last good value.
+                        if let Some(value) = parse(&setting, &text) {
+                            extensions::set_setting(&id, &setting.key, value, cx);
+                        }
                     }
-                }
-            }));
+                }),
+            );
         }
-        let tab = if matches!(readme, Readme::Missing(_)) && !settings.is_empty() { Tab::Settings } else { Tab::Details };
+        let tab = if matches!(readme, Readme::Missing(_)) && !settings.is_empty() {
+            Tab::Settings
+        } else {
+            Tab::Details
+        };
         _subscriptions.push(cx.observe_global::<Extensions>(|_, cx| cx.notify()));
         _subscriptions.push(cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()));
-        Self { id, listing: None, focus_handle: cx.focus_handle(), tab, readme, inputs, _subscriptions }
+        Self {
+            id,
+            listing: None,
+            focus_handle: cx.focus_handle(),
+            tab,
+            readme,
+            inputs,
+            _subscriptions,
+        }
     }
 
     /// The page of `listing`, not installed: its README comes from its repository.
@@ -104,7 +141,9 @@ impl ExtensionPanel {
         } else {
             let url = listing.readme_url.clone();
             cx.spawn(async move |this, cx| {
-                let result = cx.background_spawn(async move { crate::backend::extensions::fetch_readme(&url) }).await;
+                let result = cx
+                    .background_spawn(async move { crate::backend::extensions::fetch_readme(&url) })
+                    .await;
                 _ = this.update(cx, |this, cx| {
                     this.readme = match result {
                         Ok(text) => Readme::Text(text.into(), None),
@@ -134,7 +173,8 @@ impl ExtensionPanel {
     /// Put `key` back to its default, and its box with it (which sets the
     /// default again as it changes, a value equal to the default).
     fn reset(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let default = Extensions::get(cx).entry(&self.id)
+        let default = Extensions::get(cx)
+            .entry(&self.id)
             .and_then(|e| e.manifest.as_ref())
             .and_then(|m| m.settings.iter().find(|s| s.key == key))
             .map(|s| text_of(&s.default))
@@ -147,19 +187,33 @@ impl ExtensionPanel {
     }
 
     /// The header of a page for an extension not installed.
-    fn render_preview_header(&self, listing: &Listing, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_preview_header(
+        &self,
+        listing: &Listing,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let wanted = vec![listing.clone()];
         cx.defer(move |cx| extensions::want_icons(wanted, cx));
         let theme = cx.theme().clone();
-        let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&listing.id));
+        let progress = crate::downloads::download_progress(
+            &crate::downloads::install_progress_key(&listing.id),
+        );
         let url = format!("https://github.com/{}", listing.repo);
         let action: AnyElement = if let Some(progress) = progress {
-            div().text_sm().text_color(theme.muted_foreground).child(progress).into_any_element()
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(progress)
+                .into_any_element()
         } else if !listing.loadable() {
             div()
                 .text_sm()
                 .text_color(theme.muted_foreground)
-                .child(format!("Built for extension API {}; this den has {}. Update den to install it.", listing.api, den_extension::API_VERSION))
+                .child(format!(
+                    "Built for extension API {}; this den has {}. Update den to install it.",
+                    listing.api,
+                    den_extension::API_VERSION
+                ))
                 .into_any_element()
         } else {
             let repo = listing.repo.clone();
@@ -168,7 +222,9 @@ impl ExtensionPanel {
                 .primary()
                 .icon(Icon::new(IconName::Download))
                 .label("Install")
-                .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), None, window, cx))
+                .on_click(move |_, window, cx| {
+                    crate::downloads::get_extension(repo.clone(), None, window, cx)
+                })
                 .into_any_element()
         };
         h_flex()
@@ -187,22 +243,42 @@ impl ExtensionPanel {
                         h_flex()
                             .gap_3()
                             .items_baseline()
-                            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(listing.name.clone()))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(format!("v{}", listing.version))),
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(listing.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("v{}", listing.version)),
+                            ),
                     )
                     .child(
-                        h_flex().gap_3().text_sm().text_color(theme.muted_foreground).child(listing.id.clone()).child(div().child("·")).child(
-                            div()
-                                .id("ext-page-repo")
-                                .text_color(theme.link)
-                                .cursor_pointer()
-                                .hover(|this| this.underline())
-                                .child(format!("github.com/{}", listing.repo))
-                                .on_click(move |_, _, cx| cx.open_url(&url)),
-                        ),
+                        h_flex()
+                            .gap_3()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(listing.id.clone())
+                            .child(div().child("·"))
+                            .child(
+                                div()
+                                    .id("ext-page-repo")
+                                    .text_color(theme.link)
+                                    .cursor_pointer()
+                                    .hover(|this| this.underline())
+                                    .child(format!("github.com/{}", listing.repo))
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            ),
                     )
-                    .when(!listing.description.is_empty(), |this| this.child(div().text_base().child(listing.description.clone())))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child("Not installed. Extensions are native code and run with your permissions."))
+                    .when(!listing.description.is_empty(), |this| {
+                        this.child(div().text_base().child(listing.description.clone()))
+                    })
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(
+                        "Not installed. Extensions are native code and run with your permissions.",
+                    ))
                     .child(h_flex().pt_1().child(action)),
             )
     }
@@ -211,7 +287,9 @@ impl ExtensionPanel {
         let theme = cx.theme().clone();
         let manifest = entry.manifest.as_ref();
         let (dot, status) = status(entry, cx);
-        let repository = manifest.map(|m| m.repository.clone()).filter(|r| !r.is_empty());
+        let repository = manifest
+            .map(|m| m.repository.clone())
+            .filter(|r| !r.is_empty());
         let actions = entry_actions(entry, None, false, cx);
 
         h_flex()
@@ -230,8 +308,20 @@ impl ExtensionPanel {
                         h_flex()
                             .gap_3()
                             .items_baseline()
-                            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child(entry.name().to_string()))
-                            .when_some(manifest, |this, m| this.child(div().text_sm().text_color(theme.muted_foreground).child(format!("v{}", m.version)))),
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(entry.name().to_string()),
+                            )
+                            .when_some(manifest, |this, m| {
+                                this.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!("v{}", m.version)),
+                                )
+                            }),
                     )
                     .child(
                         h_flex()
@@ -252,13 +342,20 @@ impl ExtensionPanel {
                                 )
                             }),
                     )
-                    .when_some(manifest.filter(|m| !m.description.is_empty()), |this, m| this.child(div().text_base().child(m.description.clone())))
+                    .when_some(manifest.filter(|m| !m.description.is_empty()), |this, m| {
+                        this.child(div().text_base().child(m.description.clone()))
+                    })
                     .child(
                         h_flex()
                             .gap_1p5()
                             .items_center()
                             .child(div().size(px(8.)).rounded_full().flex_none().bg(dot))
-                            .child(div().text_sm().text_color(theme.muted_foreground).child(status)),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(status),
+                            ),
                     )
                     .child(actions),
             )
@@ -275,8 +372,16 @@ impl ExtensionPanel {
                 .text_sm()
                 .cursor_pointer()
                 .border_b_2()
-                .border_color(if active { theme.primary } else { transparent_black() })
-                .text_color(if active { theme.foreground } else { theme.muted_foreground })
+                .border_color(if active {
+                    theme.primary
+                } else {
+                    transparent_black()
+                })
+                .text_color(if active {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
                 .hover(|this| this.text_color(theme.foreground))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -290,7 +395,14 @@ impl ExtensionPanel {
             .border_b_1()
             .border_color(theme.border)
             .child(tab("ext-tab-details", "Details".into(), Tab::Details, cx))
-            .when(settings > 0, |this| this.child(tab("ext-tab-settings", format!("Settings ({settings})"), Tab::Settings, cx)))
+            .when(settings > 0, |this| {
+                this.child(tab(
+                    "ext-tab-settings",
+                    format!("Settings ({settings})"),
+                    Tab::Settings,
+                    cx,
+                ))
+            })
     }
 
     fn render_details(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -311,7 +423,9 @@ impl ExtensionPanel {
                     .image_source(move |url| {
                         let url = url.to_string();
                         match &dir {
-                            Some(dir) if !url.contains("://") && !url.starts_with("data:") => ImageSource::from(dir.join(url.trim_start_matches("./"))),
+                            Some(dir) if !url.contains("://") && !url.starts_with("data:") => {
+                                ImageSource::from(dir.join(url.trim_start_matches("./")))
+                            }
                             _ => ImageSource::from(url),
                         }
                     }),
@@ -322,86 +436,138 @@ impl ExtensionPanel {
     fn render_settings(&self, settings: &[Setting], cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let values = extensions::settings_values(&self.id, cx);
-        let user = crate::settings::Settings::get(cx).extension_settings.get(&self.id).cloned().unwrap_or_default();
-        let rows = settings.iter().filter(|s| s.kind != SettingKind::Unknown).map(|setting| {
-            let value = values.get(&setting.key).cloned().unwrap_or(Value::Null);
-            let changed = user.get(&setting.key).is_some_and(|v| setting.accepts(v) && *v != setting.default);
-            let (id, key) = (self.id.clone(), setting.key.clone());
-            let control: AnyElement = match setting.kind {
-                SettingKind::Boolean => Switch::new(SharedString::from(format!("ext-set-{key}")))
-                    .checked(value.as_bool().unwrap_or(false))
-                    .on_click(move |checked, _, cx| extensions::set_setting(&id, &key, Some(json!(*checked)), cx))
-                    .into_any_element(),
-                SettingKind::Choice => {
-                    let current = value.as_str().unwrap_or_default().to_string();
-                    let options = setting.options.clone();
-                    Button::new(SharedString::from(format!("ext-set-{key}")))
-                        .small()
-                        .outline()
-                        .label(current.clone())
-                        .icon(Icon::new(IconName::ChevronDown))
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for option in &options {
-                                let (id, key, option) = (id.clone(), key.clone(), option.clone());
-                                menu = menu.item(
-                                    PopupMenuItem::new(option.clone())
-                                        .checked(option == current)
-                                        .on_click(move |_, _, cx| extensions::set_setting(&id, &key, Some(json!(option)), cx)),
-                                );
-                            }
-                            menu
-                        })
-                        .into_any_element()
-                }
-                _ => {
-                    let input = self.inputs.iter().find(|(k, _)| *k == setting.key).map(|(_, input)| input.clone());
-                    let bad = input.as_ref().is_some_and(|input| {
-                        let text = input.read(cx).value();
-                        setting.kind == SettingKind::Number && !text.trim().is_empty() && parse(setting, &text).is_none()
-                    });
-                    v_flex()
-                        .w(px(260.))
-                        .gap_1()
-                        .when_some(input, |this, input| this.child(Input::new(&input).small()))
-                        .when(bad, |this| this.child(div().text_xs().text_color(theme.danger).child("Not a number; the last good value stays.")))
-                        .into_any_element()
-                }
-            };
-            let reset_key = setting.key.clone();
-            h_flex()
-                .w_full()
-                .py_3()
-                .gap_6()
-                .justify_between()
-                .border_b_1()
-                .border_color(theme.border)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w(px(200.))
-                        .gap_0p5()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(setting.title.clone()))
-                                .when(changed, |this| {
-                                    this.child(
-                                        Button::new(SharedString::from(format!("ext-reset-{}", setting.key)))
+        let user = crate::settings::Settings::get(cx)
+            .extension_settings
+            .get(&self.id)
+            .cloned()
+            .unwrap_or_default();
+        let rows = settings
+            .iter()
+            .filter(|s| s.kind != SettingKind::Unknown)
+            .map(|setting| {
+                let value = values.get(&setting.key).cloned().unwrap_or(Value::Null);
+                let changed = user
+                    .get(&setting.key)
+                    .is_some_and(|v| setting.accepts(v) && *v != setting.default);
+                let (id, key) = (self.id.clone(), setting.key.clone());
+                let control: AnyElement = match setting.kind {
+                    SettingKind::Boolean => {
+                        Switch::new(SharedString::from(format!("ext-set-{key}")))
+                            .checked(value.as_bool().unwrap_or(false))
+                            .on_click(move |checked, _, cx| {
+                                extensions::set_setting(&id, &key, Some(json!(*checked)), cx)
+                            })
+                            .into_any_element()
+                    }
+                    SettingKind::Choice => {
+                        let current = value.as_str().unwrap_or_default().to_string();
+                        let options = setting.options.clone();
+                        Button::new(SharedString::from(format!("ext-set-{key}")))
+                            .small()
+                            .outline()
+                            .label(current.clone())
+                            .icon(Icon::new(IconName::ChevronDown))
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for option in &options {
+                                    let (id, key, option) =
+                                        (id.clone(), key.clone(), option.clone());
+                                    menu = menu.item(
+                                        PopupMenuItem::new(option.clone())
+                                            .checked(option == current)
+                                            .on_click(move |_, _, cx| {
+                                                extensions::set_setting(
+                                                    &id,
+                                                    &key,
+                                                    Some(json!(option)),
+                                                    cx,
+                                                )
+                                            }),
+                                    );
+                                }
+                                menu
+                            })
+                            .into_any_element()
+                    }
+                    _ => {
+                        let input = self
+                            .inputs
+                            .iter()
+                            .find(|(k, _)| *k == setting.key)
+                            .map(|(_, input)| input.clone());
+                        let bad = input.as_ref().is_some_and(|input| {
+                            let text = input.read(cx).value();
+                            setting.kind == SettingKind::Number
+                                && !text.trim().is_empty()
+                                && parse(setting, &text).is_none()
+                        });
+                        v_flex()
+                            .w(px(260.))
+                            .gap_1()
+                            .when_some(input, |this, input| this.child(Input::new(&input).small()))
+                            .when(bad, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.danger)
+                                        .child("Not a number; the last good value stays."),
+                                )
+                            })
+                            .into_any_element()
+                    }
+                };
+                let reset_key = setting.key.clone();
+                h_flex()
+                    .w_full()
+                    .py_3()
+                    .gap_6()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w(px(200.))
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(setting.title.clone()),
+                                    )
+                                    .when(changed, |this| {
+                                        this.child(
+                                            Button::new(SharedString::from(format!(
+                                                "ext-reset-{}",
+                                                setting.key
+                                            )))
                                             .xsmall()
                                             .ghost()
                                             .icon(Icon::new(IconName::RotateCcw))
-                                            .tooltip(format!("Reset to {}", text_of(&setting.default)))
-                                            .on_click(cx.listener(move |this, _, window, cx| this.reset(&reset_key, window, cx))),
-                                    )
-                                }),
-                        )
-                        .when(!setting.description.is_empty(), |this| {
-                            this.child(div().text_xs().text_color(theme.muted_foreground).child(setting.description.clone()))
-                        }),
-                )
-                .child(control)
-        });
+                                            .tooltip(format!(
+                                                "Reset to {}",
+                                                text_of(&setting.default)
+                                            ))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.reset(&reset_key, window, cx)
+                                            })),
+                                        )
+                                    }),
+                            )
+                            .when(!setting.description.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(setting.description.clone()),
+                                )
+                            }),
+                    )
+                    .child(control)
+            });
         v_flex()
             .id("ext-settings")
             .size_full()
@@ -409,14 +575,26 @@ impl ExtensionPanel {
             .px_8()
             .py_2()
             .children(rows)
-            .child(div().pt_3().text_xs().text_color(theme.muted_foreground).child("Changes are saved at once and sent to the extension while it runs."))
+            .child(
+                div()
+                    .pt_3()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Changes are saved at once and sent to the extension while it runs."),
+            )
             .into_any_element()
     }
 }
 
 impl ExtensionPanel {
     fn note(&self, text: &str, cx: &App) -> AnyElement {
-        div().px_8().py_6().text_sm().text_color(cx.theme().muted_foreground).child(text.to_string()).into_any_element()
+        div()
+            .px_8()
+            .py_6()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(text.to_string())
+            .into_any_element()
     }
 }
 
@@ -436,7 +614,11 @@ fn parse(setting: &Setting, text: &str) -> Option<Option<Value>> {
         SettingKind::Number if text.trim().is_empty() => Some(None),
         SettingKind::Number => {
             let text = text.trim();
-            let value = text.parse::<i64>().map(Value::from).ok().or_else(|| text.parse::<f64>().ok().and_then(|n| serde_json::Number::from_f64(n).map(Value::Number)))?;
+            let value = text.parse::<i64>().map(Value::from).ok().or_else(|| {
+                text.parse::<f64>()
+                    .ok()
+                    .and_then(|n| serde_json::Number::from_f64(n).map(Value::Number))
+            })?;
             Some(Some(value))
         }
         _ => Some(Some(Value::String(text.to_string()))),
@@ -453,7 +635,11 @@ impl Pane for ExtensionPanel {
     }
 
     fn label(&self, cx: &App) -> SharedString {
-        let name = Extensions::get(cx).entry(&self.id).map(|e| e.name().to_string()).or_else(|| self.listing.as_ref().map(|l| l.name.clone())).unwrap_or_else(|| self.id.clone());
+        let name = Extensions::get(cx)
+            .entry(&self.id)
+            .map(|e| e.name().to_string())
+            .or_else(|| self.listing.as_ref().map(|l| l.name.clone()))
+            .unwrap_or_else(|| self.id.clone());
         format!("Extension: {name}").into()
     }
 
@@ -485,8 +671,15 @@ impl Render for ExtensionPanel {
                 .child(self.render_tabs(0, cx))
                 .child(div().flex_1().min_h_0().child(self.render_details(cx)));
         };
-        let settings = entry.manifest.as_ref().map(|m| m.settings.clone()).unwrap_or_default();
-        let shown = settings.iter().filter(|s| s.kind != SettingKind::Unknown).count();
+        let settings = entry
+            .manifest
+            .as_ref()
+            .map(|m| m.settings.clone())
+            .unwrap_or_default();
+        let shown = settings
+            .iter()
+            .filter(|s| s.kind != SettingKind::Unknown)
+            .count();
         let tab = if shown == 0 { Tab::Details } else { self.tab };
         v_flex()
             .size_full()
@@ -507,7 +700,14 @@ mod tests {
     use serde_json::json;
 
     fn setting(kind: SettingKind) -> Setting {
-        Setting { key: "k".into(), title: "K".into(), description: String::new(), kind, default: json!(1), options: Vec::new() }
+        Setting {
+            key: "k".into(),
+            title: "K".into(),
+            description: String::new(),
+            kind,
+            default: json!(1),
+            options: Vec::new(),
+        }
     }
 
     #[test]
@@ -517,7 +717,10 @@ mod tests {
         assert_eq!(parse(&number, "1.5"), Some(Some(json!(1.5))));
         assert_eq!(parse(&number, ""), Some(None));
         assert_eq!(parse(&number, "abc"), None);
-        assert_eq!(parse(&setting(SettingKind::String), ""), Some(Some(json!(""))));
+        assert_eq!(
+            parse(&setting(SettingKind::String), ""),
+            Some(Some(json!("")))
+        );
         assert_eq!(text_of(&json!("a")), "a");
         assert_eq!(text_of(&json!(90)), "90");
     }

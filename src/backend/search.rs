@@ -8,9 +8,9 @@ use ignore::{WalkBuilder, WalkState};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Larger files are skipped: the editor refuses them too, so nothing could be replaced in them.
@@ -23,7 +23,14 @@ const CHARS_BEFORE: usize = 30;
 const CHARS_AFTER: usize = 250;
 /// VS Code's `files.exclude` and `search.exclude` defaults, applied together with the ignore files.
 const DEFAULT_EXCLUDES: &[&str] = &[
-    "**/.git", "**/.svn", "**/.hg", "**/CVS", "**/.DS_Store", "**/Thumbs.db", "**/node_modules", "**/bower_components",
+    "**/.git",
+    "**/.svn",
+    "**/.hg",
+    "**/CVS",
+    "**/.DS_Store",
+    "**/Thumbs.db",
+    "**/node_modules",
+    "**/bower_components",
     "**/*.code-search",
 ];
 /// Results go out when this many files have matched, or when this long has passed since the last batch.
@@ -78,11 +85,18 @@ pub struct Done {
 
 /// Search `root` (or `query.paths`), handing each batch of files with matches to `on_files`
 /// (which returns false to stop). Err for a pattern or glob that does not parse.
-pub fn search(root: &Path, query: &Query, cancel: &AtomicBool, on_files: impl FnMut(Vec<FileMatch>) -> bool) -> Result<Done, String> {
+pub fn search(
+    root: &Path,
+    query: &Query,
+    cancel: &AtomicBool,
+    on_files: impl FnMut(Vec<FileMatch>) -> bool,
+) -> Result<Done, String> {
     let search = Search::new(&root.to_string_lossy(), query)?;
     let budget = Budget::new(query.max_results);
     search.run(query.paths.as_deref(), &budget, cancel, on_files);
-    Ok(Done { limit_hit: budget.spent() })
+    Ok(Done {
+        limit_hit: budget.spent(),
+    })
 }
 
 /// The matches in `text` (an editor's unsaved buffer), as `search` reports them for a file.
@@ -151,7 +165,13 @@ impl Search {
     }
 
     /// Search on worker threads while this one batches what they find.
-    fn run(&self, paths: Option<&[String]>, budget: &Budget, cancel: &AtomicBool, mut out: impl FnMut(Vec<FileMatch>) -> bool) {
+    fn run(
+        &self,
+        paths: Option<&[String]>,
+        budget: &Budget,
+        cancel: &AtomicBool,
+        mut out: impl FnMut(Vec<FileMatch>) -> bool,
+    ) {
         let (tx, rx) = mpsc::channel();
         std::thread::scope(|s| {
             s.spawn(move || match paths {
@@ -228,7 +248,11 @@ impl Search {
         }
         let matches = search_file(path, &self.matcher, budget);
         if !matches.is_empty() {
-            let _ = tx.send(FileMatch { path: path.to_string_lossy().into_owned(), rel, matches });
+            let _ = tx.send(FileMatch {
+                path: path.to_string_lossy().into_owned(),
+                rel,
+                matches,
+            });
         }
     }
 }
@@ -239,7 +263,9 @@ fn search_file(path: &Path, matcher: &Matcher, budget: &Budget) -> Vec<LineMatch
         Ok(meta) if meta.is_file() && meta.len() <= MAX_BYTES => {}
         _ => return Vec::new(),
     }
-    let Ok(bytes) = std::fs::read(path) else { return Vec::new() };
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
     if bytes.iter().take(SNIFF_BYTES).any(|&b| b == 0) {
         return Vec::new();
     }
@@ -254,12 +280,19 @@ struct Budget {
 
 impl Budget {
     fn new(max: usize) -> Self {
-        Budget { left: AtomicUsize::new(max), hit: AtomicBool::new(false) }
+        Budget {
+            left: AtomicUsize::new(max),
+            hit: AtomicBool::new(false),
+        }
     }
 
     /// Count one more match; false once the limit is reached, and the match is not reported.
     fn take(&self) -> bool {
-        if self.left.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+        if self
+            .left
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
             return true;
         }
         self.hit.store(true, Ordering::Relaxed);
@@ -280,7 +313,11 @@ struct Matcher {
 
 impl Matcher {
     fn new(query: &Query) -> Result<Self, String> {
-        let source = if query.is_regex { query.pattern.clone() } else { regex::escape(&query.pattern) };
+        let source = if query.is_regex {
+            query.pattern.clone()
+        } else {
+            regex::escape(&query.pattern)
+        };
         let re = RegexBuilder::new(&source)
             .case_insensitive(!query.case_sensitive)
             // ^ and $ at line ends, CRLF included, so the whole-text check below agrees with the lines.
@@ -291,9 +328,15 @@ impl Matcher {
                 // The parser's message draws the pattern with a caret; its last line says what is wrong.
                 let text = e.to_string();
                 let last = text.lines().last().unwrap_or_default();
-                format!("Invalid regular expression: {}", last.trim_start_matches("error: "))
+                format!(
+                    "Invalid regular expression: {}",
+                    last.trim_start_matches("error: ")
+                )
             })?;
-        Ok(Matcher { re, whole_word: query.whole_word })
+        Ok(Matcher {
+            re,
+            whole_word: query.whole_word,
+        })
     }
 
     /// Every match, line by line: a match never spans lines, as in the editor.
@@ -307,7 +350,11 @@ impl Matcher {
         }
         for (i, line) in text.split('\n').enumerate() {
             let line = line.strip_suffix('\r').unwrap_or(line);
-            let mut cols = Utf16Cols { line, byte: 0, col: 0 };
+            let mut cols = Utf16Cols {
+                line,
+                byte: 0,
+                col: 0,
+            };
             for m in self.re.find_iter(line) {
                 if m.is_empty() || (self.whole_word && !word_bounded(line, m.start(), m.end())) {
                     continue;
@@ -316,7 +363,14 @@ impl Matcher {
                     return out;
                 }
                 let (before, text, after) = preview(line, m.start(), m.end());
-                out.push(LineMatch { line: i + 1, start: cols.at(m.start()), end: cols.at(m.end()), before, text, after });
+                out.push(LineMatch {
+                    line: i + 1,
+                    start: cols.at(m.start()),
+                    end: cols.at(m.end()),
+                    before,
+                    text,
+                    after,
+                });
             }
         }
         out
@@ -330,8 +384,11 @@ fn is_word(c: char) -> bool {
 /// Whole word, as the editor's find has it: no word character runs on across either end of the match.
 fn word_bounded(line: &str, start: usize, end: usize) -> bool {
     let m = &line[start..end];
-    let joined = |outside: Option<char>, edge: Option<char>| outside.is_some_and(is_word) && edge.is_some_and(is_word);
-    !joined(line[..start].chars().next_back(), m.chars().next()) && !joined(line[end..].chars().next(), m.chars().next_back())
+    let joined = |outside: Option<char>, edge: Option<char>| {
+        outside.is_some_and(is_word) && edge.is_some_and(is_word)
+    };
+    !joined(line[..start].chars().next_back(), m.chars().next())
+        && !joined(line[end..].chars().next(), m.chars().next_back())
 }
 
 /// UTF-16 columns of byte offsets into a line, for offsets that only grow.
@@ -343,7 +400,10 @@ struct Utf16Cols<'a> {
 
 impl Utf16Cols<'_> {
     fn at(&mut self, byte: usize) -> usize {
-        self.col += self.line[self.byte..byte].chars().map(char::len_utf16).sum::<usize>();
+        self.col += self.line[self.byte..byte]
+            .chars()
+            .map(char::len_utf16)
+            .sum::<usize>();
         self.byte = byte;
         self.col
     }
@@ -355,13 +415,21 @@ fn preview(line: &str, start: usize, end: usize) -> (String, String, String) {
     let lead = line[..start].trim_start();
     let n = lead.chars().count();
     let before = if n > CHARS_BEFORE {
-        format!("…{}", lead.chars().skip(n - CHARS_BEFORE).collect::<String>())
+        format!(
+            "…{}",
+            lead.chars().skip(n - CHARS_BEFORE).collect::<String>()
+        )
     } else {
         lead.to_string()
     };
     let text: String = line[start..end].chars().take(CHARS_AFTER).collect();
     let room = CHARS_AFTER.saturating_sub(text.chars().count());
-    let after = line[end..].chars().take(room).collect::<String>().trim_end().to_string();
+    let after = line[end..]
+        .chars()
+        .take(room)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
     (before, text, after)
 }
 
@@ -379,11 +447,20 @@ impl Filter {
         let include = expand_globs(&query.include, root);
         let mut exclude = expand_globs(&query.exclude, root);
         if query.use_ignore_files {
-            exclude.extend(DEFAULT_EXCLUDES.iter().flat_map(|g| [(g.to_string(), g.to_string()), (g.to_string(), format!("{g}/**"))]));
+            exclude.extend(DEFAULT_EXCLUDES.iter().flat_map(|g| {
+                [
+                    (g.to_string(), g.to_string()),
+                    (g.to_string(), format!("{g}/**")),
+                ]
+            }));
         }
         Ok(Filter {
             root: root.to_path_buf(),
-            include: if include.is_empty() { None } else { Some(glob_set(&include)?) },
+            include: if include.is_empty() {
+                None
+            } else {
+                Some(glob_set(&include)?)
+            },
             exclude: glob_set(&exclude)?,
         })
     }
@@ -391,7 +468,11 @@ impl Filter {
     /// `path` relative to the root with `/` separators; a path outside the root stays whole.
     fn rel(&self, path: &Path) -> String {
         match path.strip_prefix(&self.root) {
-            Ok(rel) => rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            Ok(rel) => rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             Err(_) => path.to_string_lossy().replace('\\', "/"),
         }
     }
@@ -450,8 +531,15 @@ fn expand_globs(input: &str, root: &Path) -> Vec<(String, String)> {
             Some(rel) if rel.is_empty() => vec!["**".to_string()],
             Some(rel) => vec![rel.clone(), format!("{rel}/**")],
             None => {
-                let p = if p.starts_with('.') { format!("*{p}") } else { p.to_string() };
-                vec![format!("**/{p}"), format!("**/{p}/**")].into_iter().map(|g| g.replace("**/**", "**")).collect()
+                let p = if p.starts_with('.') {
+                    format!("*{p}")
+                } else {
+                    p.to_string()
+                };
+                vec![format!("**/{p}"), format!("**/{p}/**")]
+                    .into_iter()
+                    .map(|g| g.replace("**/**", "**"))
+                    .collect()
             }
         };
         out.extend(globs.into_iter().map(|g| (raw.to_string(), g)));
@@ -550,10 +638,17 @@ mod tests {
     fn whole_word_and_case() {
         let mut q = query("foo");
         q.whole_word = true;
-        let found = Matcher::new(&q).unwrap().find("foofoo foo Foo foo_", &Budget::new(10));
-        assert_eq!(found.iter().map(|m| m.start).collect::<Vec<_>>(), vec![7, 11]);
+        let found = Matcher::new(&q)
+            .unwrap()
+            .find("foofoo foo Foo foo_", &Budget::new(10));
+        assert_eq!(
+            found.iter().map(|m| m.start).collect::<Vec<_>>(),
+            vec![7, 11]
+        );
         q.case_sensitive = true;
-        let found = Matcher::new(&q).unwrap().find("foofoo foo Foo", &Budget::new(10));
+        let found = Matcher::new(&q)
+            .unwrap()
+            .find("foofoo foo Foo", &Budget::new(10));
         assert_eq!(found.len(), 1);
     }
 
@@ -561,7 +656,9 @@ mod tests {
     fn regex_anchors_work_per_line() {
         let mut q = query("^b$");
         q.is_regex = true;
-        let found = Matcher::new(&q).unwrap().find("a\r\nb\r\nbb", &Budget::new(10));
+        let found = Matcher::new(&q)
+            .unwrap()
+            .find("a\r\nb\r\nbb", &Budget::new(10));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].line, 2);
         q.pattern = "(".into();
@@ -607,11 +704,55 @@ mod tests {
         }
         let q = || query("hello");
         assert_eq!(found(&root, q()), [".hidden/c.txt", "a.txt", "sub/b.rs"]);
-        assert_eq!(found(&root, Query { use_ignore_files: false, ..q() }), [".hidden/c.txt", "a.txt", "ignored.log", "node_modules/x.js", "sub/b.rs"]);
-        assert_eq!(found(&root, Query { include: "*.rs".into(), ..q() }), ["sub/b.rs"]);
-        assert_eq!(found(&root, Query { exclude: "sub, .hidden".into(), ..q() }), ["a.txt"]);
-        let paths = ["a.txt", "ignored.log"].map(|p| root.join(p).to_string_lossy().into_owned()).to_vec();
-        assert_eq!(found(&root, Query { paths: Some(paths), ..q() }), ["a.txt", "ignored.log"]);
+        assert_eq!(
+            found(
+                &root,
+                Query {
+                    use_ignore_files: false,
+                    ..q()
+                }
+            ),
+            [
+                ".hidden/c.txt",
+                "a.txt",
+                "ignored.log",
+                "node_modules/x.js",
+                "sub/b.rs"
+            ]
+        );
+        assert_eq!(
+            found(
+                &root,
+                Query {
+                    include: "*.rs".into(),
+                    ..q()
+                }
+            ),
+            ["sub/b.rs"]
+        );
+        assert_eq!(
+            found(
+                &root,
+                Query {
+                    exclude: "sub, .hidden".into(),
+                    ..q()
+                }
+            ),
+            ["a.txt"]
+        );
+        let paths = ["a.txt", "ignored.log"]
+            .map(|p| root.join(p).to_string_lossy().into_owned())
+            .to_vec();
+        assert_eq!(
+            found(
+                &root,
+                Query {
+                    paths: Some(paths),
+                    ..q()
+                }
+            ),
+            ["a.txt", "ignored.log"]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

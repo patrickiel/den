@@ -50,7 +50,9 @@ pub fn github_avatar_url(email: &str) -> Option<String> {
     let email = email.trim().to_lowercase();
     if email == "noreply@github.com" {
         // GitHub itself (merges made on the site, GitHub Actions).
-        return Some(format!("https://avatars.githubusercontent.com/in/15368?s={SIZE}"));
+        return Some(format!(
+            "https://avatars.githubusercontent.com/in/15368?s={SIZE}"
+        ));
     }
     let user = email.strip_suffix("@users.noreply.github.com")?;
     let (id, name) = match user.split_once('+') {
@@ -58,8 +60,11 @@ pub fn github_avatar_url(email: &str) -> Option<String> {
         None => (None, user),
     };
     match id {
-        Some(id) if id.chars().all(|c| c.is_ascii_digit()) => Some(format!("https://avatars.githubusercontent.com/u/{id}?s={SIZE}")),
-        _ => (!name.is_empty()).then(|| format!("https://avatars.githubusercontent.com/{name}?s={SIZE}")),
+        Some(id) if id.chars().all(|c| c.is_ascii_digit()) => Some(format!(
+            "https://avatars.githubusercontent.com/u/{id}?s={SIZE}"
+        )),
+        _ => (!name.is_empty())
+            .then(|| format!("https://avatars.githubusercontent.com/{name}?s={SIZE}")),
     }
 }
 
@@ -67,7 +72,11 @@ pub fn github_avatar_url(email: &str) -> Option<String> {
 /// when it was never looked up (or the miss grew stale).
 pub fn cached(email: &str) -> Option<Option<PathBuf>> {
     let key = key(email);
-    if let Some(known) = cache().lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+    if let Some(known) = cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
         return Some(known);
     }
     let image = dir().join(format!("{key}.img"));
@@ -76,7 +85,9 @@ pub fn cached(email: &str) -> Option<Option<PathBuf>> {
         return Some(Some(image));
     }
     let miss = dir().join(format!("{key}.none"));
-    let fresh = std::fs::metadata(&miss).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age < NEGATIVE_TTL));
+    let fresh = std::fs::metadata(&miss)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| t.elapsed().is_ok_and(|age| age < NEGATIVE_TTL));
     if fresh {
         remember(&key, None);
         return Some(None);
@@ -133,16 +144,34 @@ pub fn fetch(email: &str, github: Option<(String, String, String)>) -> Option<Pa
 /// email is linked to no account, `Err` when the API could not be asked
 /// (the rate limit, no network) and the miss must not be remembered.
 fn api_avatar_url(owner: &str, repo: &str, hash: &str) -> Result<Option<String>, ()> {
-    if API_BLOCKED_UNTIL.lock().ok().and_then(|until| *until).is_some_and(|until| Instant::now() < until) {
+    if API_BLOCKED_UNTIL
+        .lock()
+        .ok()
+        .and_then(|until| *until)
+        .is_some_and(|until| Instant::now() < until)
+    {
         return Err(());
     }
     let url = format!("https://api.github.com/repos/{owner}/{repo}/commits/{hash}");
-    let response = http::AGENT.get(&url).set("Accept", "application/vnd.github+json").set("User-Agent", "den").call();
+    let response = http::AGENT
+        .get(&url)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "den")
+        .call();
     match response {
         Ok(response) => {
             let json: serde_json::Value = response.into_json().map_err(drop)?;
-            let avatar = json.get("author").and_then(|a| a.get("avatar_url")).and_then(|u| u.as_str());
-            Ok(avatar.map(|u| if u.contains('?') { format!("{u}&s={SIZE}") } else { format!("{u}?s={SIZE}") }))
+            let avatar = json
+                .get("author")
+                .and_then(|a| a.get("avatar_url"))
+                .and_then(|u| u.as_str());
+            Ok(avatar.map(|u| {
+                if u.contains('?') {
+                    format!("{u}&s={SIZE}")
+                } else {
+                    format!("{u}?s={SIZE}")
+                }
+            }))
         }
         Err(ureq::Error::Status(403 | 429, _)) => {
             if let Ok(mut until) = API_BLOCKED_UNTIL.lock() {
@@ -161,10 +190,22 @@ mod tests {
 
     #[test]
     fn github_addresses_name_their_avatar() {
-        assert_eq!(github_avatar_url("12345+octocat@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/u/12345?s=64"));
-        assert_eq!(github_avatar_url("octocat@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/octocat?s=64"));
-        assert_eq!(github_avatar_url("41898282+github-actions[bot]@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/u/41898282?s=64"));
-        assert_eq!(github_avatar_url("noreply@github.com").as_deref(), Some("https://avatars.githubusercontent.com/in/15368?s=64"));
+        assert_eq!(
+            github_avatar_url("12345+octocat@users.noreply.github.com").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/12345?s=64")
+        );
+        assert_eq!(
+            github_avatar_url("octocat@users.noreply.github.com").as_deref(),
+            Some("https://avatars.githubusercontent.com/octocat?s=64")
+        );
+        assert_eq!(
+            github_avatar_url("41898282+github-actions[bot]@users.noreply.github.com").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/41898282?s=64")
+        );
+        assert_eq!(
+            github_avatar_url("noreply@github.com").as_deref(),
+            Some("https://avatars.githubusercontent.com/in/15368?s=64")
+        );
         assert_eq!(github_avatar_url("someone@example.com"), None);
         assert_eq!(github_avatar_url("@users.noreply.github.com"), None);
     }

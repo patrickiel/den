@@ -48,7 +48,11 @@ pub fn palette() -> TermColors {
 fn hsla_rgb(color: Hsla) -> Rgb {
     let rgba = Rgba::from(color);
     let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
-    Rgb { r: byte(rgba.r), g: byte(rgba.g), b: byte(rgba.b) }
+    Rgb {
+        r: byte(rgba.r),
+        g: byte(rgba.g),
+        b: byte(rgba.b),
+    }
 }
 
 pub fn palette_rgb(index: usize) -> Rgb {
@@ -99,7 +103,11 @@ impl Palette {
     }
 
     fn indexed(&self, index: usize) -> Hsla {
-        if index < 16 { self.ansi[index] } else { rgb_hsla(palette_rgb(index)) }
+        if index < 16 {
+            self.ansi[index]
+        } else {
+            rgb_hsla(palette_rgb(index))
+        }
     }
 
     pub fn color(&self, color: Color, foreground: bool) -> Hsla {
@@ -115,7 +123,9 @@ impl Palette {
                     let index = named as usize;
                     if index < 16 {
                         self.ansi[index]
-                    } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&index) {
+                    } else if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
+                        .contains(&index)
+                    {
                         self.ansi[index - NamedColor::DimBlack as usize].opacity(0.66)
                     } else if foreground {
                         self.foreground

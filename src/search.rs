@@ -33,7 +33,12 @@ const ROW: Pixels = px(22.);
 
 pub enum SearchEvent {
     /// Show a match: in a preview (focus stays in the list) or for good.
-    Open { path: PathBuf, line: u32, column: u32, focus: bool },
+    Open {
+        path: PathBuf,
+        line: u32,
+        column: u32,
+        focus: bool,
+    },
 }
 
 /// Whether a file has unsaved changes in an editor tab; replacing leaves such
@@ -77,15 +82,26 @@ pub struct SearchView {
 impl EventEmitter<SearchEvent> for SearchView {}
 
 impl SearchView {
-    pub fn new(root: PathBuf, is_dirty: IsDirty, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        is_dirty: IsDirty,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let replace = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
         let include = cx.new(|cx| InputState::new(window, cx).placeholder("files to include"));
         let exclude = cx.new(|cx| InputState::new(window, cx).placeholder("files to exclude"));
         let _subscriptions = vec![
-            cx.subscribe(&query, |this, _, event: &InputEvent, cx| this.on_input(event, cx)),
-            cx.subscribe(&include, |this, _, event: &InputEvent, cx| this.on_input(event, cx)),
-            cx.subscribe(&exclude, |this, _, event: &InputEvent, cx| this.on_input(event, cx)),
+            cx.subscribe(&query, |this, _, event: &InputEvent, cx| {
+                this.on_input(event, cx)
+            }),
+            cx.subscribe(&include, |this, _, event: &InputEvent, cx| {
+                this.on_input(event, cx)
+            }),
+            cx.subscribe(&exclude, |this, _, event: &InputEvent, cx| {
+                this.on_input(event, cx)
+            }),
             cx.subscribe(&replace, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         Self {
@@ -122,13 +138,21 @@ impl SearchView {
     }
 
     /// Put `text` in the search box (the selection, from Ctrl+Shift+F).
-    pub fn set_query(this: &Entity<Self>, text: &str, replace: bool, window: &mut Window, cx: &mut App) {
+    pub fn set_query(
+        this: &Entity<Self>,
+        text: &str,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         this.update(cx, |this, cx| {
             if replace {
                 this.show_replace = true;
             }
             if !text.is_empty() {
-                this.query.update(cx, |query, cx| query.set_value(text.to_string(), window, cx));
+                this.query.update(cx, |query, cx| {
+                    query.set_value(text.to_string(), window, cx)
+                });
             }
             this.search(cx);
         });
@@ -174,7 +198,9 @@ impl SearchView {
         self.cancel = cancel.clone();
         let root = self.root.clone();
         self._search = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(150)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
             _ = this.update(cx, |this, cx| {
                 this.results.clear();
                 this.collapsed.clear();
@@ -187,7 +213,9 @@ impl SearchView {
             let (tx, mut rx) = mpsc::unbounded::<Vec<FileMatch>>();
             let worker_cancel = cancel.clone();
             let worker = cx.background_executor().spawn(async move {
-                search::search(&root, &query, &worker_cancel, |batch| tx.unbounded_send(batch).is_ok())
+                search::search(&root, &query, &worker_cancel, |batch| {
+                    tx.unbounded_send(batch).is_ok()
+                })
             });
             while let Some(batch) = rx.next().await {
                 if cancel.load(Ordering::SeqCst) {
@@ -195,7 +223,8 @@ impl SearchView {
                 }
                 let alive = this.update(cx, |this, cx| {
                     this.results.extend(batch);
-                    this.results.sort_by(|a, b| a.rel.to_lowercase().cmp(&b.rel.to_lowercase()));
+                    this.results
+                        .sort_by(|a, b| a.rel.to_lowercase().cmp(&b.rel.to_lowercase()));
                     this.rebuild_rows();
                     cx.notify();
                 });
@@ -221,7 +250,8 @@ impl SearchView {
         for (file, found) in self.results.iter().enumerate() {
             self.rows.push(Row::File { file });
             if !self.collapsed.contains(&file) {
-                self.rows.extend((0..found.matches.len()).map(|ix| Row::Match { file, ix }));
+                self.rows
+                    .extend((0..found.matches.len()).map(|ix| Row::Match { file, ix }));
             }
         }
     }
@@ -275,20 +305,36 @@ impl SearchView {
 
     /// Replace in the files given (every file in the results when `None`),
     /// on disk; files with unsaved changes in a tab are left alone.
-    fn replace_in(&mut self, files: Option<Vec<usize>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_in(
+        &mut self,
+        files: Option<Vec<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let query = self.query_of(cx);
         let replacement = self.replace.read(cx).value().to_string();
         let paths: Vec<PathBuf> = match files {
-            Some(files) => files.iter().filter_map(|f| self.results.get(*f)).map(|f| PathBuf::from(&f.path)).collect(),
-            None => self.results.iter().map(|f| PathBuf::from(&f.path)).collect(),
+            Some(files) => files
+                .iter()
+                .filter_map(|f| self.results.get(*f))
+                .map(|f| PathBuf::from(&f.path))
+                .collect(),
+            None => self
+                .results
+                .iter()
+                .map(|f| PathBuf::from(&f.path))
+                .collect(),
         };
-        let (dirty, clean): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| (self.is_dirty)(p, cx));
+        let (dirty, clean): (Vec<PathBuf>, Vec<PathBuf>) =
+            paths.into_iter().partition(|p| (self.is_dirty)(p, cx));
         let mut replaced = 0;
         let mut failed = Vec::new();
         for path in &clean {
             let result = std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
-                .and_then(|text| search::replace(&query, &text, &replacement).map(|done| (text, done)))
+                .and_then(|text| {
+                    search::replace(&query, &text, &replacement).map(|done| (text, done))
+                })
                 .and_then(|(text, (new, n))| {
                     if n > 0 && new != text {
                         std::fs::write(path, new).map_err(|e| e.to_string())?;
@@ -302,7 +348,10 @@ impl SearchView {
         }
         let mut note = format!("Replaced {replaced} matches in {} files.", clean.len());
         if !dirty.is_empty() {
-            note.push_str(&format!(" {} files with unsaved changes were left alone.", dirty.len()));
+            note.push_str(&format!(
+                " {} files with unsaved changes were left alone.",
+                dirty.len()
+            ));
         }
         if !failed.is_empty() {
             note.push_str(&format!(" Failed: {}", failed.join("; ")));
@@ -323,7 +372,9 @@ impl SearchView {
             let this = this.clone();
             dialog
                 .title("Replace All")
-                .description(format!("Replace {count} matches in {files} files with \"{replacement}\"?"))
+                .description(format!(
+                    "Replace {count} matches in {files} files with \"{replacement}\"?"
+                ))
                 .show_cancel(true)
                 .on_ok(move |_, window, cx| {
                     _ = this.update(cx, |this, cx| this.replace_in(None, window, cx));
@@ -367,7 +418,15 @@ impl SearchView {
         cx.notify();
     }
 
-    fn toggle(&self, id: &'static str, icon: IconName, tooltip: &'static str, on: bool, flip: fn(&mut Self), cx: &mut Context<Self>) -> Button {
+    fn toggle(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        tooltip: &'static str,
+        on: bool,
+        flip: fn(&mut Self),
+        cx: &mut Context<Self>,
+    ) -> Button {
         Button::new(id)
             .xsmall()
             .icon(Icon::new(icon))
@@ -379,7 +438,11 @@ impl SearchView {
             }))
     }
 
-    fn render_rows(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let replacement = self.replace.read(cx).value().to_string();
         let replacing = self.show_replace;
@@ -397,7 +460,9 @@ impl SearchView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .when(selected, |this| this.bg(theme.list_active))
-                    .when(!selected, |this| this.hover(|this| this.bg(theme.list_hover)))
+                    .when(!selected, |this| {
+                        this.hover(|this| this.bg(theme.list_hover))
+                    })
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.focus_handle.focus(window, cx);
                         this.open_row(row, event.click_count() > 1, cx);
@@ -412,17 +477,35 @@ impl SearchView {
                     .ml_auto()
                     .flex_none()
                     .invisible()
-                    .group_hover(SharedString::from(format!("search-row-{row}")), |this| this.visible());
+                    .group_hover(SharedString::from(format!("search-row-{row}")), |this| {
+                        this.visible()
+                    });
                 Some(match self.rows.get(row)?.clone() {
                     Row::File { file } => {
                         let found = &self.results[file];
-                        let (name, folder) = found.rel.rsplit_once('/').map_or((found.rel.as_str(), ""), |(f, n)| (n, f));
+                        let (name, folder) = found
+                            .rel
+                            .rsplit_once('/')
+                            .map_or((found.rel.as_str(), ""), |(f, n)| (n, f));
                         let collapsed = self.collapsed.contains(&file);
                         base.pl_1()
-                            .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall())
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .xsmall(),
+                            )
                             .child(crate::file_icon::render(name, 16., cx))
                             .child(name.to_string())
-                            .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(folder.to_string()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(folder.to_string()),
+                            )
                             .child(
                                 hover_buttons
                                     .when(replacing, |this| {
@@ -432,7 +515,15 @@ impl SearchView {
                                                 .xsmall()
                                                 .icon(Icon::new(IconName::Replace))
                                                 .tooltip("Replace in this file")
-                                                .on_click(cx.listener(move |this, _, window, cx| this.replace_in(Some(vec![file]), window, cx))),
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.replace_in(
+                                                            Some(vec![file]),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                )),
                                         )
                                     })
                                     .child(dismiss),
@@ -451,7 +542,12 @@ impl SearchView {
                     Row::Match { file, ix } => {
                         let m = &self.results[file].matches[ix];
                         base.pl(px(36.))
-                            .child(div().flex_none().text_color(theme.muted_foreground).child(m.before.clone()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.muted_foreground)
+                                    .child(m.before.clone()),
+                            )
                             .child(
                                 div()
                                     .flex_none()
@@ -459,7 +555,14 @@ impl SearchView {
                                     .when(replacing, |this| this.line_through())
                                     .child(m.text.clone()),
                             )
-                            .when(replacing, |this| this.child(div().flex_none().bg(theme.green.opacity(0.35)).child(replacement.clone())))
+                            .when(replacing, |this| {
+                                this.child(
+                                    div()
+                                        .flex_none()
+                                        .bg(theme.green.opacity(0.35))
+                                        .child(replacement.clone()),
+                                )
+                            })
                             .child(div().flex_1().min_w_0().truncate().child(m.after.clone()))
                             .child(hover_buttons.child(dismiss))
                             .into_any_element()
@@ -483,7 +586,11 @@ impl Render for SearchView {
         } else if has_query && !self.searching && count == 0 {
             Some("No results found.".into())
         } else if count > 0 {
-            let limit = if self.limit_hit { format!(" (the first {MAX_RESULTS} are shown)") } else { String::new() };
+            let limit = if self.limit_hit {
+                format!(" (the first {MAX_RESULTS} are shown)")
+            } else {
+                String::new()
+            };
             Some(format!("{count} results in {files} files{limit}").into())
         } else {
             None
@@ -498,7 +605,13 @@ impl Render for SearchView {
                     .flex_none()
                     .px_3()
                     .justify_between()
-                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child("SEARCH"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("SEARCH"),
+                    )
                     .child(
                         h_flex()
                             .child(
@@ -532,7 +645,11 @@ impl Render for SearchView {
                         Button::new("toggle-replace")
                             .ghost()
                             .xsmall()
-                            .icon(Icon::new(if self.show_replace { IconName::ChevronDown } else { IconName::ChevronRight }))
+                            .icon(Icon::new(if self.show_replace {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            }))
                             .tooltip("Toggle Replace")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_replace = !this.show_replace;
@@ -546,44 +663,65 @@ impl Render for SearchView {
                             .child(
                                 Input::new(&self.query).small().suffix(
                                     h_flex()
-                                        .child(self.toggle("case", IconName::CaseSensitive, "Match Case (Alt+C)", self.match_case, |s| s.match_case = !s.match_case, cx))
-                                        .child(self.toggle("word", IconName::WholeWord, "Match Whole Word (Alt+W)", self.whole_word, |s| s.whole_word = !s.whole_word, cx))
-                                        .child(self.toggle("regex", IconName::Regex, "Use Regular Expression (Alt+R)", self.regex, |s| s.regex = !s.regex, cx)),
+                                        .child(self.toggle(
+                                            "case",
+                                            IconName::CaseSensitive,
+                                            "Match Case (Alt+C)",
+                                            self.match_case,
+                                            |s| s.match_case = !s.match_case,
+                                            cx,
+                                        ))
+                                        .child(self.toggle(
+                                            "word",
+                                            IconName::WholeWord,
+                                            "Match Whole Word (Alt+W)",
+                                            self.whole_word,
+                                            |s| s.whole_word = !s.whole_word,
+                                            cx,
+                                        ))
+                                        .child(self.toggle(
+                                            "regex",
+                                            IconName::Regex,
+                                            "Use Regular Expression (Alt+R)",
+                                            self.regex,
+                                            |s| s.regex = !s.regex,
+                                            cx,
+                                        )),
                                 ),
                             )
                             .when(self.show_replace, |this| {
                                 this.child(
                                     h_flex()
                                         .gap_1()
-                                        .child(div().flex_1().child(Input::new(&self.replace).small()))
+                                        .child(
+                                            div().flex_1().child(Input::new(&self.replace).small()),
+                                        )
                                         .child(
                                             Button::new("replace-all")
                                                 .ghost()
                                                 .xsmall()
                                                 .icon(Icon::new(IconName::ReplaceAll))
                                                 .tooltip("Replace All")
-                                                .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx))),
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.confirm_replace_all(window, cx)
+                                                })),
                                         ),
                                 )
                             }),
                     ),
             )
             .child(
-                h_flex()
-                    .px_2()
-                    .pt_1()
-                    .justify_end()
-                    .child(
-                        Button::new("details")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Ellipsis))
-                            .tooltip("Toggle Search Details")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_details = !this.show_details;
-                                cx.notify();
-                            })),
-                    ),
+                h_flex().px_2().pt_1().justify_end().child(
+                    Button::new("details")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .tooltip("Toggle Search Details")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_details = !this.show_details;
+                            cx.notify();
+                        })),
+                ),
             )
             .when(self.show_details, |this| {
                 this.child(
@@ -608,7 +746,14 @@ impl Render for SearchView {
                 )
             })
             .when_some(summary, |this, summary| {
-                this.child(div().px_3().py_1().text_xs().text_color(theme.muted_foreground).child(summary))
+                this.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(summary),
+                )
             })
             .child(
                 div()
@@ -618,9 +763,13 @@ impl Render for SearchView {
                     .flex_1()
                     .min_h_0()
                     .child(
-                        uniform_list("search-rows", self.rows.len(), cx.processor(|this, range, _, cx| this.render_rows(range, cx)))
-                            .track_scroll(&self.scroll)
-                            .size_full(),
+                        uniform_list(
+                            "search-rows",
+                            self.rows.len(),
+                            cx.processor(|this, range, _, cx| this.render_rows(range, cx)),
+                        )
+                        .track_scroll(&self.scroll)
+                        .size_full(),
                     ),
             )
     }

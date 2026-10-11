@@ -56,7 +56,10 @@ pub enum ScmEvent {
     /// (working tree against the index).
     Diff { file: FileStatus, staged: bool },
     /// Show what a commit changed in one file.
-    CommitDiff { rel: String, commit: crate::diff::CommitRevs },
+    CommitDiff {
+        rel: String,
+        commit: crate::diff::CommitRevs,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,7 +205,11 @@ impl EventEmitter<ScmEvent> for ScmView {}
 
 impl ScmView {
     pub fn new(repo: Entity<Repo>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).placeholder(message_placeholder()));
+        let message = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 10)
+                .placeholder(message_placeholder())
+        });
         let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
         Self {
             repo,
@@ -235,7 +242,8 @@ impl ScmView {
     }
 
     pub fn set_draft(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.message.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.message
+            .update(cx, |input, cx| input.set_value(text, window, cx));
     }
 
     /// Commit (and push after, with `push`). With nothing staged it goes by
@@ -244,9 +252,15 @@ impl ScmView {
     fn commit(&mut self, amend: bool, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::{Settings, SmartCommit};
         let message = self.message.read(cx).value().to_string();
-        let Some(status) = self.repo.read(cx).status() else { return };
+        let Some(status) = self.repo.read(cx).status() else {
+            return;
+        };
         if status.files.iter().any(|f| f.conflict) {
-            crate::toast::push(window, "Resolve the merge conflicts before committing: stage each resolved file under Merge Changes.", cx);
+            crate::toast::push(
+                window,
+                "Resolve the merge conflicts before committing: stage each resolved file under Merge Changes.",
+                cx,
+            );
             return;
         }
         if message.trim().is_empty() && !amend {
@@ -264,7 +278,11 @@ impl ScmView {
         }
         match Settings::get(cx).smart_commit {
             SmartCommit::Always => self.do_commit(message, amend, true, push, window, cx),
-            SmartCommit::Never => crate::toast::push(window, "There are no staged changes to commit. Stage the changes first, or let Commit stage them: Settings ▸ Source Control.", cx),
+            SmartCommit::Never => crate::toast::push(
+                window,
+                "There are no staged changes to commit. Stage the changes first, or let Commit stage them: Settings ▸ Source Control.",
+                cx,
+            ),
             SmartCommit::Ask => {
                 let this = cx.weak_entity();
                 window.open_alert_dialog(cx, move |dialog, _, cx| {
@@ -310,14 +328,23 @@ impl ScmView {
         }
     }
 
-    fn do_commit(&mut self, message: String, amend: bool, stage_all: bool, push: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn do_commit(
+        &mut self,
+        message: String,
+        amend: bool,
+        stage_all: bool,
+        push: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.repo.update(cx, |repo, cx| {
             repo.commit(message, amend, stage_all, cx);
             if push {
                 repo.push_after_commit(cx);
             }
         });
-        self.message.update(cx, |input, cx| input.set_value("", window, cx));
+        self.message
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     /// What the action on the row of `rel` applies to: the selection when
@@ -325,7 +352,14 @@ impl ScmView {
     fn targets(&self, rel: &str, group: Group, cx: &App) -> Vec<FileStatus> {
         if self.selection_group == Some(group) && self.selection.iter().any(|r| r == rel) {
             let status = self.repo.read(cx).status();
-            let files: Vec<FileStatus> = status.map(|s| group_files(s, group).filter(|f| self.selection.contains(&f.rel)).cloned().collect()).unwrap_or_default();
+            let files: Vec<FileStatus> = status
+                .map(|s| {
+                    group_files(s, group)
+                        .filter(|f| self.selection.contains(&f.rel))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
             if !files.is_empty() {
                 return files;
             }
@@ -335,29 +369,54 @@ impl ScmView {
 
     /// The changed file at `rel`, as the status has it now.
     fn file(&self, rel: &str, cx: &App) -> Option<FileStatus> {
-        self.repo.read(cx).status()?.files.iter().find(|f| f.rel == rel).cloned()
+        self.repo
+            .read(cx)
+            .status()?
+            .files
+            .iter()
+            .find(|f| f.rel == rel)
+            .cloned()
     }
 
     /// The commit `hash`, as the history has it now.
     fn commit_by_hash(&self, hash: &str, cx: &App) -> Option<git::Commit> {
-        self.repo.read(cx).commits.iter().find(|c| c.hash == hash).cloned()
+        self.repo
+            .read(cx)
+            .commits
+            .iter()
+            .find(|c| c.hash == hash)
+            .cloned()
     }
 
     /// The selected files, with their group.
     fn selected_files(&self, cx: &App) -> Option<(Group, Vec<FileStatus>)> {
         let group = self.selection_group?;
         let status = self.repo.read(cx).status()?;
-        let files: Vec<FileStatus> = group_files(status, group).filter(|f| self.selection.contains(&f.rel)).cloned().collect();
+        let files: Vec<FileStatus> = group_files(status, group)
+            .filter(|f| self.selection.contains(&f.rel))
+            .cloned()
+            .collect();
         (!files.is_empty()).then_some((group, files))
     }
 
     /// Every file of `group`, for the actions on the whole group.
     fn files_in(&self, group: Group, cx: &App) -> Vec<FileStatus> {
-        self.repo.read(cx).status().map(|s| group_files(s, group).cloned().collect()).unwrap_or_default()
+        self.repo
+            .read(cx)
+            .status()
+            .map(|s| group_files(s, group).cloned().collect())
+            .unwrap_or_default()
     }
 
     /// A click on row `ix` of `group` (whose paths are `rels`).
-    fn click_row(&mut self, group: Group, ix: usize, rels: &[String], modifiers: Modifiers, cx: &mut Context<Self>) -> bool {
+    fn click_row(
+        &mut self,
+        group: Group,
+        ix: usize,
+        rels: &[String],
+        modifiers: Modifiers,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let rel = rels[ix].clone();
         if self.selection_group != Some(group) {
             self.selection.clear();
@@ -385,12 +444,20 @@ impl ScmView {
     }
 
     fn stage_or_unstage(&mut self, files: Vec<FileStatus>, group: Group, cx: &mut Context<Self>) {
-        self.repo.update(cx, |repo, cx| if group == Group::Staged { repo.unstage(files, cx) } else { repo.stage(files, cx) });
+        self.repo.update(cx, |repo, cx| {
+            if group == Group::Staged {
+                repo.unstage(files, cx)
+            } else {
+                repo.stage(files, cx)
+            }
+        });
     }
 
     /// Add the files to the repository's .gitignore, as den does.
     fn ignore(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         let path = top.join(".gitignore");
         let mut text = std::fs::read_to_string(&path).unwrap_or_default();
         if !text.is_empty() && !text.ends_with('\n') {
@@ -405,59 +472,122 @@ impl ScmView {
     }
 
     /// The right-click menu of a row: on the selection when the row is in it.
-    fn row_menu(menu: PopupMenu, this: WeakEntity<Self>, rel: &str, group: Group, cx: &App) -> PopupMenu {
-        let Some(view) = this.upgrade() else { return menu };
-        let Some(file) = view.read(cx).file(rel, cx) else { return menu };
+    fn row_menu(
+        menu: PopupMenu,
+        this: WeakEntity<Self>,
+        rel: &str,
+        group: Group,
+        cx: &App,
+    ) -> PopupMenu {
+        let Some(view) = this.upgrade() else {
+            return menu;
+        };
+        let Some(file) = view.read(cx).file(rel, cx) else {
+            return menu;
+        };
         let targets = view.read(cx).targets(rel, group, cx);
         let (open, diff) = (file.clone(), file.clone());
         let mut menu = menu
-            .item(menu_action(&this, "Open File", move |_, _, cx| cx.emit(ScmEvent::Open(open.path.clone()))))
-            .item(menu_action(&this, "Open Changes", move |_, _, cx| cx.emit(ScmEvent::Diff { file: diff.clone(), staged: group == Group::Staged })))
+            .item(menu_action(&this, "Open File", move |_, _, cx| {
+                cx.emit(ScmEvent::Open(open.path.clone()))
+            }))
+            .item(menu_action(&this, "Open Changes", move |_, _, cx| {
+                cx.emit(ScmEvent::Diff {
+                    file: diff.clone(),
+                    staged: group == Group::Staged,
+                })
+            }))
             .separator();
         let (t1, t2, t3) = (targets.clone(), targets.clone(), targets);
         menu = match group {
-            Group::Staged => menu.item(menu_action(&this, "Unstage Changes", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx))),
+            Group::Staged => menu.item(menu_action(&this, "Unstage Changes", move |v, _, cx| {
+                v.stage_or_unstage(t1.clone(), group, cx)
+            })),
             Group::Changes => menu
-                .item(menu_action(&this, "Stage Changes", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx)))
-                .item(menu_action(&this, "Discard Changes", move |v, window, cx| v.confirm_discard(t2.clone(), window, cx)))
-                .item(menu_action(&this, "Add to .gitignore", move |v, _, cx| v.ignore(t3.clone(), cx))),
-            Group::Merge => menu.item(menu_action(&this, "Stage (accept as resolved)", move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx))),
+                .item(menu_action(&this, "Stage Changes", move |v, _, cx| {
+                    v.stage_or_unstage(t1.clone(), group, cx)
+                }))
+                .item(menu_action(
+                    &this,
+                    "Discard Changes",
+                    move |v, window, cx| v.confirm_discard(t2.clone(), window, cx),
+                ))
+                .item(menu_action(&this, "Add to .gitignore", move |v, _, cx| {
+                    v.ignore(t3.clone(), cx)
+                })),
+            Group::Merge => menu.item(menu_action(
+                &this,
+                "Stage (accept as resolved)",
+                move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx),
+            )),
         };
         let (copy, copy_rel, show) = (file.clone(), file.clone(), file);
         menu.separator()
-            .item(menu_action(&this, "Copy Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.path.display().to_string()))))
-            .item(menu_action(&this, "Copy Relative Path", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy_rel.rel.clone()))))
-            .item(menu_action(&this, "Reveal in File Explorer", move |_, _, _| crate::explorer::reveal(&show.path)))
+            .item(menu_action(&this, "Copy Path", move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy.path.display().to_string()))
+            }))
+            .item(menu_action(&this, "Copy Relative Path", move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_rel.rel.clone()))
+            }))
+            .item(menu_action(
+                &this,
+                "Reveal in File Explorer",
+                move |_, _, _| crate::explorer::reveal(&show.path),
+            ))
     }
 
     /// The header's ⋯ menu: the rest of what Source Control does, as den's.
     fn more_menu(menu: PopupMenu, this: WeakEntity<Self>) -> PopupMenu {
-        menu.item(menu_action(&this, "Generate Commit Message", |v, window, cx| v.generate_message(window, cx)))
-            .item(menu_action(&this, "Edit Commit Message Style", |v, _, cx| v.open_style(false, cx)))
-            .item(menu_action(&this, "Derive Commit Message Style from History", |v, _, cx| v.open_style(true, cx)))
-            .separator()
-            .item(menu_action(&this, "Commit (Amend)", |v, window, cx| v.commit(true, false, window, cx)))
-            .item(menu_action(&this, "Commit & Push", |v, window, cx| v.commit(false, true, window, cx)))
-            .separator()
-            .item(menu_action(&this, "Stage All Changes", |v, _, cx| {
-                let files = v.files_in(Group::Changes, cx);
-                v.repo.update(cx, |repo, cx| repo.stage(files, cx));
-            }))
-            .item(menu_action(&this, "Unstage All Changes", |v, _, cx| {
-                let files = v.files_in(Group::Staged, cx);
-                v.repo.update(cx, |repo, cx| repo.unstage(files, cx));
-            }))
-            .item(menu_action(&this, "Discard All Changes", |v, window, cx| {
+        menu.item(menu_action(
+            &this,
+            "Generate Commit Message",
+            |v, window, cx| v.generate_message(window, cx),
+        ))
+        .item(menu_action(
+            &this,
+            "Edit Commit Message Style",
+            |v, _, cx| v.open_style(false, cx),
+        ))
+        .item(menu_action(
+            &this,
+            "Derive Commit Message Style from History",
+            |v, _, cx| v.open_style(true, cx),
+        ))
+        .separator()
+        .item(menu_action(&this, "Commit (Amend)", |v, window, cx| {
+            v.commit(true, false, window, cx)
+        }))
+        .item(menu_action(&this, "Commit & Push", |v, window, cx| {
+            v.commit(false, true, window, cx)
+        }))
+        .separator()
+        .item(menu_action(&this, "Stage All Changes", |v, _, cx| {
+            let files = v.files_in(Group::Changes, cx);
+            v.repo.update(cx, |repo, cx| repo.stage(files, cx));
+        }))
+        .item(menu_action(&this, "Unstage All Changes", |v, _, cx| {
+            let files = v.files_in(Group::Staged, cx);
+            v.repo.update(cx, |repo, cx| repo.unstage(files, cx));
+        }))
+        .item(menu_action(
+            &this,
+            "Discard All Changes",
+            |v, window, cx| {
                 let files = v.files_in(Group::Changes, cx);
                 v.confirm_discard(files, window, cx);
-            }))
-            .separator()
-            .item(menu_action(&this, "Create Branch…", |v, window, cx| v.prompt_branch(window, cx)))
+            },
+        ))
+        .separator()
+        .item(menu_action(&this, "Create Branch…", |v, window, cx| {
+            v.prompt_branch(window, cx)
+        }))
     }
 
     /// Open the repository's commit message style (made when missing).
     fn open_style(&mut self, derive: bool, cx: &mut Context<Self>) {
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         let fallback = crate::settings::Settings::get(cx).ai_system_prompt.clone();
         let path = crate::backend::commit_ai::style_file(&top, &fallback, derive);
         cx.emit(ScmEvent::Open(path));
@@ -465,7 +595,9 @@ impl ScmView {
 
     /// Space stages or unstages the selection; Delete discards it.
     fn list_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((group, files)) = self.selected_files(cx) else { return };
+        let Some((group, files)) = self.selected_files(cx) else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "space" => self.stage_or_unstage(files, group, cx),
             "delete" if group == Group::Changes => self.confirm_discard(files, window, cx),
@@ -476,7 +608,12 @@ impl ScmView {
 
     /// Discarding asks first: untracked files go to the Recycle Bin, the rest
     /// lose their changes.
-    fn confirm_discard(&mut self, files: Vec<FileStatus>, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_discard(
+        &mut self,
+        files: Vec<FileStatus>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if files.is_empty() {
             return;
         }
@@ -521,7 +658,9 @@ impl ScmView {
                     })
             }
         });
-        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -537,26 +676,47 @@ impl ScmView {
             .ghost()
             .xsmall()
             .icon(Icon::new(IconName::GitBranch))
-            .label(if branch.head.is_empty() { "…".to_string() } else { branch.head.clone() })
+            .label(if branch.head.is_empty() {
+                "…".to_string()
+            } else {
+                branch.head.clone()
+            })
             .tooltip("Check out a branch")
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.label("BRANCHES").max_h(px(420.)).scrollable(true);
-                let branches = top.as_deref().and_then(|top| git::branches(top).ok()).unwrap_or_default();
+                let branches = top
+                    .as_deref()
+                    .and_then(|top| git::branches(top).ok())
+                    .unwrap_or_default();
                 for branch in branches {
                     let handle = handle.clone();
-                    let label = if branch.remote { format!("{} (remote)", branch.name) } else { branch.name.clone() };
-                    menu = menu.item(PopupMenuItem::new(label).checked(branch.current).on_click(move |_, _, cx| {
-                        let branch = branch.clone();
-                        handle.update(cx, |repo, cx| repo.switch(branch, cx));
-                    }));
+                    let label = if branch.remote {
+                        format!("{} (remote)", branch.name)
+                    } else {
+                        branch.name.clone()
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).checked(branch.current).on_click(
+                        move |_, _, cx| {
+                            let branch = branch.clone();
+                            handle.update(cx, |repo, cx| repo.switch(branch, cx));
+                        },
+                    ));
                 }
                 let weak = weak.clone();
-                menu.separator().item(PopupMenuItem::new("Create Branch…").icon(Icon::new(IconName::Plus)).on_click(move |_, window, cx| {
-                    _ = weak.update(cx, |this, cx| this.prompt_branch(window, cx));
-                }))
+                menu.separator().item(
+                    PopupMenuItem::new("Create Branch…")
+                        .icon(Icon::new(IconName::Plus))
+                        .on_click(move |_, window, cx| {
+                            _ = weak.update(cx, |this, cx| this.prompt_branch(window, cx));
+                        }),
+                )
             });
 
-        let action = |id: &'static str, icon: IconName, tooltip: &'static str, f: fn(&mut Repo, &mut Context<Repo>), cx: &mut Context<Self>| {
+        let action = |id: &'static str,
+                      icon: IconName,
+                      tooltip: &'static str,
+                      f: fn(&mut Repo, &mut Context<Repo>),
+                      cx: &mut Context<Self>| {
             let repo = self.repo.clone();
             Button::new(id)
                 .ghost()
@@ -565,7 +725,11 @@ impl ScmView {
                 .tooltip(tooltip)
                 .on_click(cx.listener(move |_, _, _, cx| repo.update(cx, |repo, cx| f(repo, cx))))
         };
-        let push_tooltip = if branch.upstream.is_some() { "Push" } else { "Publish Branch" };
+        let push_tooltip = if branch.upstream.is_some() {
+            "Push"
+        } else {
+            "Publish Branch"
+        };
 
         v_flex()
             .child(
@@ -583,10 +747,34 @@ impl ScmView {
                     )
                     .child(
                         h_flex()
-                            .child(action("fetch", IconName::RefreshCcw, "Fetch", |r, cx| r.fetch(cx), cx))
-                            .child(action("pull", IconName::ArrowDown, "Pull", |r, cx| r.pull(cx), cx))
-                            .child(action("push", IconName::ArrowUp, push_tooltip, |r, cx| r.push(cx), cx))
-                            .child(action("refresh", IconName::RotateCw, "Refresh", |r, cx| r.reload(cx), cx))
+                            .child(action(
+                                "fetch",
+                                IconName::RefreshCcw,
+                                "Fetch",
+                                |r, cx| r.fetch(cx),
+                                cx,
+                            ))
+                            .child(action(
+                                "pull",
+                                IconName::ArrowDown,
+                                "Pull",
+                                |r, cx| r.pull(cx),
+                                cx,
+                            ))
+                            .child(action(
+                                "push",
+                                IconName::ArrowUp,
+                                push_tooltip,
+                                |r, cx| r.push(cx),
+                                cx,
+                            ))
+                            .child(action(
+                                "refresh",
+                                IconName::RotateCw,
+                                "Refresh",
+                                |r, cx| r.reload(cx),
+                                cx,
+                            ))
                             .child({
                                 let weak = cx.weak_entity();
                                 Button::new("scm-more")
@@ -594,7 +782,10 @@ impl ScmView {
                                     .xsmall()
                                     .icon(Icon::new(IconName::Ellipsis))
                                     .tooltip("More Actions")
-                                    .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| ScmView::more_menu(menu, weak.clone()))
+                                    .dropdown_menu_with_anchor(
+                                        gpui_kit::Anchor::TopRight,
+                                        move |menu, _, _| ScmView::more_menu(menu, weak.clone()),
+                                    )
                             }),
                     ),
             )
@@ -614,12 +805,23 @@ impl ScmView {
                         )
                     })
                     .when_some(busy, |this, busy| {
-                        this.child(div().ml_auto().text_xs().text_color(theme.muted_foreground).child(busy))
+                        this.child(
+                            div()
+                                .ml_auto()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(busy),
+                        )
                     }),
             )
     }
 
-    fn render_group(&self, group: Group, files: &[FileStatus], cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_group(
+        &self,
+        group: Group,
+        files: &[FileStatus],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let rows: Vec<&FileStatus> = files.iter().filter(|f| group.holds(f)).collect();
         if rows.is_empty() {
             return None;
@@ -648,7 +850,11 @@ impl ScmView {
                 Button::new("stage-all")
                     .ghost()
                     .xsmall()
-                    .icon(Icon::new(if staged { IconName::Minus } else { IconName::Plus }))
+                    .icon(Icon::new(if staged {
+                        IconName::Minus
+                    } else {
+                        IconName::Plus
+                    }))
                     .tooltip(if staged { "Unstage All" } else { "Stage All" })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let files = this.files_in(group, cx);
@@ -674,20 +880,38 @@ impl ScmView {
                     }
                     cx.notify();
                 }))
-                .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).xsmall())
+                .child(
+                    Icon::new(if collapsed {
+                        IconName::ChevronRight
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .xsmall(),
+                )
                 .child(title.to_uppercase())
                 .child(div().flex_1())
                 .child(header_buttons)
-                .child(div().px_1p5().rounded_full().bg(theme.secondary).child(rows.len().to_string())),
+                .child(
+                    div()
+                        .px_1p5()
+                        .rounded_full()
+                        .bg(theme.secondary)
+                        .child(rows.len().to_string()),
+                ),
         );
         if collapsed {
             return Some(list.into_any_element());
         }
-        let rels: std::rc::Rc<Vec<String>> = std::rc::Rc::new(rows.iter().map(|f| f.rel.clone()).collect());
+        let rels: std::rc::Rc<Vec<String>> =
+            std::rc::Rc::new(rows.iter().map(|f| f.rel.clone()).collect());
         let weak = cx.weak_entity();
         for (ix, file) in rows.into_iter().enumerate() {
-            let selected = self.selection_group == Some(group) && self.selection.contains(&file.rel);
-            let (name, folder) = file.rel.rsplit_once('/').map_or((file.rel.as_str(), ""), |(f, n)| (n, f));
+            let selected =
+                self.selection_group == Some(group) && self.selection.contains(&file.rel);
+            let (name, folder) = file
+                .rel
+                .rsplit_once('/')
+                .map_or((file.rel.as_str(), ""), |(f, n)| (n, f));
             let (name, folder) = (name.to_string(), folder.to_string());
             let letter = file.letter();
             let color = letter_color(letter, cx);
@@ -705,7 +929,9 @@ impl ScmView {
                         .xsmall()
                         .icon(Icon::new(IconName::FileText))
                         .tooltip("Open File")
-                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(ScmEvent::Open(path.clone()))))
+                        .on_click(
+                            cx.listener(move |_, _, _, cx| cx.emit(ScmEvent::Open(path.clone()))),
+                        )
                 })
                 .when(group == Group::Changes, |this| {
                     let rel = rel.clone();
@@ -726,8 +952,16 @@ impl ScmView {
                     Button::new("stage")
                         .ghost()
                         .xsmall()
-                        .icon(Icon::new(if staged_group { IconName::Minus } else { IconName::Plus }))
-                        .tooltip(if staged_group { "Unstage Changes" } else { "Stage Changes" })
+                        .icon(Icon::new(if staged_group {
+                            IconName::Minus
+                        } else {
+                            IconName::Plus
+                        }))
+                        .tooltip(if staged_group {
+                            "Unstage Changes"
+                        } else {
+                            "Stage Changes"
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let files = this.targets(&rel, group, cx);
                             this.stage_or_unstage(files, group, cx);
@@ -743,7 +977,9 @@ impl ScmView {
                     .gap_1p5()
                     .text_sm()
                     .when(selected, |this| this.bg(theme.list_active))
-                    .when(!selected, |this| this.hover(|this| this.bg(theme.list_hover)))
+                    .when(!selected, |this| {
+                        this.hover(|this| this.bg(theme.list_hover))
+                    })
                     .on_click({
                         let rels = rels.clone();
                         let (rel, path) = (rel.clone(), path.clone());
@@ -756,7 +992,10 @@ impl ScmView {
                             if conflict {
                                 cx.emit(ScmEvent::Open(path.clone()));
                             } else if let Some(file) = this.file(&rel, cx) {
-                                cx.emit(ScmEvent::Diff { file, staged: staged_group });
+                                cx.emit(ScmEvent::Diff {
+                                    file,
+                                    staged: staged_group,
+                                });
                             }
                         })
                     })
@@ -775,9 +1014,24 @@ impl ScmView {
                             .when(letter == 'D', |this| this.line_through())
                             .child(name),
                     )
-                    .child(div().flex_1().min_w_0().text_xs().truncate().text_color(theme.muted_foreground).child(folder))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(folder),
+                    )
                     .child(row_buttons)
-                    .child(div().w(px(12.)).flex_none().text_xs().text_color(color).child(letter.to_string())),
+                    .child(
+                        div()
+                            .w(px(12.))
+                            .flex_none()
+                            .text_xs()
+                            .text_color(color)
+                            .child(letter.to_string()),
+                    ),
             );
         }
         Some(list.into_any_element())
@@ -790,7 +1044,9 @@ impl ScmView {
         if let Some(cancel) = self.generating.take() {
             cancel.cancel();
             self.typewriter = None;
-            self.message.update(cx, |input, cx| input.set_placeholder(message_placeholder(), window, cx));
+            self.message.update(cx, |input, cx| {
+                input.set_placeholder(message_placeholder(), window, cx)
+            });
             return cx.notify();
         }
         let config = crate::settings::Settings::get(cx).ai_config();
@@ -799,7 +1055,10 @@ impl ScmView {
             return self.run_generate(config, window, cx);
         }
         let preset = ai::MODEL_PRESETS.iter().find(|p| p.url == config.model);
-        let model = preset.map_or_else(|| ai::model_name(&config.model), |p| format!("{} ({})", p.name, p.size));
+        let model = preset.map_or_else(
+            || ai::model_name(&config.model),
+            |p| format!("{} ({})", p.name, p.size),
+        );
         let mut parts = Vec::new();
         if !status.runtime {
             parts.push("the llama.cpp runtime (about 100 MB)".to_string());
@@ -807,22 +1066,37 @@ impl ScmView {
         if !status.model {
             parts.push(model);
         }
-        let what = format!("Generating commit messages runs a model on this PC. Download {} into den's data folder?", parts.join(" and "));
+        let what = format!(
+            "Generating commit messages runs a model on this PC. Download {} into den's data folder?",
+            parts.join(" and ")
+        );
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let config = config.clone();
-            dialog.title("Local AI").description(what.clone()).ok_text("Download").show_cancel(true).on_ok(move |_, window, cx| {
-                let config = config.clone();
-                _ = this.update(cx, |this, cx| this.run_generate(config, window, cx));
-                true
-            })
+            dialog
+                .title("Local AI")
+                .description(what.clone())
+                .ok_text("Download")
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    let config = config.clone();
+                    _ = this.update(cx, |this, cx| this.run_generate(config, window, cx));
+                    true
+                })
         });
     }
 
-    fn run_generate(&mut self, config: crate::backend::ai::AiConfig, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_generate(
+        &mut self,
+        config: crate::backend::ai::AiConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::backend::{ai, commit_ai};
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         enum Update {
             Status(String),
             Text(String),
@@ -845,7 +1119,10 @@ impl ScmView {
                     ai::install(&config, &cancel, &mut |stage, done, total| {
                         let text = match total {
                             0 => format!("{stage}…"),
-                            total => format!("Downloading {stage}: {:.2}%", done as f64 * 100.0 / total as f64),
+                            total => format!(
+                                "Downloading {stage}: {:.2}%",
+                                done as f64 * 100.0 / total as f64
+                            ),
                         };
                         if text != last {
                             last = text.clone();
@@ -853,7 +1130,13 @@ impl ScmView {
                         }
                     })?;
                 }
-                commit_ai::generate(&top, &config, &cancel, &mut |s| send(Update::Status(s)), &mut |t| send(Update::Text(t)))
+                commit_ai::generate(
+                    &top,
+                    &config,
+                    &cancel,
+                    &mut |s| send(Update::Status(s)),
+                    &mut |t| send(Update::Text(t)),
+                )
             })();
             send(Update::Done(result));
         });
@@ -869,24 +1152,35 @@ impl ScmView {
                                 if text == commit_ai::WRITING {
                                     this.typewriter = Some(this.type_quips(window, cx));
                                 } else {
-                                    this.message.update(cx, |input, cx| input.set_placeholder(text, window, cx));
+                                    this.message.update(cx, |input, cx| {
+                                        input.set_placeholder(text, window, cx)
+                                    });
                                 }
                             }
                         }
                         Update::Text(text) => {
                             if this.generating.is_some() {
                                 this.typewriter = None;
-                                this.message.update(cx, |input, cx| input.set_value(text, window, cx));
+                                this.message
+                                    .update(cx, |input, cx| input.set_value(text, window, cx));
                             }
                         }
                         Update::Done(result) => {
                             this.typewriter = None;
                             let stopped = this.generating.take().is_none();
-                            this.message.update(cx, |input, cx| input.set_placeholder(message_placeholder(), window, cx));
+                            this.message.update(cx, |input, cx| {
+                                input.set_placeholder(message_placeholder(), window, cx)
+                            });
                             match result {
-                                Ok(text) => this.message.update(cx, |input, cx| input.set_value(text, window, cx)),
+                                Ok(text) => this
+                                    .message
+                                    .update(cx, |input, cx| input.set_value(text, window, cx)),
                                 Err(err) if err == crate::backend::http::CANCELLED || stopped => {}
-                                Err(err) => crate::toast::push(window, format!("Generate Commit Message: {err}"), cx),
+                                Err(err) => crate::toast::push(
+                                    window,
+                                    format!("Generate Commit Message: {err}"),
+                                    cx,
+                                ),
                             }
                         }
                     }
@@ -906,7 +1200,10 @@ impl ScmView {
     fn type_quips(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         use std::time::{Duration, SystemTime};
         let message = self.message.clone();
-        let mut seed = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+        let mut seed = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64)
+            | 1;
         let mut quips: Vec<&str> = QUIPS.to_vec();
         for i in (1..quips.len()).rev() {
             seed ^= seed << 13;
@@ -916,7 +1213,12 @@ impl ScmView {
         }
         cx.spawn_in(window, async move |_, cx| {
             let executor = cx.background_executor().clone();
-            let show = |text: String, cx: &mut AsyncWindowContext| cx.update(|window, cx| message.update(cx, |input, cx| input.set_placeholder(text, window, cx))).is_ok();
+            let show = |text: String, cx: &mut AsyncWindowContext| {
+                cx.update(|window, cx| {
+                    message.update(cx, |input, cx| input.set_placeholder(text, window, cx))
+                })
+                .is_ok()
+            };
             for quip in quips.iter().cycle() {
                 let chars: Vec<char> = quip.chars().collect();
                 for n in 1..=chars.len() {
@@ -948,8 +1250,12 @@ impl ScmView {
         if self.expanded.remove(&hash).is_some() {
             return cx.notify();
         }
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
-        let parent = self.commit_by_hash(&hash, cx).and_then(|c| c.parents.first().cloned());
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let parent = self
+            .commit_by_hash(&hash, cx)
+            .and_then(|c| c.parents.first().cloned());
         self.expanded.insert(hash.clone(), None);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -973,14 +1279,22 @@ impl ScmView {
     /// What a commit's hover card shows beyond the commit itself: what it
     /// changed, and its author's avatar. Both load in the background once.
     fn ensure_details(&mut self, hash: &str, cx: &mut Context<Self>) {
-        let Some(commit) = self.commit_by_hash(hash, cx) else { return };
-        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else { return };
+        let Some(commit) = self.commit_by_hash(hash, cx) else {
+            return;
+        };
+        let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
+            return;
+        };
         if !self.stats.contains_key(&commit.hash) {
             self.stats.insert(commit.hash.clone(), None);
             let (key, hash, top) = (commit.hash.clone(), commit.hash.clone(), top.clone());
             let parent = commit.parents.first().cloned();
             cx.spawn(async move |this, cx| {
-                let stat = cx.background_spawn(async move { git::commit_stat(&top, &hash, parent.as_deref()) }).await;
+                let stat = cx
+                    .background_spawn(
+                        async move { git::commit_stat(&top, &hash, parent.as_deref()) },
+                    )
+                    .await;
                 _ = this.update(cx, |this, cx| {
                     match stat {
                         Ok(stat) => _ = this.stats.insert(key, Some(stat)),
@@ -992,14 +1306,24 @@ impl ScmView {
             .detach();
         }
         let email = commit.email.clone();
-        if self.avatars.contains_key(&email) || self.avatar_pending.contains(&email) || email.is_empty() {
+        if self.avatars.contains_key(&email)
+            || self.avatar_pending.contains(&email)
+            || email.is_empty()
+        {
             return;
         }
         self.avatar_pending.insert(email.clone());
-        let github = self.repo.read(cx).github.clone().map(|(owner, repo)| (owner, repo, commit.hash.clone()));
+        let github = self
+            .repo
+            .read(cx)
+            .github
+            .clone()
+            .map(|(owner, repo)| (owner, repo, commit.hash.clone()));
         cx.spawn(async move |this, cx| {
             let key = email.clone();
-            let found = cx.background_spawn(async move { avatars::fetch(&email, github) }).await;
+            let found = cx
+                .background_spawn(async move { avatars::fetch(&email, github) })
+                .await;
             _ = this.update(cx, |this, cx| {
                 this.avatar_pending.remove(&key);
                 this.avatars.insert(key, found);
@@ -1011,16 +1335,36 @@ impl ScmView {
 
     /// A commit's files once expanded, each behind the lanes running on
     /// below the commit.
-    fn render_commit_files(&self, hash: &str, below: &Graph, graph_w: Pixels, cx: &Context<Self>) -> Vec<AnyElement> {
+    fn render_commit_files(
+        &self,
+        hash: &str,
+        below: &Graph,
+        graph_w: Pixels,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
-        let Some(loaded) = self.expanded.get(hash) else { return Vec::new() };
-        let lanes = |below: &Graph| div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(below.clone(), theme.background));
+        let Some(loaded) = self.expanded.get(hash) else {
+            return Vec::new();
+        };
+        let lanes = |below: &Graph| {
+            div()
+                .flex_none()
+                .w(graph_w)
+                .h_full()
+                .child(git_graph::graph_canvas(below.clone(), theme.background))
+        };
         let Some((parent, files)) = loaded else {
             return vec![
                 h_flex()
                     .h(px(COMMIT_ROW))
                     .child(lanes(below))
-                    .child(div().pl_2().text_xs().text_color(theme.muted_foreground).child("Loading…"))
+                    .child(
+                        div()
+                            .pl_2()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Loading…"),
+                    )
                     .into_any_element(),
             ];
         };
@@ -1029,10 +1373,19 @@ impl ScmView {
             .enumerate()
             .map(|(ix, file)| {
                 let name = file.rel.rsplit('/').next().unwrap_or(&file.rel).to_string();
-                let dir = file.rel.strip_suffix(name.as_str()).unwrap_or("").trim_end_matches('/').to_string();
+                let dir = file
+                    .rel
+                    .strip_suffix(name.as_str())
+                    .unwrap_or("")
+                    .trim_end_matches('/')
+                    .to_string();
                 let event = ScmEvent::CommitDiff {
                     rel: file.rel.clone(),
-                    commit: crate::diff::CommitRevs { hash: hash.to_string(), parent: parent.clone(), old_rel: file.old_rel.clone() },
+                    commit: crate::diff::CommitRevs {
+                        hash: hash.to_string(),
+                        parent: parent.clone(),
+                        old_rel: file.old_rel.clone(),
+                    },
                 };
                 let event = std::rc::Rc::new(event);
                 h_flex()
@@ -1045,11 +1398,29 @@ impl ScmView {
                     .child(lanes(below))
                     .child(crate::file_icon::render(&file.rel, 16., cx))
                     .child(div().flex_1().min_w_0().truncate().child(name))
-                    .child(div().flex_none().max_w(px(140.)).truncate().text_xs().text_color(theme.muted_foreground).child(dir))
-                    .child(div().flex_none().w(px(12.)).text_xs().text_color(letter_color(file.status, cx)).child(file.status.to_string()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(140.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(dir),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.))
+                            .text_xs()
+                            .text_color(letter_color(file.status, cx))
+                            .child(file.status.to_string()),
+                    )
                     .on_click(cx.listener(move |_, _, _, cx| {
                         if let ScmEvent::CommitDiff { rel, commit } = &*event {
-                            cx.emit(ScmEvent::CommitDiff { rel: rel.clone(), commit: commit.clone() });
+                            cx.emit(ScmEvent::CommitDiff {
+                                rel: rel.clone(),
+                                commit: commit.clone(),
+                            });
                         }
                     }))
                     .into_any_element()
@@ -1059,13 +1430,24 @@ impl ScmView {
 
     /// A commit's row: its graph, subject, branch and tag badges, author and
     /// age, with a hover card and a menu.
-    fn render_commit(&self, ix: usize, commit: &git::Commit, graph_w: Pixels, now: i64, cx: &Context<Self>) -> AnyElement {
+    fn render_commit(
+        &self,
+        ix: usize,
+        commit: &git::Commit,
+        graph_w: Pixels,
+        now: i64,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let repo = self.repo.read(cx);
         let graph = repo.row_graph(ix).cloned().unwrap_or_default();
         let lane_color = git_graph::lane_color(repo.row_lane(ix));
         let open = self.expanded.contains_key(&commit.hash);
-        let files = if open { self.render_commit_files(&commit.hash, &git_graph::continuation(&graph), graph_w, cx) } else { Vec::new() };
+        let files = if open {
+            self.render_commit_files(&commit.hash, &git_graph::continuation(&graph), graph_w, cx)
+        } else {
+            Vec::new()
+        };
         let weak = cx.weak_entity();
         let hash = commit.hash.clone();
         let row = h_flex()
@@ -1076,7 +1458,13 @@ impl ScmView {
             .text_sm()
             .hover(|this| this.bg(theme.list_hover))
             .when(open, |this| this.bg(theme.list_active))
-            .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(graph_w)
+                    .h_full()
+                    .child(git_graph::graph_canvas(graph, theme.background)),
+            )
             // The author follows the subject, as VS Code's graph lists them;
             // the age is on the hover card.
             .child(
@@ -1085,10 +1473,20 @@ impl ScmView {
                     .min_w_0()
                     .gap_2()
                     .child(div().min_w_0().truncate().child(commit.subject.clone()))
-                    .child(div().flex_none().max_w(px(90.)).truncate().text_xs().text_color(theme.muted_foreground).child(commit.author.clone())),
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(90.))
+                            .truncate()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(commit.author.clone()),
+                    ),
             )
             .children(commit.refs.iter().map(|r| ref_badge(r, lane_color)))
-            .when(commit.detached_head, |this| this.child(head_badge(theme.muted_foreground)))
+            .when(commit.detached_head, |this| {
+                this.child(head_badge(theme.muted_foreground))
+            })
             .on_click(cx.listener({
                 let hash = hash.clone();
                 move |this, _, _, cx| this.toggle_commit(hash.clone(), cx)
@@ -1119,19 +1517,48 @@ impl ScmView {
 
     /// A commit's right-click menu.
     fn commit_menu(menu: PopupMenu, this: WeakEntity<Self>, hash: &str, cx: &App) -> PopupMenu {
-        let Some(view) = this.upgrade() else { return menu };
+        let Some(view) = this.upgrade() else {
+            return menu;
+        };
         let view = view.read(cx);
-        let Some(commit) = view.commit_by_hash(hash, cx) else { return menu };
+        let Some(commit) = view.commit_by_hash(hash, cx) else {
+            return menu;
+        };
         let expanded = view.expanded.contains_key(&commit.hash);
         let url = view.repo.read(cx).github_commit_url(&commit.hash);
-        let (hash, short, message) = (commit.hash.clone(), commit.short.clone(), commit_message(&commit));
+        let (hash, short, message) = (
+            commit.hash.clone(),
+            commit.short.clone(),
+            commit_message(&commit),
+        );
         let toggle = commit.hash.clone();
-        menu.item(menu_action(&this, if expanded { "Collapse" } else { "Show Changed Files" }, move |v, _, cx| v.toggle_commit(toggle.clone(), cx)))
-            .separator()
-            .item(menu_action(&this, "Copy Commit Hash", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()))))
-            .item(menu_action(&this, "Copy Short Hash", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(short.clone()))))
-            .item(menu_action(&this, "Copy Commit Message", move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.clone()))))
-            .when_some(url, |menu, url| menu.separator().item(menu_action(&this, "Open on GitHub", move |_, _, cx| cx.open_url(&url))))
+        menu.item(menu_action(
+            &this,
+            if expanded {
+                "Collapse"
+            } else {
+                "Show Changed Files"
+            },
+            move |v, _, cx| v.toggle_commit(toggle.clone(), cx),
+        ))
+        .separator()
+        .item(menu_action(&this, "Copy Commit Hash", move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()))
+        }))
+        .item(menu_action(&this, "Copy Short Hash", move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(short.clone()))
+        }))
+        .item(menu_action(
+            &this,
+            "Copy Commit Message",
+            move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(message.clone())),
+        ))
+        .when_some(url, |menu, url| {
+            menu.separator()
+                .item(menu_action(&this, "Open on GitHub", move |_, _, cx| {
+                    cx.open_url(&url)
+                }))
+        })
     }
 
     fn render_commits(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1157,7 +1584,14 @@ impl ScmView {
                     .border_t_1()
                     .border_color(theme.border)
                     .hover(|this| this.bg(theme.list_hover))
-                    .child(Icon::new(if self.commits_open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall())
+                    .child(
+                        Icon::new(if self.commits_open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall(),
+                    )
                     .child("COMMITS")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.commits_open = !this.commits_open;
@@ -1177,11 +1611,23 @@ impl ScmView {
                         .hover(move |this| this.bg(hover))
                         .on_drag(CommitsResize, |_, _, _, cx| cx.new(|_| CommitsResize)),
                 )
-                .child(div().id("scm-commits").flex_1().min_h_0().overflow_y_scrollbar().child(self.render_commit_rows(graph_w, now, cx)))
+                .child(
+                    div()
+                        .id("scm-commits")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(self.render_commit_rows(graph_w, now, cx)),
+                )
             })
     }
 
-    fn render_commit_rows(&self, graph_w: Pixels, now: i64, cx: &Context<Self>) -> impl IntoElement {
+    fn render_commit_rows(
+        &self,
+        graph_w: Pixels,
+        now: i64,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
         let repo = self.repo.read(cx);
         let commits = &repo.commits;
@@ -1195,7 +1641,13 @@ impl ScmView {
                         .h(px(COMMIT_ROW))
                         .gap_2()
                         .text_sm()
-                        .child(div().flex_none().w(graph_w).h_full().child(git_graph::graph_canvas(graph, theme.background)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(graph_w)
+                                .h_full()
+                                .child(git_graph::graph_canvas(graph, theme.background)),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -1203,11 +1655,19 @@ impl ScmView {
                                 .truncate()
                                 .italic()
                                 .text_color(theme.muted_foreground)
-                                .child(format!("{count} change{}", if count == 1 { "" } else { "s" })),
+                                .child(format!(
+                                    "{count} change{}",
+                                    if count == 1 { "" } else { "s" }
+                                )),
                         ),
                 )
             })
-            .children(commits.iter().enumerate().map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)))
+            .children(
+                commits
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)),
+            )
             .when(more, |this| {
                 this.child(
                     div()
@@ -1219,7 +1679,9 @@ impl ScmView {
                         .text_color(theme.muted_foreground)
                         .hover(|this| this.bg(theme.list_hover))
                         .child("Load more…")
-                        .on_click(cx.listener(|this, _, _, cx| this.repo.update(cx, |repo, cx| repo.load_more(cx)))),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.repo.update(cx, |repo, cx| repo.load_more(cx))
+                        })),
                 )
             })
     }
@@ -1232,7 +1694,11 @@ fn group_files(status: &git::Status, group: Group) -> impl Iterator<Item = &File
 
 /// The whole message: the subject, then the body after a blank line.
 fn commit_message(commit: &git::Commit) -> String {
-    if commit.body.is_empty() { commit.subject.clone() } else { format!("{}\n\n{}", commit.subject, commit.body) }
+    if commit.body.is_empty() {
+        commit.subject.clone()
+    } else {
+        format!("{}\n\n{}", commit.subject, commit.body)
+    }
 }
 
 /// A branch or tag at a commit, in its lane's colour: the checked-out
@@ -1251,7 +1717,12 @@ fn head_badge(color: Hsla) -> impl IntoElement {
     badge(IconName::GitCommitHorizontal, "HEAD", color, false)
 }
 
-fn badge(icon: IconName, name: impl Into<SharedString>, color: Hsla, filled: bool) -> impl IntoElement {
+fn badge(
+    icon: IconName,
+    name: impl Into<SharedString>,
+    color: Hsla,
+    filled: bool,
+) -> impl IntoElement {
     h_flex()
         .flex_none()
         .h(px(16.))
@@ -1261,7 +1732,13 @@ fn badge(icon: IconName, name: impl Into<SharedString>, color: Hsla, filled: boo
         .text_xs()
         .border_1()
         .border_color(color)
-        .map(|this| if filled { this.bg(color).text_color(gpui_kit::white()) } else { this.text_color(color) })
+        .map(|this| {
+            if filled {
+                this.bg(color).text_color(gpui_kit::white())
+            } else {
+                this.text_color(color)
+            }
+        })
         .child(Icon::new(icon).xsmall())
         .child(div().max_w(px(110.)).truncate().child(name.into()))
 }
@@ -1270,14 +1747,29 @@ fn badge(icon: IconName, name: impl Into<SharedString>, color: Hsla, filled: boo
 /// its hash with a copy button and a link to GitHub.
 fn render_commit_card(view: &WeakEntity<ScmView>, hash: &str, now: i64, cx: &App) -> AnyElement {
     let theme = cx.theme().clone();
-    let Some(view) = view.upgrade() else { return div().into_any_element() };
+    let Some(view) = view.upgrade() else {
+        return div().into_any_element();
+    };
     let view = view.read(cx);
-    let Some(commit) = view.commit_by_hash(hash, cx) else { return div().into_any_element() };
-    let (stat, avatar) = (view.stats.get(&commit.hash).copied(), view.avatars.get(&commit.email).cloned().flatten());
+    let Some(commit) = view.commit_by_hash(hash, cx) else {
+        return div().into_any_element();
+    };
+    let (stat, avatar) = (
+        view.stats.get(&commit.hash).copied(),
+        view.avatars.get(&commit.email).cloned().flatten(),
+    );
     let url = view.repo.read(cx).github_commit_url(&commit.hash);
     let avatar: AnyElement = match avatar.filter(|path| path.is_file()) {
-        Some(path) => img(path).size(px(20.)).flex_none().rounded_full().object_fit(ObjectFit::Cover).into_any_element(),
-        None => Avatar::new().name(commit.author.clone()).xsmall().into_any_element(),
+        Some(path) => img(path)
+            .size(px(20.))
+            .flex_none()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => Avatar::new()
+            .name(commit.author.clone())
+            .xsmall()
+            .into_any_element(),
     };
     let when = match git::long_date(&commit.when) {
         Some(date) => format!("{} ({date})", git::age(commit.date, now)),
@@ -1291,48 +1783,85 @@ fn render_commit_card(view: &WeakEntity<ScmView>, hash: &str, now: i64, cx: &App
         .gap_2()
         .text_sm()
         .child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(avatar)
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(commit.author.clone()))
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(when)),
-                ),
+            h_flex().gap_2().items_center().child(avatar).child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(commit.author.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(when),
+                    ),
+            ),
         )
         .child(divider())
         .child(
             v_flex()
                 .gap_1()
                 .child(div().whitespace_normal().child(commit.subject.clone()))
-                .when(!commit.body.is_empty(), |this| this.child(div().whitespace_normal().text_xs().text_color(theme.muted_foreground).child(commit.body.clone()))),
+                .when(!commit.body.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .whitespace_normal()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(commit.body.clone()),
+                    )
+                }),
         )
         .child(divider())
         .child(match stat {
             Some(Some(stat)) => {
-                let count = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                let count = |n: u32, one: &str, many: &str| {
+                    format!("{n} {}", if n == 1 { one } else { many })
+                };
                 h_flex()
                     .text_xs()
                     .child(count(stat.files, "file changed", "files changed"))
                     .when(stat.insertions > 0, |this| {
-                        this.child(", ").child(div().text_color(theme.green).child(format!("{}(+)", count(stat.insertions, "insertion", "insertions"))))
+                        this.child(", ")
+                            .child(div().text_color(theme.green).child(format!(
+                                "{}(+)",
+                                count(stat.insertions, "insertion", "insertions")
+                            )))
                     })
                     .when(stat.deletions > 0, |this| {
-                        this.child(", ").child(div().text_color(theme.red).child(format!("{}(-)", count(stat.deletions, "deletion", "deletions"))))
+                        this.child(", ")
+                            .child(div().text_color(theme.red).child(format!(
+                                "{}(-)",
+                                count(stat.deletions, "deletion", "deletions")
+                            )))
                     })
                     .into_any_element()
             }
-            _ => div().text_xs().text_color(theme.muted_foreground).child("Loading…").into_any_element(),
+            _ => div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("Loading…")
+                .into_any_element(),
         })
         .child(divider())
         .child(
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(Icon::new(IconName::GitCommitHorizontal).small().text_color(theme.muted_foreground))
-                .child(div().font_family(crate::settings::mono_font(cx)).text_xs().text_color(theme.muted_foreground).child(commit.short.clone()))
+                .child(
+                    Icon::new(IconName::GitCommitHorizontal)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(
+                    div()
+                        .font_family(crate::settings::mono_font(cx))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(commit.short.clone()),
+                )
                 .child(
                     Button::new("copy-hash")
                         .ghost()
@@ -1345,14 +1874,15 @@ fn render_commit_card(view: &WeakEntity<ScmView>, hash: &str, now: i64, cx: &App
                         }),
                 )
                 .when_some(url, |this, url| {
-                    this.child(div().px_1().text_color(theme.muted_foreground).child("|")).child(
-                        Button::new("open-github")
-                            .ghost()
-                            .xsmall()
-                            .icon(Icon::new(IconName::Github))
-                            .label("Open on GitHub")
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    )
+                    this.child(div().px_1().text_color(theme.muted_foreground).child("|"))
+                        .child(
+                            Button::new("open-github")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Github))
+                                .label("Open on GitHub")
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                        )
                 }),
         )
         .into_any_element()
@@ -1461,7 +1991,9 @@ impl Render for ScmView {
                                 .ghost()
                                 .xsmall()
                                 .icon(Icon::new(IconName::X))
-                                .on_click(cx.listener(|this, _, _, cx| this.repo.update(cx, |repo, cx| repo.clear_error(cx)))),
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.repo.update(cx, |repo, cx| repo.clear_error(cx))
+                                })),
                         ),
                 )
             })
@@ -1471,7 +2003,9 @@ impl Render for ScmView {
                         .px_2()
                         .gap_1()
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.key == "enter" && event.keystroke.modifiers.secondary() {
+                            if event.keystroke.key == "enter"
+                                && event.keystroke.modifiers.secondary()
+                            {
                                 this.commit(false, false, window, cx);
                                 cx.stop_propagation();
                             }
@@ -1481,14 +2015,29 @@ impl Render for ScmView {
                             h_flex()
                                 .gap_1()
                                 .items_start()
-                                .child(div().flex_1().min_w_0().child(Textarea::new(&self.message).small().disabled(busy)))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Textarea::new(&self.message).small().disabled(busy)),
+                                )
                                 .child(
                                     Button::new("generate-message")
                                         .ghost()
                                         .small()
-                                        .icon(Icon::new(if busy { IconName::CircleStop } else { IconName::Sparkles }))
-                                        .tooltip(if busy { "Stop" } else { "Generate Commit Message (local AI)" })
-                                        .on_click(cx.listener(|this, _, window, cx| this.generate_message(window, cx))),
+                                        .icon(Icon::new(if busy {
+                                            IconName::CircleStop
+                                        } else {
+                                            IconName::Sparkles
+                                        }))
+                                        .tooltip(if busy {
+                                            "Stop"
+                                        } else {
+                                            "Generate Commit Message (local AI)"
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.generate_message(window, cx)
+                                        })),
                                 )
                         })
                         .child(
@@ -1501,7 +2050,9 @@ impl Render for ScmView {
                                         .flex_1()
                                         .icon(Icon::new(IconName::Check))
                                         .label("Commit")
-                                        .on_click(cx.listener(|this, _, window, cx| this.commit(false, false, window, cx))),
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.commit(false, false, window, cx)
+                                        })),
                                 )
                                 .child({
                                     let weak = cx.weak_entity();
@@ -1512,12 +2063,24 @@ impl Render for ScmView {
                                         .dropdown_menu(move |menu, _, _| {
                                             let amend = weak.clone();
                                             let push = weak.clone();
-                                            menu.item(PopupMenuItem::new("Commit (Amend)").on_click(move |_, window, cx| {
-                                                _ = amend.update(cx, |this, cx| this.commit(true, false, window, cx));
-                                            }))
-                                            .item(PopupMenuItem::new("Commit & Push").on_click(move |_, window, cx| {
-                                                _ = push.update(cx, |this, cx| this.commit(false, true, window, cx));
-                                            }))
+                                            menu.item(
+                                                PopupMenuItem::new("Commit (Amend)").on_click(
+                                                    move |_, window, cx| {
+                                                        _ = amend.update(cx, |this, cx| {
+                                                            this.commit(true, false, window, cx)
+                                                        });
+                                                    },
+                                                ),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("Commit & Push").on_click(
+                                                    move |_, window, cx| {
+                                                        _ = push.update(cx, |this, cx| {
+                                                            this.commit(false, true, window, cx)
+                                                        });
+                                                    },
+                                                ),
+                                            )
                                         })
                                 }),
                         ),

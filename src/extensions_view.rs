@@ -49,16 +49,29 @@ impl EventEmitter<ExtensionsEvent> for ExtensionsView {}
 
 impl ExtensionsView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Filter, or owner/repo to install"));
-        let _subscriptions = vec![cx.subscribe_in(&query, window, |this, _, event: &InputEvent, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.install(window, cx),
-            InputEvent::Change => {
-                this.available_limit = AVAILABLE_PAGE;
-                cx.notify();
-            }
-            _ => {}
-        }), cx.observe_global::<Extensions>(|_, cx| cx.notify())];
-        Self { query, selected: None, index_requested: false, available_limit: AVAILABLE_PAGE, _subscriptions }
+        let query = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Filter, or owner/repo to install"));
+        let _subscriptions =
+            vec![
+                cx.subscribe_in(&query, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::PressEnter { .. } => this.install(window, cx),
+                        InputEvent::Change => {
+                            this.available_limit = AVAILABLE_PAGE;
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                }),
+                cx.observe_global::<Extensions>(|_, cx| cx.notify()),
+            ];
+        Self {
+            query,
+            selected: None,
+            index_requested: false,
+            available_limit: AVAILABLE_PAGE,
+            _subscriptions,
+        }
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -69,7 +82,9 @@ impl ExtensionsView {
     /// The box's text as a GitHub repository, when it reads as one.
     fn repository(&self, cx: &App) -> Option<String> {
         let text = self.query.read(cx).value();
-        text.contains('/').then(|| crate::backend::extensions::parse_repository(&text).ok()).flatten()
+        text.contains('/')
+            .then(|| crate::backend::extensions::parse_repository(&text).ok())
+            .flatten()
     }
 
     fn install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -92,8 +107,16 @@ fn passes(texts: &[&str], query: &str) -> bool {
 
 /// A letter on a colour of the extension's own, in place of an icon.
 fn letter(id: &str, name: &str, size: f32) -> AnyElement {
-    let hue = id.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
-    let letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+    let hue = id
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))
+        % 360;
+    let letter = name
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
     div()
         .size(px(size))
         .flex_none()
@@ -128,13 +151,19 @@ fn icon_or_letter(path: Option<PathBuf>, id: &str, name: &str, size: f32) -> Any
 
 /// An installed extension's icon, else its letter.
 pub(crate) fn avatar(entry: &Entry, size: f32) -> AnyElement {
-    let path = entry.manifest.as_ref().filter(|m| !m.icon.is_empty()).map(|m| entry.dir.join(&m.icon)).filter(|path| path.is_file());
+    let path = entry
+        .manifest
+        .as_ref()
+        .filter(|m| !m.icon.is_empty())
+        .map(|m| entry.dir.join(&m.icon))
+        .filter(|path| path.is_file());
     icon_or_letter(path, &entry.id, entry.name(), size)
 }
 
 /// A listed extension's icon once fetched with the index, else its letter.
 pub(crate) fn listing_avatar(listing: &Listing, size: f32, cx: &App) -> AnyElement {
-    let path = crate::backend::extensions::icon_path(listing).filter(|_| Extensions::get(cx).icon_ready(listing));
+    let path = crate::backend::extensions::icon_path(listing)
+        .filter(|_| Extensions::get(cx).icon_ready(listing));
     icon_or_letter(path, &listing.id, &listing.name, size)
 }
 
@@ -149,7 +178,10 @@ pub(crate) fn status(entry: &Entry, cx: &App) -> (Hsla, String) {
         Status::Installed => (theme.muted_foreground, String::new()),
     };
     let text = [text, entry.change.clone().unwrap_or_default()].join(" · ");
-    (color, text.trim_matches(|c| c == ' ' || c == '·').to_string())
+    (
+        color,
+        text.trim_matches(|c| c == ' ' || c == '·').to_string(),
+    )
 }
 
 /// What both kinds of card show above their bottom row.
@@ -163,9 +195,21 @@ struct Face {
 
 /// The frame both kinds of card share: icon, name and version, description,
 /// then a bottom row.
-fn card_frame(face: Face, bottom: impl IntoElement, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> Stateful<Div> {
+fn card_frame(
+    face: Face,
+    bottom: impl IntoElement,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
     let theme = cx.theme();
-    let Face { id, icon, name, version, description } = face;
+    let Face {
+        id,
+        icon,
+        name,
+        version,
+        description,
+    } = face;
     h_flex()
         .id(SharedString::from(format!("ext-card-{id}")))
         .px_3()
@@ -186,10 +230,30 @@ fn card_frame(face: Face, bottom: impl IntoElement, selected: bool, on_click: im
                     h_flex()
                         .gap_2()
                         .items_baseline()
-                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                        .child(div().text_xs().text_color(theme.muted_foreground).flex_none().child(version)),
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .flex_none()
+                                .child(version),
+                        ),
                 )
-                .when(!description.is_empty(), |this| this.child(div().text_xs().text_color(theme.muted_foreground).line_clamp(2).child(description)))
+                .when(!description.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .line_clamp(2)
+                            .child(description),
+                    )
+                })
                 .child(bottom),
         )
 }
@@ -197,25 +261,59 @@ fn card_frame(face: Face, bottom: impl IntoElement, selected: bool, on_click: im
 /// An installed extension's controls: Update when the index has a newer
 /// version (else Check for Update), Uninstall, and its on/off switch. Small
 /// icon buttons for a card (`compact`), labelled ones for the page.
-pub(crate) fn entry_actions(entry: &Entry, update: Option<&Listing>, compact: bool, cx: &App) -> Div {
+pub(crate) fn entry_actions(
+    entry: &Entry,
+    update: Option<&Listing>,
+    compact: bool,
+    cx: &App,
+) -> Div {
     let theme = cx.theme();
     let id = entry.id.clone();
     let scope = if compact { "view" } else { "page" };
     let manifest = entry.manifest.as_ref();
     let removed = entry.change.as_deref() == Some(extensions::REMOVED);
-    let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&id));
-    let check = manifest.filter(|m| !m.repository.is_empty()).map(|m| (m.repository.clone(), m.version.clone()));
-    let newer = update.zip(manifest).map(|(listing, m)| (listing.repo.clone(), m.version.clone(), listing.version.clone()));
+    let progress =
+        crate::downloads::download_progress(&crate::downloads::install_progress_key(&id));
+    let check = manifest
+        .filter(|m| !m.repository.is_empty())
+        .map(|m| (m.repository.clone(), m.version.clone()));
+    let newer = update.zip(manifest).map(|(listing, m)| {
+        (
+            listing.repo.clone(),
+            m.version.clone(),
+            listing.version.clone(),
+        )
+    });
     let enabled = extensions::is_enabled(&id, cx);
     let (remove_id, switch_id) = (id.clone(), id.clone());
-    let button = |action: &str| Button::new(SharedString::from(format!("ext-{scope}-{action}-{id}"))).map(|b| if compact { b.xsmall() } else { b.small() });
+    let button = |action: &str| {
+        Button::new(SharedString::from(format!("ext-{scope}-{action}-{id}")))
+            .map(|b| if compact { b.xsmall() } else { b.small() })
+    };
 
-    let actions = h_flex().items_center().flex_none().map(|this| if compact { this.gap_0p5() } else { this.gap_2().pt_1() });
+    let actions = h_flex().items_center().flex_none().map(|this| {
+        if compact {
+            this.gap_0p5()
+        } else {
+            this.gap_2().pt_1()
+        }
+    });
     if removed {
         return actions;
     }
     if let Some(progress) = progress {
-        return actions.child(div().map(|this| if compact { this.text_xs() } else { this.text_sm() }).text_color(theme.muted_foreground).child(progress));
+        return actions.child(
+            div()
+                .map(|this| {
+                    if compact {
+                        this.text_xs()
+                    } else {
+                        this.text_sm()
+                    }
+                })
+                .text_color(theme.muted_foreground)
+                .child(progress),
+        );
     }
     actions
         .map(|this| match (newer, check) {
@@ -225,20 +323,46 @@ pub(crate) fn entry_actions(entry: &Entry, update: Option<&Listing>, compact: bo
                     .primary()
                     .label("Update")
                     .tooltip(format!("Version {newer} is out"))
-                    .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), Some(installed.clone()), window, cx)),
+                    .on_click(move |_, window, cx| {
+                        crate::downloads::get_extension(
+                            repo.clone(),
+                            Some(installed.clone()),
+                            window,
+                            cx,
+                        )
+                    }),
             ),
             (None, Some((repo, version))) => this.child(
                 button("update")
-                    .map(|b| if compact { b.ghost() } else { b.primary().label("Check for Update") })
+                    .map(|b| {
+                        if compact {
+                            b.ghost()
+                        } else {
+                            b.primary().label("Check for Update")
+                        }
+                    })
                     .icon(Icon::new(IconName::RefreshCw))
                     .tooltip("Check for an Update")
-                    .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), Some(version.clone()), window, cx)),
+                    .on_click(move |_, window, cx| {
+                        crate::downloads::get_extension(
+                            repo.clone(),
+                            Some(version.clone()),
+                            window,
+                            cx,
+                        )
+                    }),
             ),
             (None, None) => this,
         })
         .child(
             button("remove")
-                .map(|b| if compact { b.ghost() } else { b.outline().label("Uninstall") })
+                .map(|b| {
+                    if compact {
+                        b.ghost()
+                    } else {
+                        b.outline().label("Uninstall")
+                    }
+                })
                 .icon(Icon::new(IconName::Trash))
                 .tooltip("Uninstall")
                 .on_click(move |_, window, cx| {
@@ -250,20 +374,35 @@ pub(crate) fn entry_actions(entry: &Entry, update: Option<&Listing>, compact: bo
         )
         .child(
             // Not a click on the card as well.
-            div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).map(|this| if compact { this } else { this.pl_2() }).child(
-                Switch::new(SharedString::from(format!("ext-{scope}-on-{id}")))
-                    .map(|s| if compact { s.xsmall() } else { s.label(if enabled { "On" } else { "Off" }) })
-                    .checked(enabled)
-                    .tooltip(if enabled { "Turn Off" } else { "Turn On" })
-                    .on_click(move |checked, window, cx| {
-                        extensions::set_enabled(&switch_id, *checked, cx);
-                        window.refresh();
-                    }),
-            ),
+            div()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .map(|this| if compact { this } else { this.pl_2() })
+                .child(
+                    Switch::new(SharedString::from(format!("ext-{scope}-on-{id}")))
+                        .map(|s| {
+                            if compact {
+                                s.xsmall()
+                            } else {
+                                s.label(if enabled { "On" } else { "Off" })
+                            }
+                        })
+                        .checked(enabled)
+                        .tooltip(if enabled { "Turn Off" } else { "Turn On" })
+                        .on_click(move |checked, window, cx| {
+                            extensions::set_enabled(&switch_id, *checked, cx);
+                            window.refresh();
+                        }),
+                ),
         )
 }
 
-fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> impl IntoElement {
+fn card(
+    entry: &Entry,
+    update: Option<Listing>,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
     let manifest = entry.manifest.as_ref();
     let (dot, status) = status(entry, cx);
@@ -277,7 +416,13 @@ fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl F
                 .items_center()
                 .min_w_0()
                 .child(div().size(px(7.)).rounded_full().flex_none().bg(dot))
-                .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(status)),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(status),
+                ),
         )
         .child(entry_actions(entry, update.as_ref(), true, cx));
     let face = Face {
@@ -290,28 +435,58 @@ fn card(entry: &Entry, update: Option<Listing>, selected: bool, on_click: impl F
     card_frame(face, bottom, selected, on_click, cx)
 }
 
-fn available_card(listing: &Listing, selected: bool, on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, cx: &App) -> impl IntoElement {
+fn available_card(
+    listing: &Listing,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
-    let progress = crate::downloads::download_progress(&crate::downloads::install_progress_key(&listing.id));
-    let author = listing.repo.split('/').next().unwrap_or_default().to_string();
+    let progress =
+        crate::downloads::download_progress(&crate::downloads::install_progress_key(&listing.id));
+    let author = listing
+        .repo
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
     let action: AnyElement = if let Some(progress) = progress {
-        div().text_xs().text_color(theme.muted_foreground).child(progress).into_any_element()
+        div()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(progress)
+            .into_any_element()
     } else if !listing.loadable() {
-        div().text_xs().text_color(theme.muted_foreground).child("Needs a newer den").into_any_element()
+        div()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child("Needs a newer den")
+            .into_any_element()
     } else {
         let repo = listing.repo.clone();
-        Button::new(SharedString::from(format!("ext-view-install-{}", listing.id)))
-            .xsmall()
-            .primary()
-            .label("Install")
-            .on_click(move |_, window, cx| crate::downloads::get_extension(repo.clone(), None, window, cx))
-            .into_any_element()
+        Button::new(SharedString::from(format!(
+            "ext-view-install-{}",
+            listing.id
+        )))
+        .xsmall()
+        .primary()
+        .label("Install")
+        .on_click(move |_, window, cx| {
+            crate::downloads::get_extension(repo.clone(), None, window, cx)
+        })
+        .into_any_element()
     };
     let bottom = h_flex()
         .gap_2()
         .items_center()
         .justify_between()
-        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(author))
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .truncate()
+                .child(author),
+        )
         .child(action);
     let face = Face {
         id: listing.id.clone(),
@@ -320,7 +495,8 @@ fn available_card(listing: &Listing, selected: bool, on_click: impl Fn(&ClickEve
         version: listing.version.clone(),
         description: listing.description.clone(),
     };
-    card_frame(face, bottom, selected, on_click, cx).when(!listing.loadable(), |this| this.opacity(0.6))
+    card_frame(face, bottom, selected, on_click, cx)
+        .when(!listing.loadable(), |this| this.opacity(0.6))
 }
 
 impl Render for ExtensionsView {
@@ -336,22 +512,62 @@ impl Render for ExtensionsView {
         let entries = state.entries.as_slice();
         let shown: Vec<&Entry> = entries
             .iter()
-            .filter(|e| passes(&[&e.id, e.name(), e.manifest.as_ref().map_or("", |m| m.description.as_str())], &query))
+            .filter(|e| {
+                passes(
+                    &[
+                        &e.id,
+                        e.name(),
+                        e.manifest.as_ref().map_or("", |m| m.description.as_str()),
+                    ],
+                    &query,
+                )
+            })
             .collect();
         let uninstalled = extensions::uninstalled(&state.available, entries);
-        let matching: Vec<&Listing> = uninstalled.iter().copied().filter(|l| passes(&[&l.id, &l.name, &l.description, &l.repo], &query)).collect();
+        let matching: Vec<&Listing> = uninstalled
+            .iter()
+            .copied()
+            .filter(|l| passes(&[&l.id, &l.name, &l.description, &l.repo], &query))
+            .collect();
         let hidden = matching.len().saturating_sub(self.available_limit);
-        let available: Vec<Listing> = matching.into_iter().take(self.available_limit).cloned().collect();
+        let available: Vec<Listing> = matching
+            .into_iter()
+            .take(self.available_limit)
+            .cloned()
+            .collect();
         // Only the icons of the cards drawn are fetched.
         let wanted = available.clone();
-        let updates: Vec<Option<Listing>> = shown.iter().map(|e| extensions::update_available(e, &state.available).cloned()).collect();
+        let updates: Vec<Option<Listing>> = shown
+            .iter()
+            .map(|e| extensions::update_available(e, &state.available).cloned())
+            .collect();
         let index = state.index.clone();
         let total_available = uninstalled.len();
-        let header_button = |id: &'static str, icon: IconName, tooltip: &'static str| Button::new(id).ghost().xsmall().icon(Icon::new(icon)).tooltip(tooltip);
-        let section = |title: String| {
-            div().px_3().pt_3().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(title)
+        let header_button = |id: &'static str, icon: IconName, tooltip: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(icon))
+                .tooltip(tooltip)
         };
-        let note = |text: String| div().px_3().py_2().text_xs().text_color(theme.muted_foreground).child(text);
+        let section = |title: String| {
+            div()
+                .px_3()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
+        let note = |text: String| {
+            div()
+                .px_3()
+                .py_2()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
 
         let view = v_flex()
             .size_full()

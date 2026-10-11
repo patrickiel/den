@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 use crate::{
     SaveFile,
+    backend::ai::Engine,
     defaults::Kind,
     pane::{self, Pane, PaneEvent},
     settings::{Preset, Settings, SidebarSide, ThemeChoice},
@@ -46,15 +47,23 @@ pub fn init(cx: &mut App) {
         let url = data["url"].as_str().map(str::to_string);
         Rc::new(cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx)))
     });
-    pane::register(cx, SETTINGS, |_, window, cx| Rc::new(cx.new(|cx| SettingsPanel::new(window, cx))));
+    pane::register(cx, SETTINGS, |_, window, cx| {
+        Rc::new(cx.new(|cx| SettingsPanel::new(window, cx)))
+    });
     pane::register(cx, crate::extension_panel::EXTENSION, |data, window, cx| {
         let id = data["id"].as_str().unwrap_or_default().to_string();
-        let listing = serde_json::from_value::<crate::backend::extensions::Listing>(data["listing"].clone()).ok();
+        let listing =
+            serde_json::from_value::<crate::backend::extensions::Listing>(data["listing"].clone())
+                .ok();
         // A preview whose extension got installed meanwhile opens as its page.
         let installed = crate::extensions::Extensions::get(cx).entry(&id).is_some();
         match listing.filter(|_| !installed) {
-            Some(listing) => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::preview(listing, cx))),
-            None => Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::new(id, window, cx))),
+            Some(listing) => {
+                Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::preview(listing, cx)))
+            }
+            None => {
+                Rc::new(cx.new(|cx| crate::extension_panel::ExtensionPanel::new(id, window, cx)))
+            }
         }
     });
     pane::register(cx, crate::extension_view::EXTENSION_VIEW, |data, _, cx| {
@@ -79,7 +88,13 @@ enum Look {
 
 impl Look {
     fn of(path: &Path) -> Self {
-        match path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_lowercase().as_str() {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
             "md" | "markdown" => Look::Markdown,
             "svg" => Look::Svg,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" => Look::Image,
@@ -122,11 +137,19 @@ impl FilePanel {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let look = Look::of(&path);
         let (text, encoding, error) = if look == Look::Image {
-            (String::new(), "utf8".to_string(), (!path.is_file()).then(|| SharedString::from("The file is gone")))
+            (
+                String::new(),
+                "utf8".to_string(),
+                (!path.is_file()).then(|| SharedString::from("The file is gone")),
+            )
         } else {
             match crate::encoding::read(&path, None) {
                 Ok((text, encoding)) => (text, encoding, None),
-                Err(err) => (String::new(), "utf8".to_string(), Some(SharedString::from(err))),
+                Err(err) => (
+                    String::new(),
+                    "utf8".to_string(),
+                    Some(SharedString::from(err)),
+                ),
             }
         };
         Self::with_text(path, look, text, encoding, error, window, cx)
@@ -135,7 +158,15 @@ impl FilePanel {
     /// An empty tab named `path`'s file name, as VS Code's Untitled-1: on
     /// disk only once saved, where Save As puts it.
     pub fn untitled(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::with_text(path, Look::Text, String::new(), "utf8".to_string(), None, window, cx);
+        let mut this = Self::with_text(
+            path,
+            Look::Text,
+            String::new(),
+            "utf8".to_string(),
+            None,
+            window,
+            cx,
+        );
         this.untitled = true;
         this
     }
@@ -226,7 +257,13 @@ impl FilePanel {
 
     /// An untitled tab's name (`Untitled-1`).
     pub fn untitled_name(&self) -> Option<String> {
-        self.untitled.then(|| self.path.file_name().unwrap_or_default().to_string_lossy().to_string())
+        self.untitled.then(|| {
+            self.path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        })
     }
 
     /// Read the file from the git index again (after a save, a stage, a
@@ -237,7 +274,9 @@ impl FilePanel {
         }
         let path = self.path.clone();
         cx.spawn(async move |this, cx| {
-            let base = cx.background_spawn(async move { crate::dirty_diff::index_text(&path) }).await;
+            let base = cx
+                .background_spawn(async move { crate::dirty_diff::index_text(&path) })
+                .await;
             _ = this.update(cx, |this, cx| {
                 if this.git_base != base {
                     this.git_base = base;
@@ -262,7 +301,14 @@ impl FilePanel {
     }
 
     /// Put the cursor at `line` and `column` (both from 1), scrolled into view.
-    pub fn go_to(&mut self, line: u32, column: u32, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn go_to(
+        &mut self,
+        line: u32,
+        column: u32,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let position = Position::new(line.saturating_sub(1), column.saturating_sub(1));
         self.editor.update(cx, |editor, cx| {
             editor.set_cursor_position(position, window, cx);
@@ -282,7 +328,9 @@ impl FilePanel {
         if self.dirty {
             return;
         }
-        let Ok((text, _)) = crate::encoding::read(&self.path, Some(&self.encoding)) else { return };
+        let Ok((text, _)) = crate::encoding::read(&self.path, Some(&self.encoding)) else {
+            return;
+        };
         if text.as_str() == self.saved.as_ref() {
             return;
         }
@@ -334,11 +382,16 @@ impl FilePanel {
         let path = self.path.clone();
         cx.spawn_in(window, async move |this, cx| {
             let input = text.clone();
-            let result = cx.background_spawn(async move { crate::backend::format::run(&tool, &path, &input) }).await;
+            let result = cx
+                .background_spawn(async move { crate::backend::format::run(&tool, &path, &input) })
+                .await;
             _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     // Edits made while it ran win over the result.
-                    Ok(formatted) if formatted != text && this.editor.read(cx).value().as_ref() == text.as_str() => {
+                    Ok(formatted)
+                        if formatted != text
+                            && this.editor.read(cx).value().as_ref() == text.as_str() =>
+                    {
                         this.editor.update(cx, |editor, cx| {
                             let position = editor.cursor_position();
                             editor.replace_all(formatted, window, cx);
@@ -357,28 +410,58 @@ impl FilePanel {
     }
 
     /// Ask to download the missing formatter, then format with it.
-    fn offer_formatter(&mut self, kit: &'static crate::backend::format::Kit, window: &mut Window, cx: &mut Context<Self>) {
+    fn offer_formatter(
+        &mut self,
+        kit: &'static crate::backend::format::Kit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use gpui_kit::component::WindowExt as _;
-        let what = format!("Format Document uses {name} for {}. Download {name} ({}) into den's data folder?", kit.formats, kit.download_size(), name = kit.name);
+        let what = format!(
+            "Format Document uses {name} for {}. Download {name} ({}) into den's data folder?",
+            kit.formats,
+            kit.download_size(),
+            name = kit.name
+        );
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
-            dialog.title("Format Document").description(what.clone()).ok_text("Download").show_cancel(true).on_ok(move |_, window, cx| {
-                _ = this.update(cx, |this, cx| this.install_formatter(kit, window, cx));
-                true
-            })
+            dialog
+                .title("Format Document")
+                .description(what.clone())
+                .ok_text("Download")
+                .show_cancel(true)
+                .on_ok(move |_, window, cx| {
+                    _ = this.update(cx, |this, cx| this.install_formatter(kit, window, cx));
+                    true
+                })
         });
     }
 
-    fn install_formatter(&mut self, kit: &'static crate::backend::format::Kit, window: &mut Window, cx: &mut Context<Self>) {
+    fn install_formatter(
+        &mut self,
+        kit: &'static crate::backend::format::Kit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         crate::toast::push(window, format!("Downloading {}…", kit.name), cx);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move { crate::backend::format::install(kit, &crate::backend::http::Cancel::default(), &mut |_, _, _| {}) })
+                .background_spawn(async move {
+                    crate::backend::format::install(
+                        kit,
+                        &crate::backend::http::Cancel::default(),
+                        &mut |_, _, _| {},
+                    )
+                })
                 .await;
             _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => this.format(false, window, cx),
-                Err(err) => crate::toast::push(window, format!("Could not download {}: {err}", kit.name), cx),
+                Err(err) => crate::toast::push(
+                    window,
+                    format!("Could not download {}: {err}", kit.name),
+                    cx,
+                ),
             });
         })
         .detach();
@@ -386,11 +469,17 @@ impl FilePanel {
 
     /// Ask where to save an untitled tab, then save it there as that file.
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dir = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let dir = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let name = self.untitled_name().unwrap_or_default();
         let picked = cx.prompt_for_new_path(&dir, Some(&name));
         cx.spawn_in(window, async move |this, cx| {
-            let Some(path) = picked.await.ok().and_then(Result::ok).flatten() else { return };
+            let Some(path) = picked.await.ok().and_then(Result::ok).flatten() else {
+                return;
+            };
             _ = this.update_in(cx, |this, window, cx| {
                 // Text it stays, whatever the name; a picture would not save.
                 this.look = match Look::of(&path) {
@@ -421,7 +510,11 @@ impl FilePanel {
                 cx.emit(PaneEvent::Saved(self.path.clone()));
             }
             Err(err) => {
-                crate::toast::push(window, format!("Could not save {}: {err}", self.path.display()), cx);
+                crate::toast::push(
+                    window,
+                    format!("Could not save {}: {err}", self.path.display()),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -524,7 +617,8 @@ impl FilePanel {
             _ => {}
         });
         if !preview {
-            self.editor.update(cx, |editor, cx| editor.focus(window, cx));
+            self.editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
         }
         cx.notify();
     }
@@ -545,14 +639,18 @@ impl FilePanel {
                     .xsmall()
                     .label("Source")
                     .map(|b| if preview { b.ghost() } else { b.primary() })
-                    .on_click(cx.listener(|this, _, window, cx| this.set_preview(false, window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.set_preview(false, window, cx)),
+                    ),
             )
             .child(
                 Button::new("preview")
                     .xsmall()
                     .label("Preview")
                     .map(|b| if preview { b.primary() } else { b.ghost() })
-                    .on_click(cx.listener(|this, _, window, cx| this.set_preview(true, window, cx))),
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.set_preview(true, window, cx)),
+                    ),
             )
     }
 
@@ -562,7 +660,11 @@ impl FilePanel {
         match self.look {
             Look::Markdown => {
                 // Images load relative to the document.
-                let dir = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+                let dir = self
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
                 div()
                     .size_full()
                     .px_6()
@@ -587,7 +689,10 @@ impl FilePanel {
                 let image = match &self.svg {
                     Some((source, image)) if *source == text => image.clone(),
                     _ => {
-                        let image = Arc::new(Image::from_bytes(ImageFormat::Svg, text.as_bytes().to_vec()));
+                        let image = Arc::new(Image::from_bytes(
+                            ImageFormat::Svg,
+                            text.as_bytes().to_vec(),
+                        ));
                         self.svg = Some((text, image.clone()));
                         image
                     }
@@ -604,35 +709,59 @@ impl FilePanel {
     fn prompt_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
         let lines = self.editor.read(cx).text().lines_len().max(1);
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Line (1–{lines}), or line:column")));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(format!("Line (1–{lines}), or line:column"))
+        });
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, {
             let input = input.clone();
             move |dialog, _, _| {
                 let input = input.clone();
                 let this = this.clone();
-                dialog.title("Go to Line").show_cancel(true).child(Input::new(&input)).on_ok(move |_, window, cx| {
-                    let text = input.read(cx).value().to_string();
-                    let mut parts = text.trim().split([':', ',']);
-                    let Some(line) = parts.next().and_then(|l| l.trim().parse::<u32>().ok()) else { return false };
-                    let column = parts.next().and_then(|c| c.trim().parse::<u32>().ok()).unwrap_or(1);
-                    _ = this.update(cx, |this, cx| this.go_to(line, column, true, window, cx));
-                    true
-                })
+                dialog
+                    .title("Go to Line")
+                    .show_cancel(true)
+                    .child(Input::new(&input))
+                    .on_ok(move |_, window, cx| {
+                        let text = input.read(cx).value().to_string();
+                        let mut parts = text.trim().split([':', ',']);
+                        let Some(line) = parts.next().and_then(|l| l.trim().parse::<u32>().ok())
+                        else {
+                            return false;
+                        };
+                        let column = parts
+                            .next()
+                            .and_then(|c| c.trim().parse::<u32>().ok())
+                            .unwrap_or(1);
+                        _ = this.update(cx, |this, cx| this.go_to(line, column, true, window, cx));
+                        true
+                    })
             }
         });
-        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
     }
 
     fn set_indent(&mut self, hard_tabs: bool, size: usize, cx: &mut Context<Self>) {
         self.indent = (hard_tabs, size);
-        self.editor.update(cx, |editor, cx| editor.set_tab_size(TabSize { tab_size: size, hard_tabs }, cx));
+        self.editor.update(cx, |editor, cx| {
+            editor.set_tab_size(
+                TabSize {
+                    tab_size: size,
+                    hard_tabs,
+                },
+                cx,
+            )
+        });
         cx.notify();
     }
 
     fn set_language(&mut self, language: &str, cx: &mut Context<Self>) {
         self.language = language.to_string();
-        self.editor.update(cx, |editor, cx| editor.set_highlighter(language.to_string(), cx));
+        self.editor.update(cx, |editor, cx| {
+            editor.set_highlighter(language.to_string(), cx)
+        });
         cx.notify();
     }
 
@@ -643,7 +772,11 @@ impl FilePanel {
             return;
         }
         if self.dirty {
-            crate::toast::push(window, "Save or undo the changes before reopening the file in another encoding.", cx);
+            crate::toast::push(
+                window,
+                "Save or undo the changes before reopening the file in another encoding.",
+                cx,
+            );
             return;
         }
         match crate::encoding::read(&self.path, Some(encoding)) {
@@ -651,7 +784,8 @@ impl FilePanel {
                 self.encoding = encoding;
                 self.saved = text.clone().into();
                 self.crlf = text.contains("\r\n");
-                self.editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+                self.editor
+                    .update(cx, |editor, cx| editor.set_value(text, window, cx));
                 let text = self.saved.clone();
                 self.update_marks(&text, cx);
             }
@@ -670,7 +804,14 @@ impl FilePanel {
         let text = self.editor.read(cx).value();
         if let Err(err) = crate::encoding::write(&self.path, &text, encoding) {
             self.encoding = previous;
-            crate::toast::push(window, format!("Could not save in {}: {err}", crate::encoding::short_name(encoding)), cx);
+            crate::toast::push(
+                window,
+                format!(
+                    "Could not save in {}: {err}",
+                    crate::encoding::short_name(encoding)
+                ),
+                cx,
+            );
             return cx.notify();
         }
         self.write(window, cx);
@@ -680,7 +821,11 @@ impl FilePanel {
     fn set_line_endings(&mut self, crlf: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.editor.read(cx).value().to_string();
         let unix = text.replace("\r\n", "\n");
-        let converted = if crlf { unix.replace('\n', "\r\n") } else { unix };
+        let converted = if crlf {
+            unix.replace('\n', "\r\n")
+        } else {
+            unix
+        };
         if converted != text {
             self.editor.update(cx, |editor, cx| {
                 let position = editor.cursor_position();
@@ -699,14 +844,26 @@ impl FilePanel {
         let editor = self.editor.read(cx);
         let position = editor.cursor_position();
         let crlf = self.crlf;
-        let language = LANGUAGES.iter().find(|(id, _)| *id == self.language).map_or_else(
-            || {
-                let mut chars = self.language.chars();
-                chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_else(|| "Plain Text".into())
-            },
-            |(_, name)| name.to_string(),
-        );
-        let item = |id: &'static str, label: String| Button::new(id).ghost().xsmall().label(label).text_color(theme.muted_foreground);
+        let language = LANGUAGES
+            .iter()
+            .find(|(id, _)| *id == self.language)
+            .map_or_else(
+                || {
+                    let mut chars = self.language.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_else(|| "Plain Text".into())
+                },
+                |(_, name)| name.to_string(),
+            );
+        let item = |id: &'static str, label: String| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .label(label)
+                .text_color(theme.muted_foreground)
+        };
         let (hard_tabs, size) = self.indent;
         let encoding = self.encoding.clone();
         let current_language = self.language.clone();
@@ -722,56 +879,102 @@ impl FilePanel {
             .bg(theme.status_bar)
             .text_xs()
             .child(
-                item("status-position", format!("Ln {}, Col {}", position.line + 1, position.character + 1))
-                    .tooltip("Go to Line")
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_go_to_line(window, cx))),
+                item(
+                    "status-position",
+                    format!("Ln {}, Col {}", position.line + 1, position.character + 1),
+                )
+                .tooltip("Go to Line")
+                .on_click(cx.listener(|this, _, window, cx| this.prompt_go_to_line(window, cx))),
             )
             .child({
                 let this = this.clone();
-                item("status-indent", if hard_tabs { format!("Tab Size: {size}") } else { format!("Spaces: {size}") })
-                    .tooltip("Indentation")
-                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                item(
+                    "status-indent",
+                    if hard_tabs {
+                        format!("Tab Size: {size}")
+                    } else {
+                        format!("Spaces: {size}")
+                    },
+                )
+                .tooltip("Indentation")
+                .dropdown_menu_with_anchor(
+                    Anchor::BottomRight,
+                    move |menu, _, _| {
                         let mut menu = menu.label("INDENT USING SPACES");
                         for width in [2usize, 4, 8] {
                             let this = this.clone();
-                            menu = menu.item(PopupMenuItem::new(format!("{width} spaces")).checked(!hard_tabs && size == width).on_click(move |_, _, cx| {
-                                _ = this.update(cx, |this, cx| this.set_indent(false, width, cx));
-                            }));
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{width} spaces"))
+                                    .checked(!hard_tabs && size == width)
+                                    .on_click(move |_, _, cx| {
+                                        _ = this.update(cx, |this, cx| {
+                                            this.set_indent(false, width, cx)
+                                        });
+                                    }),
+                            );
                         }
                         let this = this.clone();
-                        menu.separator().item(PopupMenuItem::new("Indent Using Tabs").checked(hard_tabs).on_click(move |_, _, cx| {
-                            _ = this.update(cx, |this, cx| this.set_indent(true, 4, cx));
-                        }))
-                    })
+                        menu.separator().item(
+                            PopupMenuItem::new("Indent Using Tabs")
+                                .checked(hard_tabs)
+                                .on_click(move |_, _, cx| {
+                                    _ = this.update(cx, |this, cx| this.set_indent(true, 4, cx));
+                                }),
+                        )
+                    },
+                )
             })
             .child({
                 let this = this.clone();
-                item("status-encoding", crate::encoding::short_name(&self.encoding).to_string())
-                    .tooltip("Encoding")
-                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, window, cx| {
+                item(
+                    "status-encoding",
+                    crate::encoding::short_name(&self.encoding).to_string(),
+                )
+                .tooltip("Encoding")
+                .dropdown_menu_with_anchor(
+                    Anchor::BottomRight,
+                    move |menu, window, cx| {
                         let (reopen, save) = (this.clone(), this.clone());
                         let (reopen_current, save_current) = (encoding.clone(), encoding.clone());
                         menu.submenu("Reopen with Encoding", window, cx, move |menu, _, _| {
                             let mut menu = menu.max_h(px(420.)).scrollable(true);
                             for (id, name, _) in crate::encoding::ENCODINGS {
                                 let this = reopen.clone();
-                                menu = menu.item(PopupMenuItem::new(*name).checked(*id == reopen_current).on_click(move |_, window, cx| {
-                                    _ = this.update(cx, |this, cx| this.reopen_with(id, window, cx));
-                                }));
+                                menu = menu.item(
+                                    PopupMenuItem::new(*name)
+                                        .checked(*id == reopen_current)
+                                        .on_click(move |_, window, cx| {
+                                            _ = this.update(cx, |this, cx| {
+                                                this.reopen_with(id, window, cx)
+                                            });
+                                        }),
+                                );
                             }
                             menu
                         })
-                        .submenu("Save with Encoding", window, cx, move |menu, _, _| {
-                            let mut menu = menu.max_h(px(420.)).scrollable(true);
-                            for (id, name, _) in crate::encoding::ENCODINGS {
-                                let this = save.clone();
-                                menu = menu.item(PopupMenuItem::new(*name).checked(*id == save_current).on_click(move |_, window, cx| {
-                                    _ = this.update(cx, |this, cx| this.save_with(id, window, cx));
-                                }));
-                            }
-                            menu
-                        })
-                    })
+                        .submenu(
+                            "Save with Encoding",
+                            window,
+                            cx,
+                            move |menu, _, _| {
+                                let mut menu = menu.max_h(px(420.)).scrollable(true);
+                                for (id, name, _) in crate::encoding::ENCODINGS {
+                                    let this = save.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(*name)
+                                            .checked(*id == save_current)
+                                            .on_click(move |_, window, cx| {
+                                                _ = this.update(cx, |this, cx| {
+                                                    this.save_with(id, window, cx)
+                                                });
+                                            }),
+                                    );
+                                }
+                                menu
+                            },
+                        )
+                    },
+                )
             })
             .child({
                 let this = this.clone();
@@ -779,25 +982,41 @@ impl FilePanel {
                     .tooltip("Line endings")
                     .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                         let (lf, crlf_item) = (this.clone(), this.clone());
-                        menu.item(PopupMenuItem::new("LF").checked(!crlf).on_click(move |_, window, cx| {
-                            _ = lf.update(cx, |this, cx| this.set_line_endings(false, window, cx));
-                        }))
-                        .item(PopupMenuItem::new("CRLF").checked(crlf).on_click(move |_, window, cx| {
-                            _ = crlf_item.update(cx, |this, cx| this.set_line_endings(true, window, cx));
-                        }))
+                        menu.item(PopupMenuItem::new("LF").checked(!crlf).on_click(
+                            move |_, window, cx| {
+                                _ = lf.update(cx, |this, cx| {
+                                    this.set_line_endings(false, window, cx)
+                                });
+                            },
+                        ))
+                        .item(
+                            PopupMenuItem::new("CRLF").checked(crlf).on_click(
+                                move |_, window, cx| {
+                                    _ = crlf_item.update(cx, |this, cx| {
+                                        this.set_line_endings(true, window, cx)
+                                    });
+                                },
+                            ),
+                        )
                     })
             })
             .child(
-                item("status-language", language).tooltip("Language mode").dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
-                    let mut menu = menu.label("LANGUAGE MODE").max_h(px(420.)).scrollable(true);
-                    for (id, name) in LANGUAGES {
-                        let this = this.clone();
-                        menu = menu.item(PopupMenuItem::new(*name).checked(*id == current_language).on_click(move |_, _, cx| {
-                            _ = this.update(cx, |this, cx| this.set_language(id, cx));
-                        }));
-                    }
-                    menu
-                }),
+                item("status-language", language)
+                    .tooltip("Language mode")
+                    .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                        let mut menu = menu.label("LANGUAGE MODE").max_h(px(420.)).scrollable(true);
+                        for (id, name) in LANGUAGES {
+                            let this = this.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(*name)
+                                    .checked(*id == current_language)
+                                    .on_click(move |_, _, cx| {
+                                        _ = this.update(cx, |this, cx| this.set_language(id, cx));
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
             )
     }
 }
@@ -827,9 +1046,21 @@ impl FilePanel {
                             continue;
                         }
                         let (color, rect) = match mark {
-                            Mark::Added => (colors.0, Bounds::new(point(bounds.left(), top), size(px(3.), line_height))),
-                            Mark::Modified => (colors.1, Bounds::new(point(bounds.left(), top), size(px(3.), line_height))),
-                            Mark::Deleted => (colors.2, Bounds::new(point(bounds.left(), top - px(2.)), size(px(6.), px(4.)))),
+                            Mark::Added => (
+                                colors.0,
+                                Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
+                            ),
+                            Mark::Modified => (
+                                colors.1,
+                                Bounds::new(point(bounds.left(), top), size(px(3.), line_height)),
+                            ),
+                            Mark::Deleted => (
+                                colors.2,
+                                Bounds::new(
+                                    point(bounds.left(), top - px(2.)),
+                                    size(px(6.), px(4.)),
+                                ),
+                            ),
                         };
                         window.paint_quad(fill(rect, color));
                     }
@@ -891,18 +1122,28 @@ impl FilePanel {
                                     Mark::Modified => colors.1,
                                     Mark::Deleted => colors.2,
                                 };
-                                window.paint_quad(fill(Bounds::new(point(area.left() + px(2.), y), size(px(4.), row)), color));
+                                window.paint_quad(fill(
+                                    Bounds::new(point(area.left() + px(2.), y), size(px(4.), row)),
+                                    color,
+                                ));
                             }
                         },
                     )
                     .size_full(),
                 )
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| seek(this, event.position.y, window, cx)))
-                .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
-                    if event.pressed_button == Some(MouseButton::Left) {
-                        seek_move(this, event.position.y, window, cx);
-                    }
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        seek(this, event.position.y, window, cx)
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            seek_move(this, event.position.y, window, cx);
+                        }
+                    }),
+                )
                 .into_any_element(),
         )
     }
@@ -924,9 +1165,11 @@ fn editor_menu(menu: PopupMenu, focus: FocusHandle, this: WeakEntity<FilePanel>)
         .separator()
         .menu("Find", Box::new(Search))
         .menu("Replace", Box::new(Replace))
-        .item(PopupMenuItem::new("Go to Line…").on_click(move |_, window, cx| {
-            _ = this.update(cx, |this, cx| this.prompt_go_to_line(window, cx));
-        }))
+        .item(
+            PopupMenuItem::new("Go to Line…").on_click(move |_, window, cx| {
+                _ = this.update(cx, |this, cx| this.prompt_go_to_line(window, cx));
+            }),
+        )
         .separator()
         .menu("Format Document", Box::new(crate::FormatDocument))
 }
@@ -945,7 +1188,12 @@ fn picture(image: Img, cx: &App) -> AnyElement {
                 .max_w_full()
                 .max_h_full()
                 .object_fit(ObjectFit::ScaleDown)
-                .with_fallback(|| div().text_sm().child("Cannot show this image").into_any_element()),
+                .with_fallback(|| {
+                    div()
+                        .text_sm()
+                        .child("Cannot show this image")
+                        .into_any_element()
+                }),
         )
         .into_any_element()
 }
@@ -959,7 +1207,11 @@ impl Render for FilePanel {
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::save))
-            .when(!showing_preview, |this| this.on_action(cx.listener(|this, _: &crate::GoToLine, window, cx| this.prompt_go_to_line(window, cx))))
+            .when(!showing_preview, |this| {
+                this.on_action(cx.listener(|this, _: &crate::GoToLine, window, cx| {
+                    this.prompt_go_to_line(window, cx)
+                }))
+            })
             .when(previewable, |this| this.child(self.render_switch(cx)))
             .when_some(self.error.clone(), |this, error| {
                 this.child(
@@ -972,37 +1224,45 @@ impl Render for FilePanel {
                         .child(error),
                 )
             })
-            .child(div().flex_1().min_h_0().map(|this| match preview {
-                Some(preview) => this.child(preview),
-                None => this.child(
-                    h_flex()
-                        .size_full()
-                        .child(
-                            div()
-                                .id("editor-area")
-                                .relative()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .context_menu({
-                                    let focus = self.editor.focus_handle(cx);
-                                    let this = cx.weak_entity();
-                                    move |menu, _, _| editor_menu(menu, focus.clone(), this.clone())
-                                })
-                                .child(
-                                    Editor::new(&self.editor)
-                                        .bordered(false)
-                                        .p_0()
-                                        .h(relative(1.))
-                                        .font_family(crate::settings::mono_font(cx))
-                                        .text_size(px(font_size)),
-                                )
-                                .when_some(self.render_marks(cx), |this, marks| this.child(marks)),
-                        )
-                        .when_some(self.render_overview(cx), |this, ruler| this.child(ruler)),
-                ),
+            .child(div().flex_1().min_h_0().map(|this| {
+                match preview {
+                    Some(preview) => this.child(preview),
+                    None => this.child(
+                        h_flex()
+                            .size_full()
+                            .child(
+                                div()
+                                    .id("editor-area")
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .context_menu({
+                                        let focus = self.editor.focus_handle(cx);
+                                        let this = cx.weak_entity();
+                                        move |menu, _, _| {
+                                            editor_menu(menu, focus.clone(), this.clone())
+                                        }
+                                    })
+                                    .child(
+                                        Editor::new(&self.editor)
+                                            .bordered(false)
+                                            .p_0()
+                                            .h(relative(1.))
+                                            .font_family(crate::settings::mono_font(cx))
+                                            .text_size(px(font_size)),
+                                    )
+                                    .when_some(self.render_marks(cx), |this, marks| {
+                                        this.child(marks)
+                                    }),
+                            )
+                            .when_some(self.render_overview(cx), |this, ruler| this.child(ruler)),
+                    ),
+                }
             }))
-            .when(self.look != Look::Image && !showing_preview, |this| this.child(self.render_status(cx)))
+            .when(self.look != Look::Image && !showing_preview, |this| {
+                this.child(self.render_status(cx))
+            })
     }
 }
 
@@ -1020,6 +1280,7 @@ pub struct SettingsPanel {
     font_family: Entity<InputState>,
     shell: Entity<InputState>,
     browser_home: Entity<InputState>,
+    ai_command: Entity<InputState>,
     /// The imported colour themes.
     themes: Vec<crate::theme::Imported>,
     /// One name and one command field per preset, in the order of the list.
@@ -1049,12 +1310,27 @@ impl SettingsPanel {
         });
         let shell = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder(if cfg!(windows) { "Automatic: pwsh, else Windows PowerShell" } else { "Automatic: your login shell ($SHELL)" })
+                .placeholder(if cfg!(windows) {
+                    "Automatic: pwsh, else Windows PowerShell"
+                } else {
+                    "Automatic: your login shell ($SHELL)"
+                })
                 .default_value(settings.shell.clone())
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
-        let shortcuts_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search keyboard shortcuts"));
-        let browser_home = cx.new(|cx| InputState::new(window, cx).placeholder("https://www.google.com").default_value(settings.browser_home.clone()));
+        let shortcuts_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search keyboard shortcuts"));
+        let browser_home = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://www.google.com")
+                .default_value(settings.browser_home.clone())
+        });
+        // Filled in, to be edited rather than typed out.
+        let ai_command = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::backend::ai::DEFAULT_COMMAND)
+                .default_value(settings.ai_config().command)
+        });
         let _subscriptions = vec![
             cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1070,6 +1346,12 @@ impl SettingsPanel {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value().trim().to_string();
                     Settings::update(cx, |s| s.browser_home = value);
+                }
+            }),
+            cx.subscribe(&ai_command, |_, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().trim().to_string();
+                    Settings::update(cx, |s| s.ai_command = value);
                 }
             }),
             cx.subscribe(&font_family, |_, input, event: &InputEvent, cx| {
@@ -1095,6 +1377,7 @@ impl SettingsPanel {
             font_family,
             shell,
             browser_home,
+            ai_command,
             themes: crate::theme::imported(),
             preset_rows: Vec::new(),
             scroll: ScrollHandle::new(),
@@ -1105,7 +1388,11 @@ impl SettingsPanel {
 
     /// The search field of the tab showing.
     pub fn search_input(&self) -> Entity<InputState> {
-        if self.shortcuts { self.shortcuts_search.clone() } else { self.search.clone() }
+        if self.shortcuts {
+            self.shortcuts_search.clone()
+        } else {
+            self.search.clone()
+        }
     }
 
     /// Show the presets (1) at the top of Settings, or Keyboard Shortcuts (2).
@@ -1124,7 +1411,8 @@ impl SettingsPanel {
         }
         self.shortcuts = shortcuts;
         self.recording = None;
-        self.search_input().update(cx, |input, cx| input.focus(window, cx));
+        self.search_input()
+            .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -1135,7 +1423,11 @@ impl SettingsPanel {
             cx.stop_propagation();
             _ = this.update(cx, |this, cx| this.recorded(&event.keystroke, cx));
         });
-        self.recording = Some(Recording { id, strokes: Vec::new(), _keys: keys });
+        self.recording = Some(Recording {
+            id,
+            strokes: Vec::new(),
+            _keys: keys,
+        });
         // Off the search field, so a typed letter goes nowhere.
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -1144,7 +1436,9 @@ impl SettingsPanel {
     /// A key while recording: Enter keeps the keys typed, Esc gives up, a
     /// modifier alone waits for its key, and a third key starts again.
     fn recorded(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
-        let Some(recording) = &mut self.recording else { return };
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
         let bare = keystroke.modifiers == Modifiers::none();
         match keystroke.key.as_str() {
             "shift" | "control" | "alt" | "platform" | "function" => return,
@@ -1169,7 +1463,9 @@ impl SettingsPanel {
     /// Ask for a custom model's download link.
     fn add_model_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use gpui_kit::component::WindowExt as _;
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("https://huggingface.co/…/model.gguf"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("https://huggingface.co/…/model.gguf")
+        });
         window.open_alert_dialog(cx, {
             let input = input.clone();
             move |dialog, _, _| {
@@ -1191,18 +1487,31 @@ impl SettingsPanel {
                     })
             }
         });
-        window.defer(cx, move |window, cx| input.update(cx, |input, cx| input.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
     }
 
     /// Pick a custom model's .gguf file.
     fn add_model_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Add Model".into()) });
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Add Model".into()),
+        });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path) = paths.into_iter().next() else { return };
-            _ = this.update_in(cx, |_, window, cx| match crate::backend::ai::custom_model(&path.to_string_lossy()) {
-                Ok(model) => add_custom_model(model, cx),
-                Err(err) => crate::toast::push(window, err, cx),
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            _ = this.update_in(cx, |_, window, cx| {
+                match crate::backend::ai::custom_model(&path.to_string_lossy()) {
+                    Ok(model) => add_custom_model(model, cx),
+                    Err(err) => crate::toast::push(window, err, cx),
+                }
             });
         })
         .detach();
@@ -1216,19 +1525,35 @@ impl SettingsPanel {
             prompt: Some("Import Theme".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(path) = paths.into_iter().next() else { return };
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
             _ = this.update_in(cx, |this, window, cx| match crate::theme::import(&path) {
                 Ok(id) => {
                     this.themes = crate::theme::imported();
-                    let dark = this.themes.iter().find(|t| t.id == id).is_none_or(|t| t.theme.dark);
+                    let dark = this
+                        .themes
+                        .iter()
+                        .find(|t| t.id == id)
+                        .is_none_or(|t| t.theme.dark);
                     Settings::update(cx, |s| {
                         s.color_theme = id;
-                        s.theme = if dark { ThemeChoice::Dark } else { ThemeChoice::Light };
+                        s.theme = if dark {
+                            ThemeChoice::Dark
+                        } else {
+                            ThemeChoice::Light
+                        };
                     });
                 }
                 Err(err) => {
-                    crate::toast::push(window, format!("Could not import {}: {err:#}", path.display()), cx);
+                    crate::toast::push(
+                        window,
+                        format!("Could not import {}: {err:#}", path.display()),
+                        cx,
+                    );
                 }
             });
         })
@@ -1240,9 +1565,13 @@ impl SettingsPanel {
     fn sync_preset_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let presets = Settings::get(cx).presets.clone();
         let same = presets.len() == self.preset_rows.len()
-            && presets.iter().zip(&self.preset_rows).all(|(preset, (name, command, _))| {
-                name.read(cx).value() == preset.name.as_str() && command.read(cx).value() == preset.command.as_str()
-            });
+            && presets
+                .iter()
+                .zip(&self.preset_rows)
+                .all(|(preset, (name, command, _))| {
+                    name.read(cx).value() == preset.name.as_str()
+                        && command.read(cx).value() == preset.command.as_str()
+                });
         if same {
             return;
         }
@@ -1250,8 +1579,16 @@ impl SettingsPanel {
             .iter()
             .enumerate()
             .map(|(ix, preset)| {
-                let name = cx.new(|cx| InputState::new(window, cx).placeholder("Name").default_value(preset.name.clone()));
-                let command = cx.new(|cx| InputState::new(window, cx).placeholder("Command").default_value(preset.command.clone()));
+                let name = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("Name")
+                        .default_value(preset.name.clone())
+                });
+                let command = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("Command")
+                        .default_value(preset.command.clone())
+                });
                 let subscriptions = vec![
                     cx.subscribe(&name, move |_, input, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::Change) {
@@ -1286,8 +1623,16 @@ impl SettingsPanel {
         let browsers = kind == Kind::Browsers;
         let theme = cx.theme().clone();
         let presets = Settings::get(cx).presets.clone();
-        let indices: Vec<usize> = presets.iter().enumerate().filter(|(_, p)| p.kind() == kind).map(|(ix, _)| ix).collect();
-        let defaults: Vec<Preset> = crate::settings::default_presets().into_iter().filter(|p| p.kind() == kind).collect();
+        let indices: Vec<usize> = presets
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.kind() == kind)
+            .map(|(ix, _)| ix)
+            .collect();
+        let defaults: Vec<Preset> = crate::settings::default_presets()
+            .into_iter()
+            .filter(|p| p.kind() == kind)
+            .collect();
         let is_default = indices.iter().map(|&ix| &presets[ix]).eq(defaults.iter());
         let section = match kind {
             Kind::Agents => "agent",
@@ -1328,9 +1673,17 @@ impl SettingsPanel {
                         .child(
                             Button::new(SharedString::from(format!("preset-pin-{ix}")))
                                 .small()
-                                .icon(Icon::new(if pinned { IconName::Pin } else { IconName::PinOff }))
+                                .icon(Icon::new(if pinned {
+                                    IconName::Pin
+                                } else {
+                                    IconName::PinOff
+                                }))
                                 .map(|b| if pinned { b.primary() } else { b.ghost() })
-                                .tooltip(if pinned { "Pinned: a button on every tab strip" } else { "Pin to the tab strips" })
+                                .tooltip(if pinned {
+                                    "Pinned: a button on every tab strip"
+                                } else {
+                                    "Pin to the tab strips"
+                                })
                                 .on_click(move |_, _, cx| {
                                     Settings::update(cx, |s| {
                                         if let Some(preset) = s.presets.get_mut(ix) {
@@ -1339,7 +1692,12 @@ impl SettingsPanel {
                                     })
                                 }),
                         )
-                        .child(div().w(px(180.)).flex_none().child(Input::new(name).small()))
+                        .child(
+                            div()
+                                .w(px(180.))
+                                .flex_none()
+                                .child(Input::new(name).small()),
+                        )
                         .child(div().flex_1().min_w_0().child(Input::new(command).small()))
                         .child(
                             Button::new(SharedString::from(format!("preset-up-{ix}")))
@@ -1396,8 +1754,18 @@ impl SettingsPanel {
                             .label("Add Preset")
                             .on_click(move |_, _, cx| {
                                 Settings::update(cx, |s| {
-                                    let name = if agents { "New agent" } else if browsers { "New page" } else { "New preset" };
-                                    s.presets.push(Preset { agent: agents, browser: browsers, ..Preset::new(name, "") })
+                                    let name = if agents {
+                                        "New agent"
+                                    } else if browsers {
+                                        "New page"
+                                    } else {
+                                        "New preset"
+                                    };
+                                    s.presets.push(Preset {
+                                        agent: agents,
+                                        browser: browsers,
+                                        ..Preset::new(name, "")
+                                    })
                                 })
                             }),
                     )
@@ -1407,7 +1775,9 @@ impl SettingsPanel {
                             .ghost()
                             .label("Reset to Defaults")
                             .disabled(is_default)
-                            .on_click(move |_, window, cx| confirm_reset_presets(kind, section, window, cx)),
+                            .on_click(move |_, window, cx| {
+                                confirm_reset_presets(kind, section, window, cx)
+                            }),
                     ),
             )
     }
@@ -1416,13 +1786,28 @@ impl SettingsPanel {
 impl SettingsPanel {
     /// The theme menu: the built-in and imported themes (hovering one
     /// previews it), Import and Remove.
-    fn render_theme_menu(&self, settings: &Settings, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_theme_menu(
+        &self,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let builtin = settings.color_theme.is_empty();
-        let imported: Vec<(String, String, bool)> = self.themes.iter().map(|t| (t.id.clone(), t.theme.name.clone(), t.theme.dark)).collect();
+        let imported: Vec<(String, String, bool)> = self
+            .themes
+            .iter()
+            .map(|t| (t.id.clone(), t.theme.name.clone(), t.theme.dark))
+            .collect();
         let current_theme = if builtin {
-            if settings.theme == ThemeChoice::Dark { "Dark".to_string() } else { "Light".to_string() }
+            if settings.theme == ThemeChoice::Dark {
+                "Dark".to_string()
+            } else {
+                "Light".to_string()
+            }
         } else {
-            imported.iter().find(|(id, ..)| *id == settings.color_theme).map_or_else(|| settings.color_theme.clone(), |(_, name, _)| name.clone())
+            imported
+                .iter()
+                .find(|(id, ..)| *id == settings.color_theme)
+                .map_or_else(|| settings.color_theme.clone(), |(_, name, _)| name.clone())
         };
         let (base, color_theme) = (settings.theme, settings.color_theme.clone());
         let this = cx.weak_entity();
@@ -1433,16 +1818,21 @@ impl SettingsPanel {
             .icon(Icon::new(IconName::ChevronDown))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
                 // Hovering a theme previews it; closing the menu goes back to the chosen one.
-                cx.subscribe_self(|_, _: &DismissEvent, cx| crate::theme::apply(cx)).detach();
+                cx.subscribe_self(|_, _: &DismissEvent, cx| crate::theme::apply(cx))
+                    .detach();
                 let item = |label: String, choice: ThemeChoice, id: String, checked: bool| {
                     let hover_id = id.clone();
                     PopupMenuItem::element(move |_, _| {
                         let id = hover_id.clone();
-                        div().id(SharedString::from(format!("theme-item-{label}"))).w_full().child(label.clone()).on_hover(move |hovered, _, cx| {
-                            if *hovered {
-                                crate::theme::preview(choice, &id, cx);
-                            }
-                        })
+                        div()
+                            .id(SharedString::from(format!("theme-item-{label}")))
+                            .w_full()
+                            .child(label.clone())
+                            .on_hover(move |hovered, _, cx| {
+                                if *hovered {
+                                    crate::theme::preview(choice, &id, cx);
+                                }
+                            })
                     })
                     .checked(checked)
                     .on_click(move |_, _, cx| {
@@ -1454,29 +1844,51 @@ impl SettingsPanel {
                     })
                 };
                 let mut menu = menu
-                    .item(item("Dark".into(), ThemeChoice::Dark, String::new(), builtin && base == ThemeChoice::Dark))
-                    .item(item("Light".into(), ThemeChoice::Light, String::new(), builtin && base == ThemeChoice::Light));
+                    .item(item(
+                        "Dark".into(),
+                        ThemeChoice::Dark,
+                        String::new(),
+                        builtin && base == ThemeChoice::Dark,
+                    ))
+                    .item(item(
+                        "Light".into(),
+                        ThemeChoice::Light,
+                        String::new(),
+                        builtin && base == ThemeChoice::Light,
+                    ));
                 if !imported.is_empty() {
                     menu = menu.separator();
                 }
                 for (id, name, dark) in &imported {
-                    let choice = if *dark { ThemeChoice::Dark } else { ThemeChoice::Light };
+                    let choice = if *dark {
+                        ThemeChoice::Dark
+                    } else {
+                        ThemeChoice::Light
+                    };
                     menu = menu.item(item(name.clone(), choice, id.clone(), color_theme == *id));
                 }
                 let import = this.clone();
-                menu = menu.separator().item(PopupMenuItem::new("Import VS Code Theme…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-                    _ = import.update(cx, |this, cx| this.import_theme(window, cx));
-                }));
+                menu = menu.separator().item(
+                    PopupMenuItem::new("Import VS Code Theme…")
+                        .icon(Icon::new(IconName::FolderOpen))
+                        .on_click(move |_, window, cx| {
+                            _ = import.update(cx, |this, cx| this.import_theme(window, cx));
+                        }),
+                );
                 if !builtin {
                     let remove = this.clone();
-                    menu = menu.item(PopupMenuItem::new("Remove This Theme").icon(Icon::new(IconName::Trash)).on_click(move |_, _, cx| {
-                        _ = remove.update(cx, |this, cx| {
-                            let id = Settings::get(cx).color_theme.clone();
-                            crate::theme::remove(&id);
-                            this.themes = crate::theme::imported();
-                            Settings::update(cx, |s| s.color_theme.clear());
-                        });
-                    }));
+                    menu = menu.item(
+                        PopupMenuItem::new("Remove This Theme")
+                            .icon(Icon::new(IconName::Trash))
+                            .on_click(move |_, _, cx| {
+                                _ = remove.update(cx, |this, cx| {
+                                    let id = Settings::get(cx).color_theme.clone();
+                                    crate::theme::remove(&id);
+                                    this.themes = crate::theme::imported();
+                                    Settings::update(cx, |s| s.color_theme.clear());
+                                });
+                            }),
+                    );
                 }
                 menu
             })
@@ -1484,10 +1896,17 @@ impl SettingsPanel {
 
     /// The AI model menu: den's presets and the added models, each with
     /// its download, and adding one by link or file.
-    fn render_ai_model(&self, settings: &Settings, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_ai_model(
+        &self,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         use crate::backend::ai;
         let current = settings.ai_model.clone();
-        let label = ai::MODEL_PRESETS.iter().find(|p| p.url == current).map_or_else(|| ai::model_name(&current), |p| p.name.to_string());
+        let label = ai::MODEL_PRESETS
+            .iter()
+            .find(|p| p.url == current)
+            .map_or_else(|| ai::model_name(&current), |p| p.name.to_string());
         // The added models, and the chosen one when it is neither a preset nor on the list.
         let mut customs = settings.ai_custom_models.clone();
         if !ai::MODEL_PRESETS.iter().any(|p| p.url == current) && !customs.contains(&current) {
@@ -1504,14 +1923,22 @@ impl SettingsPanel {
                     let (url, name, context) = (preset.url, preset.name, preset.context);
                     let detail = format!("{} · {}", preset.size, preset.fits);
                     menu = menu.item(
-                        PopupMenuItem::element(move |_, cx| menu_entry(format!("ai-model-{name}"), name, &detail, vec![model_download(url)], cx))
-                            .checked(current == url)
-                            .on_click(move |_, _, cx| {
-                                Settings::update(cx, |s| {
-                                    s.ai_model = url.to_string();
-                                    s.ai_context_size = context;
-                                })
-                            }),
+                        PopupMenuItem::element(move |_, cx| {
+                            menu_entry(
+                                format!("ai-model-{name}"),
+                                name,
+                                &detail,
+                                vec![model_download(url)],
+                                cx,
+                            )
+                        })
+                        .checked(current == url)
+                        .on_click(move |_, _, cx| {
+                            Settings::update(cx, |s| {
+                                s.ai_model = url.to_string();
+                                s.ai_context_size = context;
+                            })
+                        }),
                     );
                 }
                 if !customs.is_empty() {
@@ -1522,7 +1949,11 @@ impl SettingsPanel {
                     let checked = current == model;
                     menu = menu.item(
                         PopupMenuItem::element(move |_, cx| {
-                            let detail = if ai::is_download(&model) { "link" } else { "file" };
+                            let detail = if ai::is_download(&model) {
+                                "link"
+                            } else {
+                                "file"
+                            };
                             let forget = model.clone();
                             let forget = Download::Forget(Rc::new(move |_, cx| {
                                 Settings::update(cx, |s| {
@@ -1539,7 +1970,13 @@ impl SettingsPanel {
                             if !ai::model_downloaded(&model) {
                                 actions.push(forget);
                             }
-                            menu_entry(format!("ai-model-{model}"), ai::model_name(&model), detail, actions, cx)
+                            menu_entry(
+                                format!("ai-model-{model}"),
+                                ai::model_name(&model),
+                                detail,
+                                actions,
+                                cx,
+                            )
                         })
                         .checked(checked)
                         .on_click(move |_, _, cx| {
@@ -1550,12 +1987,20 @@ impl SettingsPanel {
                 }
                 let (by_link, by_file) = (this.clone(), this.clone());
                 menu.separator()
-                    .item(PopupMenuItem::new("Add Model from Link…").icon(Icon::new(IconName::Globe)).on_click(move |_, window, cx| {
-                        _ = by_link.update(cx, |this, cx| this.add_model_link(window, cx));
-                    }))
-                    .item(PopupMenuItem::new("Add GGUF File…").icon(Icon::new(IconName::FolderOpen)).on_click(move |_, window, cx| {
-                        _ = by_file.update(cx, |this, cx| this.add_model_file(window, cx));
-                    }))
+                    .item(
+                        PopupMenuItem::new("Add Model from Link…")
+                            .icon(Icon::new(IconName::Globe))
+                            .on_click(move |_, window, cx| {
+                                _ = by_link.update(cx, |this, cx| this.add_model_link(window, cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new("Add GGUF File…")
+                            .icon(Icon::new(IconName::FolderOpen))
+                            .on_click(move |_, window, cx| {
+                                _ = by_file.update(cx, |this, cx| this.add_model_file(window, cx));
+                            }),
+                    )
             })
     }
 }
@@ -1609,7 +2054,12 @@ fn filtering() -> bool {
 }
 
 /// One setting: name and description on the left, its control on the right.
-fn setting_row(name: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, cx: &App) -> Div {
+fn setting_row(
+    name: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
     let (name, description) = (name.into(), description.into());
     if !passes(&[name.as_ref(), description.as_ref()]) {
         return div();
@@ -1633,7 +2083,12 @@ fn row(name: SharedString, description: SharedString, control: impl IntoElement,
                 .min_w(px(200.))
                 .gap_0p5()
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(name))
-                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(description)),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(description),
+                ),
         )
         .child(control)
 }
@@ -1652,15 +2107,26 @@ enum Download {
 
 /// A download's menu entry: its name, a muted detail, and at the end its
 /// buttons (download, bin, forget), or the progress while it downloads.
-fn menu_entry(id: String, name: impl Into<SharedString>, detail: &str, actions: Vec<Download>, cx: &App) -> Div {
+fn menu_entry(
+    id: String,
+    name: impl Into<SharedString>,
+    detail: &str,
+    actions: Vec<Download>,
+    cx: &App,
+) -> Div {
     let muted = cx.theme().muted_foreground;
     let button = |suffix: &str, icon: IconName, tooltip: &'static str, action: MenuAction| {
-        Button::new(SharedString::from(format!("{id}-{suffix}"))).xsmall().ghost().icon(Icon::new(icon)).tooltip(tooltip).on_click(move |_, window, cx| {
-            // Not the entry's own click (choosing it).
-            cx.stop_propagation();
-            action(window, cx);
-            window.refresh();
-        })
+        Button::new(SharedString::from(format!("{id}-{suffix}")))
+            .xsmall()
+            .ghost()
+            .icon(Icon::new(icon))
+            .tooltip(tooltip)
+            .on_click(move |_, window, cx| {
+                // Not the entry's own click (choosing it).
+                cx.stop_propagation();
+                action(window, cx);
+                window.refresh();
+            })
     };
     h_flex()
         .w_full()
@@ -1673,14 +2139,40 @@ fn menu_entry(id: String, name: impl Into<SharedString>, detail: &str, actions: 
                 .min_w_0()
                 .gap_2()
                 .child(div().flex_shrink_0().child(name.into()))
-                .child(div().min_w_0().truncate().text_xs().text_color(muted).child(detail.to_string())),
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(detail.to_string()),
+                ),
         )
-        .child(h_flex().flex_shrink_0().gap_1().children(actions.into_iter().map(|action| match action {
-            Download::Get(action) => button("get", IconName::Download, "Download", action).into_any_element(),
-            Download::Remove(action) => button("remove", IconName::Trash, "Remove the download", action).into_any_element(),
-            Download::Forget(action) => button("forget", IconName::Close, "Take off the list", action).into_any_element(),
-            Download::Busy(progress) => div().text_xs().text_color(muted).child(progress).into_any_element(),
-        })))
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .gap_1()
+                .children(actions.into_iter().map(|action| {
+                    match action {
+                        Download::Get(action) => {
+                            button("get", IconName::Download, "Download", action).into_any_element()
+                        }
+                        Download::Remove(action) => {
+                            button("remove", IconName::Trash, "Remove the download", action)
+                                .into_any_element()
+                        }
+                        Download::Forget(action) => {
+                            button("forget", IconName::Close, "Take off the list", action)
+                                .into_any_element()
+                        }
+                        Download::Busy(progress) => div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(progress)
+                            .into_any_element(),
+                    }
+                })),
+        )
 }
 
 /// A model's download button, bin, or progress (the runtime downloads
@@ -1692,7 +2184,10 @@ fn model_download(model: &str) -> Download {
         return Download::Busy(progress);
     }
     let model = model.to_string();
-    let name = ai::MODEL_PRESETS.iter().find(|p| p.url == model).map_or_else(|| ai::model_name(&model), |p| p.name.to_string());
+    let name = ai::MODEL_PRESETS
+        .iter()
+        .find(|p| p.url == model)
+        .map_or_else(|| ai::model_name(&model), |p| p.name.to_string());
     if ai::model_downloaded(&model) {
         Download::Remove(Rc::new(move |window, cx| {
             if let Err(err) = ai::remove_model(&model) {
@@ -1703,7 +2198,13 @@ fn model_download(model: &str) -> Download {
         Download::Get(Rc::new(move |window, cx| {
             let mut config = Settings::get(cx).ai_config();
             config.model = model.clone();
-            crate::downloads::start_download(key.clone(), name.clone(), window, cx, move |cancel, progress| ai::install(&config, cancel, progress))
+            crate::downloads::start_download(
+                key.clone(),
+                name.clone(),
+                window,
+                cx,
+                move |cancel, progress| ai::install(&config, cancel, progress),
+            )
         }))
     }
 }
@@ -1732,19 +2233,36 @@ fn render_formatters() -> impl IntoElement {
                 menu = menu.item(PopupMenuItem::element(move |_, cx| {
                     let key = format!("formatter-{}", kit.name);
                     let installed = kit.is_installed();
-                    let detail = format!("{} · {}", kit.formats, if installed { kit.version() } else { kit.size });
-                    let download = if let Some(progress) = crate::downloads::download_progress(&key) {
+                    let detail = format!(
+                        "{} · {}",
+                        kit.formats,
+                        if installed { kit.version() } else { kit.size }
+                    );
+                    let download = if let Some(progress) = crate::downloads::download_progress(&key)
+                    {
                         Download::Busy(progress)
                     } else if installed {
                         Download::Remove(Rc::new(move |window, cx| {
                             if let Err(err) = crate::backend::format::remove(kit) {
-                                crate::toast::push(window, format!("Could not remove {}: {err}", kit.name), cx);
+                                crate::toast::push(
+                                    window,
+                                    format!("Could not remove {}: {err}", kit.name),
+                                    cx,
+                                );
                             }
                         }))
                     } else {
                         let key = key.clone();
                         Download::Get(Rc::new(move |window, cx| {
-                            crate::downloads::start_download(key.clone(), kit.name, window, cx, move |cancel, progress| crate::backend::format::install(kit, cancel, progress))
+                            crate::downloads::start_download(
+                                key.clone(),
+                                kit.name,
+                                window,
+                                cx,
+                                move |cancel, progress| {
+                                    crate::backend::format::install(kit, cancel, progress)
+                                },
+                            )
                         }))
                     };
                     menu_entry(key, kit.name, &detail, vec![download], cx)
@@ -1764,12 +2282,25 @@ fn choice<T: Copy + PartialEq + 'static>(
     Button::new(id)
         .small()
         .label(label)
-        .map(|button| if value == current { button.primary() } else { button.outline() })
+        .map(|button| {
+            if value == current {
+                button.primary()
+            } else {
+                button.outline()
+            }
+        })
         .on_click(move |_, _, cx| Settings::update(cx, |settings| set(settings, value)))
 }
 
 /// A setting switched on or off.
-fn toggle(name: &'static str, description: impl Into<SharedString>, id: &'static str, on: bool, set: fn(&mut Settings, bool), cx: &App) -> Div {
+fn toggle(
+    name: &'static str,
+    description: impl Into<SharedString>,
+    id: &'static str,
+    on: bool,
+    set: fn(&mut Settings, bool),
+    cx: &App,
+) -> Div {
     let switch = Switch::new(id).checked(on).on_click(move |checked, _, cx| {
         let checked = *checked;
         Settings::update(cx, |s| set(s, checked))
@@ -1779,12 +2310,22 @@ fn toggle(name: &'static str, description: impl Into<SharedString>, id: &'static
 
 /// A number stepped down or up (`step` with `false` or `true`) by two
 /// buttons, shown between them `width` wide; `after` runs on each step.
-fn stepper(id: &'static str, value: String, width: Pixels, step: fn(&mut Settings, bool), after: fn(&App)) -> impl IntoElement {
+fn stepper(
+    id: &'static str,
+    value: String,
+    width: Pixels,
+    step: fn(&mut Settings, bool),
+    after: fn(&App),
+) -> impl IntoElement {
     let button = |suffix: &'static str, icon: IconName, up: bool| {
-        Button::new(SharedString::from(format!("{id}-{suffix}"))).small().outline().icon(Icon::new(icon)).on_click(move |_, _, cx| {
-            Settings::update(cx, |s| step(s, up));
-            after(cx);
-        })
+        Button::new(SharedString::from(format!("{id}-{suffix}")))
+            .small()
+            .outline()
+            .icon(Icon::new(icon))
+            .on_click(move |_, _, cx| {
+                Settings::update(cx, |s| step(s, up));
+                after(cx);
+            })
     };
     h_flex()
         .gap_2()
@@ -1798,22 +2339,43 @@ impl Render for SettingsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_preset_rows(window, cx);
         let settings = Settings::get(cx).clone();
-        let words: Vec<String> = self.search_input().read(cx).value().to_lowercase().split_whitespace().map(str::to_string).collect();
+        let words: Vec<String> = self
+            .search_input()
+            .read(cx)
+            .value()
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         FILTER.with(|filter| *filter.borrow_mut() = (words, "", 0));
 
         let sidebar = h_flex()
             .gap_1()
-            .child(choice("side-left", "Left", SidebarSide::Left, settings.sidebar_position, |s, v| {
-                s.sidebar_position = v
-            }))
-            .child(choice("side-right", "Right", SidebarSide::Right, settings.sidebar_position, |s, v| {
-                s.sidebar_position = v
-            }));
+            .child(choice(
+                "side-left",
+                "Left",
+                SidebarSide::Left,
+                settings.sidebar_position,
+                |s, v| s.sidebar_position = v,
+            ))
+            .child(choice(
+                "side-right",
+                "Right",
+                SidebarSide::Right,
+                settings.sidebar_position,
+                |s, v| s.sidebar_position = v,
+            ));
         let font_size = stepper(
             "font",
             format!("{}", settings.editor_font_size),
             px(32.),
-            |s, up| s.editor_font_size = if up { (s.editor_font_size + 1.).min(32.) } else { (s.editor_font_size - 1.).max(8.) },
+            |s, up| {
+                s.editor_font_size = if up {
+                    (s.editor_font_size + 1.).min(32.)
+                } else {
+                    (s.editor_font_size - 1.).max(8.)
+                }
+            },
             |_| {},
         );
 
@@ -1885,6 +2447,24 @@ impl Render for SettingsPanel {
                         ))
                         .child(section_title("AI", cx))
                         .child(setting_row(
+                            "Engine",
+                            "Where Generate Commit Message's model runs: on this PC (llama.cpp), or a command of your own such as Claude Code's claude -p.",
+                            h_flex()
+                                .gap_1()
+                                .child(choice("ai-local", "Local", Engine::Local, settings.ai_engine, |s, v| s.ai_engine = v))
+                                .child(choice("ai-command", "Command", Engine::Command, settings.ai_engine, |s, v| s.ai_engine = v)),
+                            cx,
+                        ))
+                        .when(settings.ai_engine == Engine::Command, |list| {
+                            list.child(setting_row(
+                                "Command",
+                                "Run in the repository with the prompt on its input; what it prints is the message. Edit the model, effort or program here; clear it for the default again.",
+                                div().w(px(360.)).child(Input::new(&self.ai_command).small()),
+                                cx,
+                            ))
+                        })
+                        .when(settings.ai_engine == Engine::Local, |list| list
+                        .child(setting_row(
                             "Model",
                             "The local model Generate Commit Message runs (llama.cpp, downloaded once on first use into den's data folder). Add your own GGUF model by link or file.",
                             self.render_ai_model(&settings, cx),
@@ -1923,7 +2503,7 @@ impl Render for SettingsPanel {
                             ),
                             cx,
                         ))
-                        .child(toggle("Use the GPU", "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.", "ai-gpu", settings.ai_gpu, |s, v| s.ai_gpu = v, cx))
+                        .child(toggle("Use the GPU", "Run the model on the graphics card (Vulkan); it falls back to the CPU when the card cannot.", "ai-gpu", settings.ai_gpu, |s, v| s.ai_gpu = v, cx)))
                         .child(toggle("Style from history", "On first use in a repository, derive its commit style from the history and save it as .den/commit-style.md (edit it there).", "ai-derive", settings.ai_derive_style, |s, v| s.ai_derive_style = v, cx))
                         .child(section_title("Tabs", cx))
                         .child(toggle("Close buttons", "Show a close button on each tab (a middle-click closes a tab either way).", "tab-close", settings.tab_close_button, |s, v| s.tab_close_button = v, cx))
@@ -2022,48 +2602,102 @@ impl Render for SettingsPanel {
             .selected_index(self.shortcuts as usize)
             .child("Settings")
             .child("Keyboard Shortcuts")
-            .on_click(move |ix, window, cx| _ = this.update(cx, |this, cx| this.show_shortcuts(*ix == 1, window, cx)));
+            .on_click(move |ix, window, cx| {
+                _ = this.update(cx, |this, cx| this.show_shortcuts(*ix == 1, window, cx))
+            });
         v_flex()
             .track_focus(&self.focus_handle)
             .size_full()
             .gap_2()
             .child(div().flex_none().child(tabs))
-            .child(div().flex_none().px_2().child(Input::new(&self.search_input()).small()))
-            .when(empty, |this| this.child(div().px_2().py_4().text_sm().text_color(cx.theme().muted_foreground).child(if self.shortcuts { "No shortcuts match." } else { "No settings match." })))
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .child(Input::new(&self.search_input()).small()),
+            )
+            .when(empty, |this| {
+                this.child(
+                    div()
+                        .px_2()
+                        .py_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if self.shortcuts {
+                            "No shortcuts match."
+                        } else {
+                            "No settings match."
+                        }),
+                )
+            })
             .child(body)
     }
 }
 
 /// A sound picked from den's list in a menu, with a button to hear it.
-fn sound_picker(id: &'static str, label: &'static str, current: String, set: fn(&mut Settings, String)) -> impl IntoElement {
-    let name = crate::sound::SOUNDS.iter().find(|(s, ..)| *s == current).map_or("None", |(_, name, _)| *name);
+fn sound_picker(
+    id: &'static str,
+    label: &'static str,
+    current: String,
+    set: fn(&mut Settings, String),
+) -> impl IntoElement {
+    let name = crate::sound::SOUNDS
+        .iter()
+        .find(|(s, ..)| *s == current)
+        .map_or("None", |(_, name, _)| *name);
     let hear = current.clone();
     h_flex()
         .gap_1()
         .items_center()
         .child(div().text_xs().child(label))
-        .child(Button::new(id).small().outline().label(name).dropdown_menu(move |menu, _, _| {
-            let mut menu = menu.item(PopupMenuItem::new("None").checked(current == "none").on_click(move |_, _, cx| Settings::update(cx, |s| set(s, "none".into()))));
-            for (sound, name, _) in crate::sound::SOUNDS {
-                menu = menu.item(PopupMenuItem::new(*name).checked(current == *sound).on_click(move |_, _, cx| {
-                    Settings::update(cx, |s| set(s, sound.to_string()));
-                    crate::sound::play_named(sound, Settings::get(cx).notify_volume);
-                }));
-            }
-            menu
-        }))
+        .child(
+            Button::new(id)
+                .small()
+                .outline()
+                .label(name)
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu.item(
+                        PopupMenuItem::new("None")
+                            .checked(current == "none")
+                            .on_click(move |_, _, cx| {
+                                Settings::update(cx, |s| set(s, "none".into()))
+                            }),
+                    );
+                    for (sound, name, _) in crate::sound::SOUNDS {
+                        menu = menu.item(
+                            PopupMenuItem::new(*name)
+                                .checked(current == *sound)
+                                .on_click(move |_, _, cx| {
+                                    Settings::update(cx, |s| set(s, sound.to_string()));
+                                    crate::sound::play_named(
+                                        sound,
+                                        Settings::get(cx).notify_volume,
+                                    );
+                                }),
+                        );
+                    }
+                    menu
+                }),
+        )
         .child(
             Button::new(SharedString::from(format!("{id}-play")))
                 .small()
                 .ghost()
                 .icon(Icon::new(IconName::Play))
                 .tooltip("Hear it")
-                .on_click(move |_, _, cx| crate::sound::play_named(&hear, Settings::get(cx).notify_volume)),
+                .on_click(move |_, _, cx| {
+                    crate::sound::play_named(&hear, Settings::get(cx).notify_volume)
+                }),
         )
 }
 
 /// A tab-strip button switched on or off in Settings.
-fn strip_toggle(id: &'static str, label: &'static str, on: bool, flip: fn(&mut crate::settings::GroupButtons)) -> Button {
+fn strip_toggle(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    flip: fn(&mut crate::settings::GroupButtons),
+) -> Button {
     Button::new(id)
         .small()
         .label(label)
@@ -2089,9 +2723,15 @@ fn section_title(title: &'static str, cx: &App) -> Div {
 /// Change command `id`'s keys, starting from the ones it has; set back to
 /// its defaults, the change is forgotten.
 fn set_keys(id: &str, change: impl FnOnce(&mut Vec<String>), cx: &mut App) {
-    let Some(command) = crate::keymap::commands(cx).iter().find(|c| c.id == id) else { return };
+    let Some(command) = crate::keymap::commands(cx).iter().find(|c| c.id == id) else {
+        return;
+    };
     let defaults = command.defaults.clone();
-    let mut keys = Settings::get(cx).keybindings.get(id).cloned().unwrap_or_else(|| defaults.clone());
+    let mut keys = Settings::get(cx)
+        .keybindings
+        .get(id)
+        .cloned()
+        .unwrap_or_else(|| defaults.clone());
     change(&mut keys);
     Settings::update(cx, |s| {
         if keys == defaults {
@@ -2151,10 +2791,19 @@ fn keycaps(strokes: &[Vec<String>], colors: ShortcutColors) -> Div {
             .child(label.to_string())
     };
     h_flex().gap_2().children(strokes.iter().map(|stroke| {
-        h_flex().gap_0p5().items_center().children(stroke.iter().enumerate().flat_map(|(ix, key)| {
-            let plus = (ix > 0).then(|| div().text_xs().text_color(colors.muted).child("+").into_any_element());
-            plus.into_iter().chain([cap(key).into_any_element()])
-        }))
+        h_flex()
+            .gap_0p5()
+            .items_center()
+            .children(stroke.iter().enumerate().flat_map(|(ix, key)| {
+                let plus = (ix > 0).then(|| {
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child("+")
+                        .into_any_element()
+                });
+                plus.into_iter().chain([cap(key).into_any_element()])
+            }))
     }))
 }
 
@@ -2164,12 +2813,22 @@ impl SettingsPanel {
     fn render_shortcuts(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
         use crate::keymap::{context_label, normalize, shown_caps};
         let commands = crate::keymap::commands(cx);
-        let keys_of = |c: &crate::keymap::Command| settings.keybindings.get(&c.id).unwrap_or(&c.defaults).clone();
+        let keys_of = |c: &crate::keymap::Command| {
+            settings
+                .keybindings
+                .get(&c.id)
+                .unwrap_or(&c.defaults)
+                .clone()
+        };
         // Which commands each key runs, where it works, to tell of a key bound twice.
-        let mut owners: std::collections::HashMap<(Option<&str>, String), Vec<&str>> = Default::default();
+        let mut owners: std::collections::HashMap<(Option<&str>, String), Vec<&str>> =
+            Default::default();
         for command in commands {
             for keys in keys_of(command) {
-                owners.entry((command.context, normalize(&keys))).or_default().push(&command.title);
+                owners
+                    .entry((command.context, normalize(&keys)))
+                    .or_default()
+                    .push(&command.title);
             }
         }
         let mut rows = Vec::new();
@@ -2183,13 +2842,29 @@ impl SettingsPanel {
                 .collect();
             clashes.sort_unstable();
             clashes.dedup();
-            let keys: Vec<_> = keys.into_iter().map(|k| (k.clone(), shown_caps(&k, cx))).collect();
+            let keys: Vec<_> = keys
+                .into_iter()
+                .map(|k| (k.clone(), shown_caps(&k, cx)))
+                .collect();
             // Searched as written and as shown: `ctrl+shift+p`, `Ctrl+Shift+P`.
-            let shown = keys.iter().filter_map(|(_, caps)| caps.as_ref()).flatten().map(|stroke| stroke.join("+")).collect::<Vec<_>>().join(" ");
-            let raw = keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(" ");
+            let shown = keys
+                .iter()
+                .filter_map(|(_, caps)| caps.as_ref())
+                .flatten()
+                .map(|stroke| stroke.join("+"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let raw = keys
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
             let context = command.context.map_or("", context_label);
             if passes(&[&command.title, &command.id, context, &shown, &raw]) {
-                let (category, name) = command.title.split_once(": ").unwrap_or(("General", &command.title));
+                let (category, name) = command
+                    .title
+                    .split_once(": ")
+                    .unwrap_or(("General", &command.title));
                 rows.push(ShortcutRow {
                     id: command.id.clone(),
                     category: category.to_string().into(),
@@ -2218,17 +2893,43 @@ impl SettingsPanel {
         for row in rows {
             if row.category != category {
                 category = row.category.clone();
-                list = list.child(div().pt_3().pb_1().px_2().text_xs().font_weight(FontWeight::MEDIUM).text_color(colors.muted).child(category.clone()));
+                list = list.child(
+                    div()
+                        .pt_3()
+                        .pb_1()
+                        .px_2()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors.muted)
+                        .child(category.clone()),
+                );
             }
             list = list.child(self.shortcut_row(row, colors, cx));
         }
         list
     }
 
-    fn shortcut_row(&self, row: ShortcutRow, colors: ShortcutColors, cx: &mut Context<Self>) -> Stateful<Div> {
-        let ShortcutRow { id, name, context, clashes, keys, changed, .. } = row;
+    fn shortcut_row(
+        &self,
+        row: ShortcutRow,
+        colors: ShortcutColors,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let ShortcutRow {
+            id,
+            name,
+            context,
+            clashes,
+            keys,
+            changed,
+            ..
+        } = row;
         let group = SharedString::from(format!("shortcut-{id}"));
-        let on_hover = |element: Div| element.invisible().group_hover(group.clone(), |this| this.visible());
+        let on_hover = |element: Div| {
+            element
+                .invisible()
+                .group_hover(group.clone(), |this| this.visible())
+        };
         let recording = self.recording.as_ref().filter(|r| r.id == id);
 
         let about = h_flex()
@@ -2237,22 +2938,66 @@ impl SettingsPanel {
             .gap_2()
             .items_center()
             .child(div().flex_none().text_sm().child(name))
-            .when(changed, |this| this.child(div().flex_none().text_xs().text_color(colors.primary).child("Modified")))
-            .when(!context.is_empty(), |this| this.child(div().flex_none().text_xs().text_color(colors.muted).child(context)))
+            .when(changed, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.primary)
+                        .child("Modified"),
+                )
+            })
+            .when(!context.is_empty(), |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child(context),
+                )
+            })
             .when(!clashes.is_empty(), |this| {
-                this.child(div().min_w_0().truncate().text_xs().text_color(colors.warning).child(format!("Same keys as {}", clashes.join(", "))))
+                this.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(format!("Same keys as {}", clashes.join(", "))),
+                )
             })
             // The id settings.json knows it by.
-            .child(on_hover(div().min_w_0().truncate().text_xs().text_color(colors.muted).child(id.clone())));
+            .child(on_hover(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(colors.muted)
+                    .child(id.clone()),
+            ));
 
         let keys_side = if let Some(recording) = recording {
-            let typed: Vec<Vec<String>> = recording.strokes.iter().filter_map(|s| crate::keymap::shown_caps(s, cx)).flatten().collect();
+            let typed: Vec<Vec<String>> = recording
+                .strokes
+                .iter()
+                .filter_map(|s| crate::keymap::shown_caps(s, cx))
+                .flatten()
+                .collect();
             h_flex()
                 .flex_none()
                 .gap_3()
                 .items_center()
-                .child(div().text_xs().text_color(colors.muted).child("Enter to keep, Esc to cancel"))
-                .child(if typed.is_empty() { div().text_xs().child("Type the keys…") } else { keycaps(&typed, colors) })
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(colors.muted)
+                        .child("Enter to keep, Esc to cancel"),
+                )
+                .child(if typed.is_empty() {
+                    div().text_xs().child("Type the keys…")
+                } else {
+                    keycaps(&typed, colors)
+                })
         } else {
             let remove = |ix: usize| {
                 let id = id.clone();
@@ -2261,7 +3006,13 @@ impl SettingsPanel {
                     .ghost()
                     .icon(Icon::new(IconName::X))
                     .tooltip("Remove these keys")
-                    .on_click(move |_, _, cx| set_keys(&id, |list| _ = (ix < list.len()).then(|| list.remove(ix)), cx))
+                    .on_click(move |_, _, cx| {
+                        set_keys(
+                            &id,
+                            |list| _ = (ix < list.len()).then(|| list.remove(ix)),
+                            cx,
+                        )
+                    })
             };
             let actions = h_flex()
                 .gap_0p5()
@@ -2284,20 +3035,36 @@ impl SettingsPanel {
                             .ghost()
                             .icon(Icon::new(IconName::RotateCcw))
                             .tooltip("Back to the default keys")
-                            .on_click(move |_, _, cx| Settings::update(cx, |s| _ = s.keybindings.remove(&id))),
+                            .on_click(move |_, _, cx| {
+                                Settings::update(cx, |s| _ = s.keybindings.remove(&id))
+                            }),
                     )
                 });
             h_flex()
                 .flex_none()
                 .gap_1()
                 .items_center()
-                .when(keys.is_empty(), |this| this.child(div().px_2().text_xs().text_color(colors.muted).child("No keys")))
+                .when(keys.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .px_2()
+                            .text_xs()
+                            .text_color(colors.muted)
+                            .child("No keys"),
+                    )
+                })
                 .children(keys.into_iter().enumerate().map(|(ix, (raw, caps))| {
                     let binding = match caps {
                         Some(caps) => keycaps(&caps, colors),
-                        None => div().text_xs().text_color(colors.danger).child(format!("{raw} (not read)")),
+                        None => div()
+                            .text_xs()
+                            .text_color(colors.danger)
+                            .child(format!("{raw} (not read)")),
                     };
-                    h_flex().items_center().child(binding).child(on_hover(div().child(remove(ix))))
+                    h_flex()
+                        .items_center()
+                        .child(binding)
+                        .child(on_hover(div().child(remove(ix))))
                 }))
                 .child(on_hover(actions))
         };
@@ -2336,12 +3103,18 @@ fn confirm_reset_presets(kind: Kind, section: &'static str, window: &mut Window,
     window.open_alert_dialog(cx, move |dialog, _, _| {
         dialog
             .title("Reset Presets")
-            .description(format!("Replace your {section} presets with den's defaults? Presets you added are removed."))
+            .description(format!(
+                "Replace your {section} presets with den's defaults? Presets you added are removed."
+            ))
             .show_cancel(true)
             .on_ok(move |_, _, cx| {
                 Settings::update(cx, |s| {
                     s.presets.retain(|p| p.kind() != kind);
-                    s.presets.extend(crate::settings::default_presets().into_iter().filter(|p| p.kind() == kind));
+                    s.presets.extend(
+                        crate::settings::default_presets()
+                            .into_iter()
+                            .filter(|p| p.kind() == kind),
+                    );
                 });
                 true
             })
@@ -2357,6 +3130,11 @@ fn preset_section(title: &'static str, description: &'static str, list: Div, cx:
         .py_3()
         .gap_2()
         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
-        .child(div().text_xs().text_color(cx.theme().muted_foreground).child(description))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(description),
+        )
         .child(list)
 }

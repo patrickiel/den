@@ -20,19 +20,59 @@ type Note = (f32, f32, f32, Wave, f32);
 
 /// den's sounds: id, name, notes.
 pub const SOUNDS: &[(&str, &str, &[Note])] = &[
-    ("chime", "Chime", &[(880., 0., 0.5, Wave::Sine, 1.), (1318.5, 0.12, 0.7, Wave::Sine, 1.)]),
+    (
+        "chime",
+        "Chime",
+        &[
+            (880., 0., 0.5, Wave::Sine, 1.),
+            (1318.5, 0.12, 0.7, Wave::Sine, 1.),
+        ],
+    ),
     ("ping", "Ping", &[(1760., 0., 0.35, Wave::Sine, 0.7)]),
-    ("pop", "Pop", &[(520., 0., 0.09, Wave::Triangle, 1.), (780., 0.07, 0.12, Wave::Triangle, 1.)]),
-    ("bell", "Bell", &[(660., 0., 1.2, Wave::Sine, 1.), (1320., 0., 0.8, Wave::Sine, 0.35), (1980., 0., 0.4, Wave::Sine, 0.15)]),
-    ("alert", "Alert", &[(988., 0., 0.14, Wave::Square, 0.35), (988., 0.2, 0.14, Wave::Square, 0.35)]),
-    ("rise", "Rise", &[(523.3, 0., 0.25, Wave::Sine, 1.), (659.3, 0.1, 0.25, Wave::Sine, 1.), (784., 0.2, 0.45, Wave::Sine, 1.)]),
+    (
+        "pop",
+        "Pop",
+        &[
+            (520., 0., 0.09, Wave::Triangle, 1.),
+            (780., 0.07, 0.12, Wave::Triangle, 1.),
+        ],
+    ),
+    (
+        "bell",
+        "Bell",
+        &[
+            (660., 0., 1.2, Wave::Sine, 1.),
+            (1320., 0., 0.8, Wave::Sine, 0.35),
+            (1980., 0., 0.4, Wave::Sine, 0.15),
+        ],
+    ),
+    (
+        "alert",
+        "Alert",
+        &[
+            (988., 0., 0.14, Wave::Square, 0.35),
+            (988., 0.2, 0.14, Wave::Square, 0.35),
+        ],
+    ),
+    (
+        "rise",
+        "Rise",
+        &[
+            (523.3, 0., 0.25, Wave::Sine, 1.),
+            (659.3, 0.1, 0.25, Wave::Sine, 1.),
+            (784., 0.2, 0.45, Wave::Sine, 1.),
+        ],
+    ),
 ];
 
 const RATE: u32 = 44_100;
 
 /// The sound as 16-bit mono PCM in a WAV file, at `volume` (0..100).
 fn render(notes: &[Note], volume: u32) -> Vec<u8> {
-    let length = notes.iter().map(|&(_, at, dur, ..)| at + dur + 0.05).fold(0., f32::max);
+    let length = notes
+        .iter()
+        .map(|&(_, at, dur, ..)| at + dur + 0.05)
+        .fold(0., f32::max);
     let samples = (length * RATE as f32) as usize;
     let master = volume.min(100) as f32 / 100. * 0.4;
     let mut pcm = vec![0f32; samples];
@@ -44,7 +84,11 @@ fn render(notes: &[Note], volume: u32) -> Vec<u8> {
                 continue;
             }
             // A linear rise, then an exponential fall to 0.0001 at `dur`.
-            let envelope = if t < attack { gain * t / attack } else { gain * (0.0001f32 / gain).powf((t - attack) / (dur - attack).max(0.001)) };
+            let envelope = if t < attack {
+                gain * t / attack
+            } else {
+                gain * (0.0001f32 / gain).powf((t - attack) / (dur - attack).max(0.001))
+            };
             let phase = (t * freq).fract();
             let value = match wave {
                 Wave::Sine => (phase * std::f32::consts::TAU).sin(),
@@ -60,7 +104,10 @@ fn render(notes: &[Note], volume: u32) -> Vec<u8> {
             *out += value * envelope;
         }
     }
-    let data: Vec<u8> = pcm.iter().flat_map(|s| (((s * master).clamp(-1., 1.) * i16::MAX as f32) as i16).to_le_bytes()).collect();
+    let data: Vec<u8> = pcm
+        .iter()
+        .flat_map(|s| (((s * master).clamp(-1., 1.) * i16::MAX as f32) as i16).to_le_bytes())
+        .collect();
     let mut wav = Vec::with_capacity(44 + data.len());
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
@@ -89,7 +136,9 @@ unsafe extern "system" {
 
 /// Play sound `name` (an id of `SOUNDS`; "none" is silent) at `volume`.
 pub fn play_named(name: &str, volume: u32) {
-    let Some((_, _, notes)) = SOUNDS.iter().find(|(id, ..)| *id == name) else { return };
+    let Some((_, _, notes)) = SOUNDS.iter().find(|(id, ..)| *id == name) else {
+        return;
+    };
     if volume == 0 {
         return;
     }
@@ -105,7 +154,11 @@ pub fn play_named(name: &str, volume: u32) {
         const SND_MEMORY: u32 = 0x0004;
         // SAFETY: the WAV lives for the rest of the process (leaked above).
         unsafe {
-            PlaySoundW(wav.as_ptr(), std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+            PlaySoundW(
+                wav.as_ptr(),
+                std::ptr::null_mut(),
+                SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+            );
         }
     }
     #[cfg(not(windows))]
@@ -118,13 +171,22 @@ pub fn play_named(name: &str, volume: u32) {
 fn play_file(name: &str, volume: u32, wav: &[u8]) {
     let dir = crate::settings::data_dir().join("sounds");
     let path = dir.join(format!("{name}-{volume}.wav"));
-    if !path.is_file() && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, wav).is_err()) {
+    if !path.is_file()
+        && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&path, wav).is_err())
+    {
         return;
     }
-    let players: &[&str] = if cfg!(target_os = "macos") { &["afplay"] } else { &["paplay", "aplay"] };
+    let players: &[&str] = if cfg!(target_os = "macos") {
+        &["afplay"]
+    } else {
+        &["paplay", "aplay"]
+    };
     for player in players {
         let mut cmd = std::process::Command::new(player);
-        cmd.arg(&path).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        cmd.arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         if cmd.spawn().is_ok() {
             return;
         }
@@ -134,7 +196,11 @@ fn play_file(name: &str, volume: u32, wav: &[u8]) {
 /// The sound Settings pick for `kind`.
 pub fn play(kind: AlertKind, cx: &gpui_kit::App) {
     let settings = crate::settings::Settings::get(cx);
-    let name = if kind == AlertKind::Done { &settings.notify_sound_done } else { &settings.notify_sound_input };
+    let name = if kind == AlertKind::Done {
+        &settings.notify_sound_done
+    } else {
+        &settings.notify_sound_input
+    };
     play_named(name, settings.notify_volume);
 }
 

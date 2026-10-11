@@ -25,5 +25,9 @@ pub fn find_file(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
     if depth == 0 {
         return None;
     }
-    std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().is_dir()).find_map(|e| find_file(&e.path(), name, depth - 1))
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .find_map(|e| find_file(&e.path(), name, depth - 1))
 }

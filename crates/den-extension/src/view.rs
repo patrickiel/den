@@ -70,7 +70,18 @@ impl Content {
         macro_rules! take {
             ($($field:ident),*) => { $( if patch.$field.is_some() { self.$field = patch.$field; } )* };
         }
-        take!(title, toolbar, columns, rows, menus, selected, highlighted, detail, message, more);
+        take!(
+            title,
+            toolbar,
+            columns,
+            rows,
+            menus,
+            selected,
+            highlighted,
+            detail,
+            message,
+            more
+        );
     }
 }
 
@@ -117,7 +128,10 @@ impl From<Vec<Span>> for Cell {
 
 impl From<Span> for Cell {
     fn from(span: Span) -> Self {
-        Cell { spans: vec![span], graph: None }
+        Cell {
+            spans: vec![span],
+            graph: None,
+        }
     }
 }
 
@@ -135,7 +149,10 @@ impl From<String> for Cell {
 
 impl From<Graph> for Cell {
     fn from(graph: Graph) -> Self {
-        Cell { spans: Vec::new(), graph: Some(graph) }
+        Cell {
+            spans: Vec::new(),
+            graph: Some(graph),
+        }
     }
 }
 
@@ -178,7 +195,10 @@ pub struct Span {
 
 impl Span {
     pub fn text(text: impl Into<String>) -> Self {
-        Span { text: text.into(), ..Default::default() }
+        Span {
+            text: text.into(),
+            ..Default::default()
+        }
     }
 
     pub fn color(mut self, color: impl Into<String>) -> Self {
@@ -306,11 +326,18 @@ fn is_zero(n: &u32) -> bool {
 
 impl Line {
     pub fn new(spans: Vec<Span>) -> Self {
-        Line { spans, ..Default::default() }
+        Line {
+            spans,
+            ..Default::default()
+        }
     }
 
     pub fn heading(text: impl Into<String>) -> Self {
-        Line { spans: vec![Span::text(text)], heading: true, ..Default::default() }
+        Line {
+            spans: vec![Span::text(text)],
+            heading: true,
+            ..Default::default()
+        }
     }
 
     pub fn action(mut self, action: impl Into<String>, data: impl Into<String>) -> Self {
@@ -378,24 +405,56 @@ pub struct ToolbarItem {
 }
 
 impl ToolbarItem {
-    pub fn button(id: impl Into<String>, label: impl Into<String>, icon: impl Into<String>) -> Self {
-        ToolbarItem { kind: ToolbarKind::Button, id: id.into(), label: label.into(), icon: icon.into(), ..Default::default() }
+    pub fn button(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        icon: impl Into<String>,
+    ) -> Self {
+        ToolbarItem {
+            kind: ToolbarKind::Button,
+            id: id.into(),
+            label: label.into(),
+            icon: icon.into(),
+            ..Default::default()
+        }
     }
 
-    pub fn select(id: impl Into<String>, value: impl Into<String>, options: Vec<SelectOption>) -> Self {
-        ToolbarItem { kind: ToolbarKind::Select, id: id.into(), value: value.into(), options, ..Default::default() }
+    pub fn select(
+        id: impl Into<String>,
+        value: impl Into<String>,
+        options: Vec<SelectOption>,
+    ) -> Self {
+        ToolbarItem {
+            kind: ToolbarKind::Select,
+            id: id.into(),
+            value: value.into(),
+            options,
+            ..Default::default()
+        }
     }
 
     pub fn search(id: impl Into<String>, placeholder: impl Into<String>) -> Self {
-        ToolbarItem { kind: ToolbarKind::Search, id: id.into(), placeholder: placeholder.into(), ..Default::default() }
+        ToolbarItem {
+            kind: ToolbarKind::Search,
+            id: id.into(),
+            placeholder: placeholder.into(),
+            ..Default::default()
+        }
     }
 
     pub fn label(text: impl Into<String>) -> Self {
-        ToolbarItem { kind: ToolbarKind::Label, label: text.into(), ..Default::default() }
+        ToolbarItem {
+            kind: ToolbarKind::Label,
+            label: text.into(),
+            ..Default::default()
+        }
     }
 
     pub fn spacer() -> Self {
-        ToolbarItem { kind: ToolbarKind::Spacer, ..Default::default() }
+        ToolbarItem {
+            kind: ToolbarKind::Spacer,
+            ..Default::default()
+        }
     }
 
     pub fn tooltip(mut self, tooltip: impl Into<String>) -> Self {
@@ -435,15 +494,26 @@ pub struct MenuItem {
 
 impl MenuItem {
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
-        MenuItem { id: id.into(), label: label.into(), ..Default::default() }
+        MenuItem {
+            id: id.into(),
+            label: label.into(),
+            ..Default::default()
+        }
     }
 
     pub fn separator() -> Self {
-        MenuItem { separator: true, ..Default::default() }
+        MenuItem {
+            separator: true,
+            ..Default::default()
+        }
     }
 
     pub fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> Self {
-        MenuItem { label: label.into(), submenu: items, ..Default::default() }
+        MenuItem {
+            label: label.into(),
+            submenu: items,
+            ..Default::default()
+        }
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -507,15 +577,39 @@ pub struct Field {
 
 impl Field {
     pub fn text(id: impl Into<String>, label: impl Into<String>, value: impl Into<String>) -> Self {
-        Field { id: id.into(), kind: FieldKind::Text, label: label.into(), value: value.into(), ..Default::default() }
+        Field {
+            id: id.into(),
+            kind: FieldKind::Text,
+            label: label.into(),
+            value: value.into(),
+            ..Default::default()
+        }
     }
 
     pub fn checkbox(id: impl Into<String>, label: impl Into<String>, checked: bool) -> Self {
-        Field { id: id.into(), kind: FieldKind::Checkbox, label: label.into(), value: checked.to_string(), ..Default::default() }
+        Field {
+            id: id.into(),
+            kind: FieldKind::Checkbox,
+            label: label.into(),
+            value: checked.to_string(),
+            ..Default::default()
+        }
     }
 
-    pub fn choice(id: impl Into<String>, label: impl Into<String>, value: impl Into<String>, options: Vec<SelectOption>) -> Self {
-        Field { id: id.into(), kind: FieldKind::Choice, label: label.into(), value: value.into(), options, ..Default::default() }
+    pub fn choice(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        options: Vec<SelectOption>,
+    ) -> Self {
+        Field {
+            id: id.into(),
+            kind: FieldKind::Choice,
+            label: label.into(),
+            value: value.into(),
+            options,
+            ..Default::default()
+        }
     }
 
     pub fn required(mut self) -> Self {
@@ -555,12 +649,25 @@ mod tests {
 
     #[test]
     fn merging_replaces_only_what_is_set() {
-        let mut content = Content { title: Some("A".into()), rows: Some(vec![Row { id: "1".into(), ..Default::default() }]), ..Default::default() };
-        content.merge(Content { selected: Some("1".into()), ..Default::default() });
+        let mut content = Content {
+            title: Some("A".into()),
+            rows: Some(vec![Row {
+                id: "1".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        content.merge(Content {
+            selected: Some("1".into()),
+            ..Default::default()
+        });
         assert_eq!(content.title.as_deref(), Some("A"));
         assert_eq!(content.rows.as_ref().map(Vec::len), Some(1));
         assert_eq!(content.selected.as_deref(), Some("1"));
-        content.merge(Content { rows: Some(Vec::new()), ..Default::default() });
+        content.merge(Content {
+            rows: Some(Vec::new()),
+            ..Default::default()
+        });
         assert_eq!(content.rows.as_ref().map(Vec::len), Some(0));
     }
 
@@ -575,6 +682,9 @@ mod tests {
         assert_eq!(rows[0].cells[0].spans[0].background, "#0e639c");
         assert_eq!(rows[0].cells[1].graph.as_ref().unwrap().lanes(), 3.0);
         let toolbar = content.toolbar.unwrap();
-        assert_eq!((toolbar[0].kind, toolbar[1].kind), (ToolbarKind::Search, ToolbarKind::Unknown));
+        assert_eq!(
+            (toolbar[0].kind, toolbar[1].kind),
+            (ToolbarKind::Search, ToolbarKind::Unknown)
+        );
     }
 }

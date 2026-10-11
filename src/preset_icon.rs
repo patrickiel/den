@@ -56,16 +56,49 @@ const PROGRAM_LOGOS: &[(&str, &str)] = &[
 ];
 
 /// Icons in series, for presets that are levels of one thing.
-pub const LEVELS: &[&str] = &["numberOne", "numberTwo", "numberThree", "numberFour", "oneBar", "twoBars", "threeBars", "fourBars"];
+pub const LEVELS: &[&str] = &[
+    "numberOne",
+    "numberTwo",
+    "numberThree",
+    "numberFour",
+    "oneBar",
+    "twoBars",
+    "threeBars",
+    "fourBars",
+];
 
 /// The other icons a preset can pick.
 pub const GLYPHS: &[&str] = &[
-    "terminalWindow", "code", "bug", "flask", "rocket", "lightning", "sparkle", "robot", "brain", "magicWand", "lightbulb", "fire", "star", "heart",
-    "crown", "ghost", "cpu", "database", "cloud", "globe", "package", "wrench", "gearSix", "gitBranch",
+    "terminalWindow",
+    "code",
+    "bug",
+    "flask",
+    "rocket",
+    "lightning",
+    "sparkle",
+    "robot",
+    "brain",
+    "magicWand",
+    "lightbulb",
+    "fire",
+    "star",
+    "heart",
+    "crown",
+    "ghost",
+    "cpu",
+    "database",
+    "cloud",
+    "globe",
+    "package",
+    "wrench",
+    "gearSix",
+    "gitBranch",
 ];
 
 /// The swatches; the hue bar reaches the rest.
-pub const COLORS: &[&str] = &["#e5484d", "#f76b15", "#e2a336", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
+pub const COLORS: &[&str] = &[
+    "#e5484d", "#f76b15", "#e2a336", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f",
+];
 
 /// The asset of a level or glyph by den's name.
 fn glyph_path(name: &str) -> Option<String> {
@@ -128,16 +161,23 @@ enum Frame {
 
 /// A local dev server's port (":5173").
 fn local_port(url: &str) -> Option<String> {
-    let rest = url.trim().trim_start_matches("http://").trim_start_matches("https://");
+    let rest = url
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let host = rest.split('/').next()?;
     let (name, port) = host.rsplit_once(':')?;
     let local = name == "localhost" || name == "127.0.0.1";
-    (local && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).then(|| format!(":{port}"))
+    (local && !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .then(|| format!(":{port}"))
 }
 
 fn logo_look(key: &str) -> Option<Look> {
     let (key, _, color) = LOGOS.iter().find(|(k, ..)| *k == key)?;
-    Some(Look::Logo(format!("presets/logos/{key}.svg"), color.then(|| format!("presets/logos/{key}-color.svg"))))
+    Some(Look::Logo(
+        format!("presets/logos/{key}.svg"),
+        color.then(|| format!("presets/logos/{key}-color.svg")),
+    ))
 }
 
 /// How `preset` looks with `icon` (`None`: the automatic icon).
@@ -172,13 +212,19 @@ fn look(preset: &Preset, icon: Option<&str>) -> Look {
     if command.is_empty() || crate::terminal::is_shell(command) {
         return Look::Glyph("presets/glyphs/terminal-window.svg".into());
     }
-    let program = crate::backend::agent::program_of(command.split_whitespace().next().unwrap_or(command));
-    PROGRAM_LOGOS.iter().find(|(p, _)| *p == program).and_then(|(_, key)| logo_look(key)).unwrap_or_else(letter)
+    let program =
+        crate::backend::agent::program_of(command.split_whitespace().next().unwrap_or(command));
+    PROGRAM_LOGOS
+        .iter()
+        .find(|(p, _)| *p == program)
+        .and_then(|(_, key)| logo_look(key))
+        .unwrap_or_else(letter)
 }
 
 /// Whether `command` runs a CLI that has a logo (Claude Code, Codex, …).
 pub fn has_program_logo(command: &str) -> bool {
-    let program = crate::backend::agent::program_of(command.split_whitespace().next().unwrap_or(command));
+    let program =
+        crate::backend::agent::program_of(command.split_whitespace().next().unwrap_or(command));
     PROGRAM_LOGOS.iter().any(|(p, _)| *p == program)
 }
 
@@ -204,12 +250,31 @@ pub fn render(preset: &Preset, icon: Option<&str>, size: f32, cx: &App) -> AnyEl
     let own = preset.color.as_deref().and_then(parse_color);
     let color = own.unwrap_or(cx.theme().foreground);
     match look(preset, icon) {
-        Look::Glyph(path) => svg().path(path).size(px(size)).flex_none().text_color(color).into_any_element(),
+        Look::Glyph(path) => svg()
+            .path(path)
+            .size(px(size))
+            .flex_none()
+            .text_color(color)
+            .into_any_element(),
         Look::Logo(mark, brand) => match (brand, own) {
-            (Some(brand), None) => img(SharedString::from(brand)).size(px(size)).flex_none().into_any_element(),
-            _ => svg().path(mark).size(px(size)).flex_none().text_color(color).into_any_element(),
+            (Some(brand), None) => img(SharedString::from(brand))
+                .size(px(size))
+                .flex_none()
+                .into_any_element(),
+            _ => svg()
+                .path(mark)
+                .size(px(size))
+                .flex_none()
+                .text_color(color)
+                .into_any_element(),
         },
-        Look::Port(text) => div().flex_none().text_color(color).text_size(px(size * 0.62)).font_weight(FontWeight::BOLD).child(text).into_any_element(),
+        Look::Port(text) => div()
+            .flex_none()
+            .text_color(color)
+            .text_size(px(size * 0.62))
+            .font_weight(FontWeight::BOLD)
+            .child(text)
+            .into_any_element(),
         Look::Letter(text, frame) => div()
             .size(px(size))
             .flex()
@@ -219,8 +284,16 @@ pub fn render(preset: &Preset, icon: Option<&str>, size: f32, cx: &App) -> AnyEl
             .text_color(color)
             .font_weight(FontWeight::BOLD)
             .map(|this| match frame {
-                Frame::Square => this.rounded(px(3.)).border(px(1.5)).border_color(color).text_size(px(size * 0.62)),
-                Frame::Circle => this.rounded_full().border(px(1.5)).border_color(color).text_size(px(size * 0.62)),
+                Frame::Square => this
+                    .rounded(px(3.))
+                    .border(px(1.5))
+                    .border_color(color)
+                    .text_size(px(size * 0.62)),
+                Frame::Circle => this
+                    .rounded_full()
+                    .border(px(1.5))
+                    .border_color(color)
+                    .text_size(px(size * 0.62)),
                 Frame::Bare => this.text_size(px(size * 1.1)).line_height(px(size)),
             })
             .child(text)
@@ -242,7 +315,9 @@ pub fn hue_color(hue: f32) -> String {
 
 /// The hue of a "#rrggbb" colour in degrees; 0 for greys.
 pub fn color_hue(hex: &str) -> f32 {
-    let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0) as f32 / 255.;
+    let channel = |i: usize| {
+        u8::from_str_radix(hex.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0) as f32 / 255.
+    };
     let (r, g, b) = (channel(1), channel(3), channel(5));
     let max = r.max(g).max(b);
     let d = max - r.min(g).min(b);
@@ -272,40 +347,75 @@ fn edit(ix: usize, cx: &mut App, f: impl FnOnce(&mut Preset)) {
 /// logos; the levels; the glyphs; the theme colour, swatches and a hue bar.
 /// Each pick applies at once.
 pub fn picker(ix: usize, cx: &App) -> AnyElement {
-    let Some(preset) = Settings::get(cx).presets.get(ix).cloned() else { return div().into_any_element() };
+    let Some(preset) = Settings::get(cx).presets.get(ix).cloned() else {
+        return div().into_any_element();
+    };
     let theme = cx.theme().clone();
     let current = preset.icon.clone();
     let cell = |choice: Option<String>, title: String, preset: &Preset| {
         let selected = current == choice;
         let icon = choice.clone();
         div()
-            .id(SharedString::from(format!("pick-{ix}-{}", choice.as_deref().unwrap_or("auto"))))
+            .id(SharedString::from(format!(
+                "pick-{ix}-{}",
+                choice.as_deref().unwrap_or("auto")
+            )))
             .size(px(34.))
             .flex()
             .items_center()
             .justify_center()
             .rounded(px(6.))
             .border_1()
-            .border_color(if selected { theme.ring } else { transparent_black() })
+            .border_color(if selected {
+                theme.ring
+            } else {
+                transparent_black()
+            })
             .when(selected, |this| this.bg(theme.accent))
             .hover(|this| this.bg(theme.accent))
-            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(title.clone()).build(window, cx))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(title.clone()).build(window, cx)
+            })
             .child(render(preset, icon.as_deref(), 18., cx))
             .on_click(move |_, _, cx| {
                 let choice = choice.clone();
                 edit(ix, cx, |p| p.icon = choice);
             })
     };
-    let grid = |cells: Vec<Stateful<Div>>| h_flex().flex_wrap().w(px(8. * 36.)).gap(px(2.)).children(cells);
+    let grid = |cells: Vec<Stateful<Div>>| {
+        h_flex()
+            .flex_wrap()
+            .w(px(8. * 36.))
+            .gap(px(2.))
+            .children(cells)
+    };
     let mut own = vec![
         cell(None, "Automatic".into(), &preset),
         cell(Some("letter".into()), "First letter".into(), &preset),
-        cell(Some("letterCircle".into()), "First letter in a circle".into(), &preset),
-        cell(Some("letterBare".into()), "First letter, large".into(), &preset),
+        cell(
+            Some("letterCircle".into()),
+            "First letter in a circle".into(),
+            &preset,
+        ),
+        cell(
+            Some("letterBare".into()),
+            "First letter, large".into(),
+            &preset,
+        ),
     ];
-    own.extend(LOGOS.iter().map(|(key, name, _)| cell(Some(format!("logo:{key}")), (*name).into(), &preset)));
-    let levels = LEVELS.iter().map(|name| cell(Some((*name).into()), words(name), &preset)).collect();
-    let glyphs = GLYPHS.iter().map(|name| cell(Some((*name).into()), words(name), &preset)).collect();
+    own.extend(
+        LOGOS
+            .iter()
+            .map(|(key, name, _)| cell(Some(format!("logo:{key}")), (*name).into(), &preset)),
+    );
+    let levels = LEVELS
+        .iter()
+        .map(|name| cell(Some((*name).into()), words(name), &preset))
+        .collect();
+    let glyphs = GLYPHS
+        .iter()
+        .map(|name| cell(Some((*name).into()), words(name), &preset))
+        .collect();
 
     let swatch = |id: String, color: Option<&'static str>| {
         let selected = preset.color.as_deref().map(str::to_lowercase) == color.map(str::to_string);
@@ -315,13 +425,21 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
             .size(px(26.))
             .rounded_full()
             .border_2()
-            .border_color(if selected { theme.foreground } else { transparent_black() })
+            .border_color(if selected {
+                theme.foreground
+            } else {
+                transparent_black()
+            })
             .p(px(3.))
             .child(div().size_full().rounded_full().bg(fill))
             .on_click(move |_, _, cx| edit(ix, cx, |p| p.color = color.map(str::to_string)))
     };
     let mut swatches = vec![swatch(format!("swatch-{ix}-theme"), None)];
-    swatches.extend(COLORS.iter().map(|color| swatch(format!("swatch-{ix}-{color}"), Some(color))));
+    swatches.extend(
+        COLORS
+            .iter()
+            .map(|color| swatch(format!("swatch-{ix}-{color}"), Some(color))),
+    );
     // The hue bar, as den's slider: press or drag anywhere along it.
     const BAR: f32 = 8. * 36.;
     let picked_hue = preset.color.as_deref().map(color_hue);
@@ -351,7 +469,8 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
                 .rounded_full()
                 .overflow_hidden()
                 .children((0..72).map(|step| {
-                    let fill = parse_color(&hue_color(step as f32 * 5.)).unwrap_or(theme.foreground);
+                    let fill =
+                        parse_color(&hue_color(step as f32 * 5.)).unwrap_or(theme.foreground);
                     div().flex_1().h_full().bg(fill)
                 })),
         )
@@ -365,7 +484,8 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
                     .rounded_full()
                     .border_2()
                     .border_color(gpui_kit::white())
-                    .bg(parse_color(preset.color.as_deref().unwrap_or("#000000")).unwrap_or(theme.foreground))
+                    .bg(parse_color(preset.color.as_deref().unwrap_or("#000000"))
+                        .unwrap_or(theme.foreground))
                     .shadow_sm(),
             )
         })
@@ -376,7 +496,9 @@ pub fn picker(ix: usize, cx: &App) -> AnyElement {
                 .left_0()
                 .size_full(),
         )
-        .on_mouse_down(MouseButton::Left, move |event, _, cx| pick_down(event.position.x, cx))
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            pick_down(event.position.x, cx)
+        })
         .on_mouse_move(move |event, _, cx| {
             if event.pressed_button == Some(MouseButton::Left) {
                 pick_move(event.position.x, cx);
@@ -399,8 +521,14 @@ mod tests {
 
     #[test]
     fn glyph_files_by_den_names() {
-        assert_eq!(glyph_path("magicWand").as_deref(), Some("presets/glyphs/magic-wand.svg"));
-        assert_eq!(glyph_path("threeBars").as_deref(), Some("presets/glyphs/bars-three.svg"));
+        assert_eq!(
+            glyph_path("magicWand").as_deref(),
+            Some("presets/glyphs/magic-wand.svg")
+        );
+        assert_eq!(
+            glyph_path("threeBars").as_deref(),
+            Some("presets/glyphs/bars-three.svg")
+        );
         assert_eq!(glyph_path("nope"), None);
     }
 
@@ -422,7 +550,10 @@ mod tests {
         let white = parse_color("#ffffff").unwrap();
         assert_eq!(parse_color("#fff"), Some(white));
         assert_eq!(parse_color(" fff "), Some(white));
-        assert_eq!(parse_color("#ffffff80").map(|c| (c.a * 100.).round()), Some(50.));
+        assert_eq!(
+            parse_color("#ffffff80").map(|c| (c.a * 100.).round()),
+            Some(50.)
+        );
         assert_eq!(parse_color(""), None);
         assert_eq!(parse_color("#zzz"), None);
     }

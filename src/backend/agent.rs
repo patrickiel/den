@@ -68,13 +68,20 @@ fn read_request(mut stream: TcpStream) -> Option<AgentEvent> {
     let mut body = vec![0; len.min(MAX_BODY)];
     reader.read_exact(&mut body).ok()?;
     let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
-    parse_path(line.split_whitespace().nth(1)?, String::from_utf8_lossy(&body).into())
+    parse_path(
+        line.split_whitespace().nth(1)?,
+        String::from_utf8_lossy(&body).into(),
+    )
 }
 
 fn parse_path(path: &str, body: String) -> Option<AgentEvent> {
     let mut parts = path.trim_start_matches('/').split('/');
     let (_agent, pane, kind) = (parts.next()?, parts.next()?.parse().ok()?, parts.next()?);
-    Some(AgentEvent { pane, kind: kind.into(), body })
+    Some(AgentEvent {
+        pane,
+        kind: kind.into(),
+        body,
+    })
 }
 
 fn hooks_dir() -> PathBuf {
@@ -112,7 +119,9 @@ pub fn claude_hooks(pane: u64) -> Option<String> {
 /// shell's `claude` wrapper, which adds the hooks to every run, typed or not.
 pub fn inject(pane: u64, command: &str, wrapped: bool) -> String {
     let command = command.trim();
-    let (head, rest) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
+    let (head, rest) = command
+        .split_once(char::is_whitespace)
+        .unwrap_or((command, ""));
     let extra = match program_of(head).as_str() {
         "claude" if !(wrapped && head == "claude") => match claude_hooks(pane) {
             Some(file) => format!("--settings \"{file}\""),
@@ -127,8 +136,15 @@ pub fn inject(pane: u64, command: &str, wrapped: bool) -> String {
 
 /// `claude` for `C:\…\claude.exe`.
 pub fn program_of(head: &str) -> String {
-    let name = head.rsplit(['\\', '/']).next().unwrap_or(head).to_lowercase();
-    let name = name.trim_end_matches(".exe").trim_end_matches(".cmd").trim_end_matches(".ps1");
+    let name = head
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(head)
+        .to_lowercase();
+    let name = name
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".ps1");
     name.to_string()
 }
 
@@ -148,7 +164,9 @@ pub fn forget(pane: u64) {
 
 /// A string field of a hook's JSON.
 pub fn hook_field(body: &str, field: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(body).ok()?[field].as_str().map(str::to_string)
+    serde_json::from_str::<serde_json::Value>(body).ok()?[field]
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The command that brings a Claude Code conversation back, as den restarts
@@ -178,7 +196,14 @@ pub fn claude_resume(program: Option<&str>, session: Option<&str>, fresh: bool) 
     let base = words.join(" ");
     match session {
         _ if fresh => base,
-        Some(id) if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') => format!("{base} --resume {id}"),
+        Some(id)
+            if !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
+        {
+            format!("{base} --resume {id}")
+        }
         _ => format!("{base} --continue"),
     }
 }
@@ -190,7 +215,15 @@ pub fn message(body: &str) -> Option<String> {
     ["message", "last_assistant_message"]
         .iter()
         .find_map(|key| json[*key].as_str())
-        .map(|text| text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().chars().take(200).collect())
+        .map(|text| {
+            text.lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(200)
+                .collect()
+        })
         .filter(|text: &String| !text.is_empty())
 }
 
@@ -215,22 +248,40 @@ mod tests {
     fn leaves_others_and_wrapped_claude_alone() {
         assert_eq!(inject(1, "pnpm dev", false), "pnpm dev");
         assert_eq!(inject(1, "claude --continue", true), "claude --continue");
-        assert_eq!(inject(1, "codex", false), "codex -c tui.notifications=true -c tui.notification_method=osc9");
+        assert_eq!(
+            inject(1, "codex", false),
+            "codex -c tui.notifications=true -c tui.notification_method=osc9"
+        );
     }
 
     #[test]
     fn resume_commands() {
         use super::claude_resume;
-        assert_eq!(claude_resume(Some("claude"), Some("abc-123"), false), "claude --resume abc-123");
-        assert_eq!(claude_resume(Some("claude --model opus --continue"), Some("x1"), false), "claude --model opus --resume x1");
+        assert_eq!(
+            claude_resume(Some("claude"), Some("abc-123"), false),
+            "claude --resume abc-123"
+        );
+        assert_eq!(
+            claude_resume(Some("claude --model opus --continue"), Some("x1"), false),
+            "claude --model opus --resume x1"
+        );
         assert_eq!(claude_resume(None, None, true), "claude");
-        assert_eq!(claude_resume(Some("claude --resume old"), None, false), "claude --continue");
-        assert_eq!(claude_resume(Some("claude"), Some("bad id;rm"), false), "claude --continue");
+        assert_eq!(
+            claude_resume(Some("claude --resume old"), None, false),
+            "claude --continue"
+        );
+        assert_eq!(
+            claude_resume(Some("claude"), Some("bad id;rm"), false),
+            "claude --continue"
+        );
     }
 
     #[test]
     fn takes_the_message() {
-        assert_eq!(message(r#"{"message":"Claude needs your permission"}"#).as_deref(), Some("Claude needs your permission"));
+        assert_eq!(
+            message(r#"{"message":"Claude needs your permission"}"#).as_deref(),
+            Some("Claude needs your permission")
+        );
         assert_eq!(message("{}"), None);
     }
 }

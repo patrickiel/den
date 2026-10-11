@@ -203,7 +203,9 @@ impl Setting {
             SettingKind::Boolean => value.is_boolean(),
             SettingKind::Number => value.is_number(),
             SettingKind::String => value.is_string(),
-            SettingKind::Choice => value.as_str().is_some_and(|v| self.options.iter().any(|o| o == v)),
+            SettingKind::Choice => value
+                .as_str()
+                .is_some_and(|v| self.options.iter().any(|o| o == v)),
             SettingKind::Unknown => false,
         }
     }
@@ -212,23 +214,44 @@ impl Setting {
 impl Manifest {
     /// Read and check `extension.json`'s text.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let manifest: Self = serde_json::from_str(text).map_err(|e| format!("Bad {MANIFEST}: {e}"))?;
+        let manifest: Self =
+            serde_json::from_str(text).map_err(|e| format!("Bad {MANIFEST}: {e}"))?;
         if !valid_id(&manifest.id) {
-            return Err(format!("Bad {MANIFEST}: the id \"{}\" may only have lowercase letters, digits and -", manifest.id));
+            return Err(format!(
+                "Bad {MANIFEST}: the id \"{}\" may only have lowercase letters, digits and -",
+                manifest.id
+            ));
         }
         if manifest.name.trim().is_empty() {
             return Err(format!("Bad {MANIFEST}: no name"));
         }
         let mut ids = std::collections::HashSet::new();
-        if let Some(command) = manifest.commands.iter().find(|c| c.id.is_empty() || c.title.trim().is_empty() || !ids.insert(c.id.as_str())) {
-            return Err(format!("Bad {MANIFEST}: each command needs an id of its own and a title (\"{}\")", command.id));
+        if let Some(command) = manifest
+            .commands
+            .iter()
+            .find(|c| c.id.is_empty() || c.title.trim().is_empty() || !ids.insert(c.id.as_str()))
+        {
+            return Err(format!(
+                "Bad {MANIFEST}: each command needs an id of its own and a title (\"{}\")",
+                command.id
+            ));
         }
         let mut ids = std::collections::HashSet::new();
-        if let Some(view) = manifest.views.iter().find(|v| v.id.is_empty() || v.title.trim().is_empty() || !ids.insert(v.id.as_str())) {
-            return Err(format!("Bad {MANIFEST}: each view needs an id of its own and a title (\"{}\")", view.id));
+        if let Some(view) = manifest
+            .views
+            .iter()
+            .find(|v| v.id.is_empty() || v.title.trim().is_empty() || !ids.insert(v.id.as_str()))
+        {
+            return Err(format!(
+                "Bad {MANIFEST}: each view needs an id of its own and a title (\"{}\")",
+                view.id
+            ));
         }
         if !manifest.icon.is_empty() && !inside(&manifest.icon) {
-            return Err(format!("Bad {MANIFEST}: the icon \"{}\" must be a path inside the extension's folder", manifest.icon));
+            return Err(format!(
+                "Bad {MANIFEST}: the icon \"{}\" must be a path inside the extension's folder",
+                manifest.icon
+            ));
         }
         Ok(manifest)
     }
@@ -237,14 +260,23 @@ impl Manifest {
     pub fn check_api(&self) -> Result<(), String> {
         match self.api {
             API_VERSION => Ok(()),
-            api if api > API_VERSION => Err(format!("Needs a newer den (extension API {api}, this den has {API_VERSION}).")),
-            api => Err(format!("Built for extension API {api}, which this den no longer loads.")),
+            api if api > API_VERSION => Err(format!(
+                "Needs a newer den (extension API {api}, this den has {API_VERSION})."
+            )),
+            api => Err(format!(
+                "Built for extension API {api}, which this den no longer loads."
+            )),
         }
     }
 
     /// The DLL's file name, as Cargo names a `cdylib` crate called `id`.
     pub fn library(&self) -> String {
-        format!("{}{}{}", std::env::consts::DLL_PREFIX, self.id.replace('-', "_"), std::env::consts::DLL_SUFFIX)
+        format!(
+            "{}{}{}",
+            std::env::consts::DLL_PREFIX,
+            self.id.replace('-', "_"),
+            std::env::consts::DLL_SUFFIX
+        )
     }
 
     /// Every setting's value: the user's where they set one this setting
@@ -253,7 +285,10 @@ impl Manifest {
         self.settings
             .iter()
             .map(|setting| {
-                let value = user.get(&setting.key).filter(|v| setting.accepts(v)).unwrap_or(&setting.default);
+                let value = user
+                    .get(&setting.key)
+                    .filter(|v| setting.accepts(v))
+                    .unwrap_or(&setting.default);
                 (setting.key.clone(), value.clone())
             })
             .collect()
@@ -266,7 +301,11 @@ impl Manifest {
 
     /// The SHA-256 of this platform's release zip, if the manifest has it.
     pub fn asset_sha256(&self) -> Option<&str> {
-        let sha = if PLATFORM == "windows-x86_64" { &self.sha256 } else { self.platforms.get(PLATFORM)? };
+        let sha = if PLATFORM == "windows-x86_64" {
+            &self.sha256
+        } else {
+            self.platforms.get(PLATFORM)?
+        };
         (!sha.is_empty()).then_some(sha.as_str())
     }
 }
@@ -274,14 +313,18 @@ impl Manifest {
 /// `path` is relative and stays inside the folder it is relative to.
 fn inside(path: &str) -> bool {
     let path = std::path::Path::new(path);
-    path.components().all(|c| matches!(c, std::path::Component::Normal(_))) && path.components().next().is_some()
+    path.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        && path.components().next().is_some()
 }
 
 /// An id is safe as a folder name and a crate name.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !id.starts_with('-')
         && !id.ends_with('-')
 }
@@ -337,7 +380,11 @@ pub mod abi {
         pub ctx: *mut c_void,
         /// Run host `method` with JSON `args`. Returns JSON, `{"ok": …}` or
         /// `{"error": "…"}`, which the extension gives back to `free`.
-        pub call: unsafe extern "C" fn(ctx: *mut c_void, method: *const c_char, args: *const c_char) -> *mut c_char,
+        pub call: unsafe extern "C" fn(
+            ctx: *mut c_void,
+            method: *const c_char,
+            args: *const c_char,
+        ) -> *mut c_char,
         pub free: unsafe extern "C" fn(text: *mut c_char),
     }
 
@@ -348,9 +395,11 @@ pub mod abi {
         pub version: u32,
         /// `context` is a JSON [`Context`](crate::Context). Returns the
         /// extension's state, or null when it failed.
-        pub activate: unsafe extern "C" fn(host: *const HostApi, context: *const c_char) -> *mut c_void,
+        pub activate:
+            unsafe extern "C" fn(host: *const HostApi, context: *const c_char) -> *mut c_void,
         /// An event by name with its JSON data; the strings live for the call.
-        pub event: unsafe extern "C" fn(state: *mut c_void, name: *const c_char, data: *const c_char),
+        pub event:
+            unsafe extern "C" fn(state: *mut c_void, name: *const c_char, data: *const c_char),
         /// The last call; it frees the state.
         pub deactivate: unsafe extern "C" fn(state: *mut c_void),
     }
@@ -389,9 +438,12 @@ impl Host {
             return Err("den gave no reply".into());
         }
         // SAFETY: den returns a NUL-terminated string it allocated.
-        let text = unsafe { CStr::from_ptr(reply) }.to_string_lossy().into_owned();
+        let text = unsafe { CStr::from_ptr(reply) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { (self.api.free)(reply) };
-        let mut reply: Value = serde_json::from_str(&text).map_err(|e| format!("Bad reply from den: {e}"))?;
+        let mut reply: Value =
+            serde_json::from_str(&text).map_err(|e| format!("Bad reply from den: {e}"))?;
         match reply.get_mut("error") {
             Some(error) => Err(error.as_str().unwrap_or("error").to_string()),
             None => Ok(reply.get_mut("ok").map(Value::take).unwrap_or(Value::Null)),
@@ -412,51 +464,85 @@ impl Host {
     /// [`events::WORKSPACE_OPENED`] named it), in place of the ones this
     /// extension set there before; none removes them.
     pub fn set_buttons(&self, root: &str, buttons: &[Button]) -> Result<(), String> {
-        self.call("set_buttons", serde_json::json!({ "root": root, "buttons": buttons })).map(drop)
+        self.call(
+            "set_buttons",
+            serde_json::json!({ "root": root, "buttons": buttons }),
+        )
+        .map(drop)
     }
 
     /// Open a terminal tab in the window on `root` and run `command` in its
     /// shell, in `cwd` (else `root`). Nothing happens when no window is open
     /// on `root`.
-    pub fn run_in_terminal(&self, root: &str, command: &str, cwd: Option<&str>) -> Result<(), String> {
-        self.call("run_in_terminal", serde_json::json!({ "root": root, "command": command, "cwd": cwd })).map(drop)
+    pub fn run_in_terminal(
+        &self,
+        root: &str,
+        command: &str,
+        cwd: Option<&str>,
+    ) -> Result<(), String> {
+        self.call(
+            "run_in_terminal",
+            serde_json::json!({ "root": root, "command": command, "cwd": cwd }),
+        )
+        .map(drop)
     }
 
     /// Open `path` in an editor tab of the window on `root` (its tab if it is
     /// open), with the cursor at `line` (from 1) when given. Nothing happens
     /// when no window is open on `root`.
     pub fn open_file(&self, root: &str, path: &str, line: Option<u32>) -> Result<(), String> {
-        self.call("open_file", serde_json::json!({ "root": root, "path": path, "line": line })).map(drop)
+        self.call(
+            "open_file",
+            serde_json::json!({ "root": root, "path": path, "line": line }),
+        )
+        .map(drop)
     }
 
     /// Open a tab of the manifest's view `view` in the window on `root`, or
     /// show the one that is open. [`events::VIEW_OPENED`] follows for a new one.
     pub fn open_view(&self, root: &str, view: &str) -> Result<(), String> {
-        self.call("open_view", serde_json::json!({ "root": root, "view": view })).map(drop)
+        self.call(
+            "open_view",
+            serde_json::json!({ "root": root, "view": view }),
+        )
+        .map(drop)
     }
 
     /// Show `content` in view `view`'s tab of the window on `root`: the parts
     /// it sets replace what was there (see [`view::Content`]). den keeps it
     /// for a tab opened later, until den quits.
     pub fn set_view(&self, root: &str, view: &str, content: &view::Content) -> Result<(), String> {
-        self.call("set_view", serde_json::json!({ "root": root, "view": view, "content": content })).map(drop)
+        self.call(
+            "set_view",
+            serde_json::json!({ "root": root, "view": view, "content": content }),
+        )
+        .map(drop)
     }
 
     /// Ask the user in a dialog of the window on `root`; the answer comes as
     /// [`events::PROMPT_ANSWERED`] with the prompt's id.
     pub fn prompt(&self, root: &str, prompt: &view::Prompt) -> Result<(), String> {
-        self.call("prompt", serde_json::json!({ "root": root, "prompt": prompt })).map(drop)
+        self.call(
+            "prompt",
+            serde_json::json!({ "root": root, "prompt": prompt }),
+        )
+        .map(drop)
     }
 
     /// Show a change side by side in a diff tab of the window on `root`
     /// (its tab if it is open). The window's repository is the one compared.
     pub fn open_diff(&self, root: &str, diff: &view::Diff) -> Result<(), String> {
-        self.call("open_diff", serde_json::json!({ "root": root, "diff": diff })).map(drop)
+        self.call(
+            "open_diff",
+            serde_json::json!({ "root": root, "diff": diff }),
+        )
+        .map(drop)
     }
 
     /// Put `text` on the clipboard.
     pub fn copy(&self, text: &str) -> Result<(), String> {
-        self.call("copy", serde_json::json!({ "text": text })).map(drop)
+        self.call("copy", serde_json::json!({ "text": text }))
+            .map(drop)
     }
 }
 
@@ -501,11 +587,16 @@ pub mod shim {
 
     /// # Safety
     /// `host` points to a valid `HostApi`; `context` is a C string or null.
-    pub unsafe extern "C" fn activate<T: Extension>(host: *const abi::HostApi, context: *const c_char) -> *mut c_void {
+    pub unsafe extern "C" fn activate<T: Extension>(
+        host: *const abi::HostApi,
+        context: *const c_char,
+    ) -> *mut c_void {
         if host.is_null() {
             return std::ptr::null_mut();
         }
-        let host = Host { api: unsafe { *host } };
+        let host = Host {
+            api: unsafe { *host },
+        };
         let context = serde_json::from_str(&unsafe { text(context) }).unwrap_or_default();
         match catch_unwind(AssertUnwindSafe(|| T::activate(host, context))) {
             Ok(extension) => Box::into_raw(Box::new(extension)).cast(),
@@ -518,7 +609,11 @@ pub mod shim {
 
     /// # Safety
     /// `state` came from `activate::<T>`; `name` and `data` are C strings or null.
-    pub unsafe extern "C" fn event<T: Extension>(state: *mut c_void, name: *const c_char, data: *const c_char) {
+    pub unsafe extern "C" fn event<T: Extension>(
+        state: *mut c_void,
+        name: *const c_char,
+        data: *const c_char,
+    ) {
         if state.is_null() {
             return;
         }
@@ -542,7 +637,13 @@ pub mod shim {
     }
 
     unsafe fn text(ptr: *const c_char) -> String {
-        if ptr.is_null() { String::new() } else { unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned() }
+        if ptr.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 
     fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
@@ -562,10 +663,22 @@ mod tests {
     /// What the fake host was called with.
     static CALLS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-    unsafe extern "C" fn fake_call(_: *mut c_void, method: *const c_char, args: *const c_char) -> *mut c_char {
-        let method = unsafe { CStr::from_ptr(method) }.to_string_lossy().into_owned();
-        let args = unsafe { CStr::from_ptr(args) }.to_string_lossy().into_owned();
-        let reply = if method == "info" { r#"{"ok":{"den_version":"9.9.9"}}"# } else { r#"{"ok":null}"# };
+    unsafe extern "C" fn fake_call(
+        _: *mut c_void,
+        method: *const c_char,
+        args: *const c_char,
+    ) -> *mut c_char {
+        let method = unsafe { CStr::from_ptr(method) }
+            .to_string_lossy()
+            .into_owned();
+        let args = unsafe { CStr::from_ptr(args) }
+            .to_string_lossy()
+            .into_owned();
+        let reply = if method == "info" {
+            r#"{"ok":{"den_version":"9.9.9"}}"#
+        } else {
+            r#"{"ok":null}"#
+        };
         CALLS.lock().unwrap().push((method, args));
         CString::new(reply).unwrap().into_raw()
     }
@@ -575,11 +688,22 @@ mod tests {
     }
 
     fn fake_host() -> abi::HostApi {
-        abi::HostApi { version: API_VERSION, ctx: std::ptr::null_mut(), call: fake_call, free: fake_free }
+        abi::HostApi {
+            version: API_VERSION,
+            ctx: std::ptr::null_mut(),
+            call: fake_call,
+            free: fake_free,
+        }
     }
 
     fn calls_with(method: &str) -> Vec<String> {
-        CALLS.lock().unwrap().iter().filter(|(m, _)| m == method).map(|(_, a)| a.clone()).collect()
+        CALLS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, a)| a.clone())
+            .collect()
     }
 
     struct Counter {
@@ -590,7 +714,10 @@ mod tests {
     impl Extension for Counter {
         fn activate(host: Host, context: Context) -> Self {
             host.toast(format!("counter on den {}", context.den_version));
-            Counter { host, events: Vec::new() }
+            Counter {
+                host,
+                events: Vec::new(),
+            }
         }
 
         fn event(&mut self, name: &str, data: Value) {
@@ -598,7 +725,8 @@ mod tests {
         }
 
         fn deactivate(&mut self) {
-            self.host.log(format!("counter saw {}", self.events.join(", ")));
+            self.host
+                .log(format!("counter saw {}", self.events.join(", ")));
         }
     }
 
@@ -621,12 +749,31 @@ mod tests {
         let api = unsafe { &*den_extension_v1() };
         assert_eq!(api.version, API_VERSION);
         let host = fake_host();
-        let state = unsafe { (api.activate)(&host, c(r#"{"den_version":"1.2.3","data_dir":"x"}"#).as_ptr()) };
+        let state = unsafe {
+            (api.activate)(
+                &host,
+                c(r#"{"den_version":"1.2.3","data_dir":"x"}"#).as_ptr(),
+            )
+        };
         assert!(!state.is_null());
-        assert!(calls_with("toast").iter().any(|a| a.contains("counter on den 1.2.3")));
-        unsafe { (api.event)(state, c(events::WORKSPACE_OPENED).as_ptr(), c(r#"{"root":"C:\\p"}"#).as_ptr()) };
+        assert!(
+            calls_with("toast")
+                .iter()
+                .any(|a| a.contains("counter on den 1.2.3"))
+        );
+        unsafe {
+            (api.event)(
+                state,
+                c(events::WORKSPACE_OPENED).as_ptr(),
+                c(r#"{"root":"C:\\p"}"#).as_ptr(),
+            )
+        };
         unsafe { (api.deactivate)(state) };
-        assert!(calls_with("log").iter().any(|a| a.contains("counter saw workspace_opened") && a.contains("C:")));
+        assert!(
+            calls_with("log")
+                .iter()
+                .any(|a| a.contains("counter saw workspace_opened") && a.contains("C:"))
+        );
     }
 
     #[test]
@@ -634,18 +781,39 @@ mod tests {
         let host = fake_host();
         let state = unsafe { shim::activate::<Broken>(&host, std::ptr::null()) };
         assert!(state.is_null());
-        assert!(calls_with("log").iter().any(|a| a.contains("broken on purpose")));
+        assert!(
+            calls_with("log")
+                .iter()
+                .any(|a| a.contains("broken on purpose"))
+        );
     }
 
     #[test]
     fn host_calls_unwrap_ok_and_error() {
         let host = Host { api: fake_host() };
-        assert_eq!(host.call("info", Value::Null).unwrap()["den_version"], "9.9.9");
-        unsafe extern "C" fn failing(_: *mut c_void, _: *const c_char, _: *const c_char) -> *mut c_char {
-            CString::new(r#"{"error":"no such method"}"#).unwrap().into_raw()
+        assert_eq!(
+            host.call("info", Value::Null).unwrap()["den_version"],
+            "9.9.9"
+        );
+        unsafe extern "C" fn failing(
+            _: *mut c_void,
+            _: *const c_char,
+            _: *const c_char,
+        ) -> *mut c_char {
+            CString::new(r#"{"error":"no such method"}"#)
+                .unwrap()
+                .into_raw()
         }
-        let host = Host { api: abi::HostApi { call: failing, ..fake_host() } };
-        assert_eq!(host.call("nope", Value::Null).unwrap_err(), "no such method");
+        let host = Host {
+            api: abi::HostApi {
+                call: failing,
+                ..fake_host()
+            },
+        };
+        assert_eq!(
+            host.call("nope", Value::Null).unwrap_err(),
+            "no such method"
+        );
     }
 
     #[test]
@@ -660,9 +828,18 @@ mod tests {
         assert!(Manifest::parse(r#"{"id":"Bad Id","name":"x","version":"1","api":1}"#).is_err());
         assert!(Manifest::parse(r#"{"id":"x","name":" ","version":"1","api":1}"#).is_err());
         assert!(Manifest::parse(r#"{"id":"x","name":"x"}"#).is_err());
-        let icon = |icon: &str| Manifest::parse(&format!(r#"{{"id":"x","name":"x","version":"1","api":1,"icon":{icon:?}}}"#));
+        let icon = |icon: &str| {
+            Manifest::parse(&format!(
+                r#"{{"id":"x","name":"x","version":"1","api":1,"icon":{icon:?}}}"#
+            ))
+        };
         assert_eq!(icon("images/icon.png").unwrap().icon, "images/icon.png");
-        for bad in ["../icon.png", "/icon.png", "C:\\icon.png", "images/../../x.png"] {
+        for bad in [
+            "../icon.png",
+            "/icon.png",
+            "C:\\icon.png",
+            "images/../../x.png",
+        ] {
             assert!(icon(bad).is_err(), "{bad}");
         }
     }
@@ -674,8 +851,19 @@ mod tests {
                 {"id":"hello","title":"Say Hello","keybinding":"ctrl-alt-h"},{"id":"bye","title":"Bye"}]}"#,
         )
         .unwrap();
-        assert_eq!((m.commands[0].keybinding.as_str(), m.commands[1].keybinding.as_str()), ("ctrl-alt-h", ""));
-        let bad = |commands: &str| Manifest::parse(&format!(r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"commands":{commands}}}"#)).is_err();
+        assert_eq!(
+            (
+                m.commands[0].keybinding.as_str(),
+                m.commands[1].keybinding.as_str()
+            ),
+            ("ctrl-alt-h", "")
+        );
+        let bad = |commands: &str| {
+            Manifest::parse(&format!(
+                r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"commands":{commands}}}"#
+            ))
+            .is_err()
+        };
         assert!(bad(r#"[{"id":"a","title":"A"},{"id":"a","title":"B"}]"#));
         assert!(bad(r#"[{"id":"","title":"A"}]"#));
         assert!(bad(r#"[{"id":"a","title":" "}]"#));
@@ -695,7 +883,10 @@ mod tests {
         assert_eq!(m.settings[3].kind, SettingKind::Unknown);
         let user = serde_json::json!({ "on": false, "n": "not a number", "pm": "pnpm", "gone": 1, "later": "blue" });
         let values = m.settings_values(user.as_object().unwrap());
-        assert_eq!(Value::Object(values), serde_json::json!({ "on": false, "n": 5, "pm": "pnpm", "later": "red" }));
+        assert_eq!(
+            Value::Object(values),
+            serde_json::json!({ "on": false, "n": 5, "pm": "pnpm", "later": "red" })
+        );
         assert!(!m.settings[2].accepts(&serde_json::json!("yarn")));
     }
 
@@ -703,7 +894,12 @@ mod tests {
     fn reads_views() {
         let m = Manifest::parse(r#"{"id":"x","name":"x","version":"1.0.0","api":1,"views":[{"id":"graph","title":"Git Graph","icon":"git-fork"}]}"#).unwrap();
         assert_eq!(m.views[0].icon, "git-fork");
-        let bad = |views: &str| Manifest::parse(&format!(r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"views":{views}}}"#)).is_err();
+        let bad = |views: &str| {
+            Manifest::parse(&format!(
+                r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"views":{views}}}"#
+            ))
+            .is_err()
+        };
         assert!(bad(r#"[{"id":"a","title":"A"},{"id":"a","title":"B"}]"#));
         assert!(bad(r#"[{"id":"a","title":""}]"#));
     }

@@ -38,12 +38,17 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
     let mut layout = layout.clone();
     if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
         for pane in panes.values_mut() {
-            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else { continue };
+            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else {
+                continue;
+            };
             for key in MACHINE_KEYS {
                 data.remove(*key);
             }
             if data.get("resume").is_some_and(Value::is_string) {
-                let program = data.get("program").and_then(Value::as_str).map(str::to_string);
+                let program = data
+                    .get("program")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let fresh = crate::backend::agent::claude_resume(program.as_deref(), None, true);
                 data.insert("program".into(), Value::String(fresh.clone()));
                 data.insert("resume".into(), Value::String(fresh));
@@ -75,14 +80,29 @@ fn is_claude(data: &serde_json::Map<String, Value>) -> bool {
 /// the folder's terminals run in the folder. A Claude Code conversation from
 /// elsewhere is not found here, so such a tab starts anew.
 fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
-    let Some(cwd) = data.get("cwd").and_then(Value::as_str).map(PathBuf::from) else { return };
+    let Some(cwd) = data.get("cwd").and_then(Value::as_str).map(PathBuf::from) else {
+        return;
+    };
     let outside = relative(&cwd, root).is_none();
     if outside || !cwd.is_dir() {
-        data.insert("cwd".into(), Value::String(root.to_string_lossy().into_owned()));
+        data.insert(
+            "cwd".into(),
+            Value::String(root.to_string_lossy().into_owned()),
+        );
     }
     if outside && is_claude(data) {
-        let program = data.get("program").and_then(Value::as_str).map(str::to_string);
-        data.insert("resume".into(), Value::String(crate::backend::agent::claude_resume(program.as_deref(), None, true)));
+        let program = data
+            .get("program")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        data.insert(
+            "resume".into(),
+            Value::String(crate::backend::agent::claude_resume(
+                program.as_deref(),
+                None,
+                true,
+            )),
+        );
     }
 }
 
@@ -94,17 +114,24 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
     if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
         for (id, pane) in panes.iter_mut() {
             let kind = pane["kind"].clone();
-            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else { continue };
+            let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else {
+                continue;
+            };
             for key in PATH_KEYS {
                 if let Some(text) = data.get(*key).and_then(Value::as_str) {
                     let path = Path::new(text);
                     if path.is_relative() {
                         let absolute = root.join(text.replace('/', std::path::MAIN_SEPARATOR_STR));
-                        data.insert((*key).into(), Value::String(absolute.to_string_lossy().into_owned()));
+                        data.insert(
+                            (*key).into(),
+                            Value::String(absolute.to_string_lossy().into_owned()),
+                        );
                     }
                 }
             }
-            let saved = machine.and_then(|m| m["panes"].get(id)).filter(|saved| saved["kind"] == kind);
+            let saved = machine
+                .and_then(|m| m["panes"].get(id))
+                .filter(|saved| saved["kind"] == kind);
             if let Some(saved) = saved {
                 for key in MACHINE_KEYS {
                     if let Some(value) = saved["data"].get(*key) {
@@ -142,13 +169,19 @@ pub fn preset(layout: &Value, root: &Path) -> Value {
 
 /// `path` relative to `root` with forward slashes, when it is inside it.
 fn relative(path: &Path, root: &Path) -> Option<String> {
-    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let key = |p: &Path| {
+        p.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
     let (full, base) = (key(path), key(root));
     if full == base {
         return Some(".".into());
     }
     let original = path.to_string_lossy().replace('\\', "/");
-    full.strip_prefix(&format!("{base}/")).map(|_| original[base.len() + 1..].to_string())
+    full.strip_prefix(&format!("{base}/"))
+        .map(|_| original[base.len() + 1..].to_string())
 }
 
 /// Read the folder's file.
@@ -170,8 +203,14 @@ mod tests {
     #[test]
     fn paths_inside_the_folder_become_relative() {
         let root = Path::new(r"C:\repos\den");
-        assert_eq!(relative(Path::new(r"C:\repos\den\src\main.rs"), root).as_deref(), Some("src/main.rs"));
-        assert_eq!(relative(Path::new(r"C:\Repos\Den"), root).as_deref(), Some("."));
+        assert_eq!(
+            relative(Path::new(r"C:\repos\den\src\main.rs"), root).as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            relative(Path::new(r"C:\Repos\Den"), root).as_deref(),
+            Some(".")
+        );
         assert_eq!(relative(Path::new(r"C:\repos\den2\x"), root), None);
     }
 
@@ -212,7 +251,10 @@ mod tests {
                 "3": { "kind": "Terminal", "data": { "cwd": root.join("gone").to_string_lossy(), "program": null } }
             }
         });
-        for back in [restore(layout.clone(), root, Some(&layout)), preset(&layout, root)] {
+        for back in [
+            restore(layout.clone(), root, Some(&layout)),
+            preset(&layout, root),
+        ] {
             for id in ["1", "2", "3"] {
                 assert_eq!(back["panes"][id]["data"]["cwd"], here);
             }
@@ -233,14 +275,26 @@ mod tests {
             }
         });
         let shared = shareable(&full, root);
-        assert_eq!(shared["panes"]["1"]["data"], json!({ "program": "claude", "resume": "claude" }));
-        assert_eq!(shared["panes"]["2"]["data"], json!({ "program": null, "resume": null }));
+        assert_eq!(
+            shared["panes"]["1"]["data"],
+            json!({ "program": "claude", "resume": "claude" })
+        );
+        assert_eq!(
+            shared["panes"]["2"]["data"],
+            json!({ "program": null, "resume": null })
+        );
         // Reopened on this machine, each tab resumes its own conversation.
         let back = restore(shared.clone(), root, Some(&full));
-        assert_eq!(back["panes"]["1"]["data"]["resume"], "claude --resume abc-123");
+        assert_eq!(
+            back["panes"]["1"]["data"]["resume"],
+            "claude --resume abc-123"
+        );
         assert_eq!(back["panes"]["2"]["data"]["resume"], json!(null));
         // As a preset, with no session behind it, it starts anew.
-        assert_eq!(preset(&full, root)["panes"]["1"]["data"]["resume"], "claude");
+        assert_eq!(
+            preset(&full, root)["panes"]["1"]["data"]["resume"],
+            "claude"
+        );
     }
 
     #[test]
@@ -260,6 +314,9 @@ mod tests {
         let shared = shareable(&full, root);
         assert!(shared["floats"][0].get("bounds").is_none());
         let back = restore(shared, root, Some(&full));
-        assert_eq!(back["floats"][0]["bounds"], json!([10.0, 20.0, 800.0, 600.0]));
+        assert_eq!(
+            back["floats"][0]["bounds"],
+            json!([10.0, 20.0, 800.0, 600.0])
+        );
     }
 }

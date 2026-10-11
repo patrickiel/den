@@ -12,7 +12,11 @@ use regex::Regex;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Link {
     Url(String),
-    File { path: PathBuf, line: Option<u32>, column: Option<u32> },
+    File {
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
 }
 
 /// Characters that end a token; parentheses stay, for `path(12,3)`.
@@ -30,7 +34,12 @@ static POSITION: LazyLock<Regex> = LazyLock::new(|| {
 /// The link in `line` (one character per cell) that covers column `col`,
 /// with the columns it spans. Relative paths resolve against `cwd`; a path
 /// counts only when `exists` says so.
-pub fn find(line: &[char], col: usize, cwd: &Path, exists: impl Fn(&Path) -> bool) -> Option<(Range<usize>, Link)> {
+pub fn find(
+    line: &[char],
+    col: usize,
+    cwd: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<(Range<usize>, Link)> {
     if col >= line.len() || is_break(line[col]) {
         return None;
     }
@@ -78,7 +87,11 @@ fn file_link(token: &str, cwd: &Path, exists: &impl Fn(&Path) -> bool) -> Option
     let line = number("line").or_else(|| number("pline"));
     let column = number("col").or_else(|| number("pcol"));
     let path = Path::new(raw);
-    let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
     exists(&path).then_some(Link::File { path, line, column })
 }
 
@@ -113,10 +126,20 @@ mod tests {
     #[test]
     fn a_relative_path_with_a_position() {
         let text = "error at src/main.rs:12:5: oops";
-        let (range, link) = find(&chars(text), at(text, "main"), &cwd(), exists(&["C:/work/src/main.rs"])).unwrap();
+        let (range, link) = find(
+            &chars(text),
+            at(text, "main"),
+            &cwd(),
+            exists(&["C:/work/src/main.rs"]),
+        )
+        .unwrap();
         assert_eq!(
             link,
-            Link::File { path: "C:/work/src/main.rs".into(), line: Some(12), column: Some(5) }
+            Link::File {
+                path: "C:/work/src/main.rs".into(),
+                line: Some(12),
+                column: Some(5)
+            }
         );
         assert_eq!(range, at(text, "src")..at(text, ": oops"));
     }
@@ -125,21 +148,54 @@ mod tests {
     fn the_parenthesised_position_form() {
         let text = "src/app.ts(3,14): error TS2304";
         let (_, link) = find(&chars(text), 2, &cwd(), exists(&["C:/work/src/app.ts"])).unwrap();
-        assert_eq!(link, Link::File { path: "C:/work/src/app.ts".into(), line: Some(3), column: Some(14) });
+        assert_eq!(
+            link,
+            Link::File {
+                path: "C:/work/src/app.ts".into(),
+                line: Some(3),
+                column: Some(14)
+            }
+        );
     }
 
     #[test]
     fn an_absolute_windows_path_keeps_its_drive() {
         let text = r"at C:\code\x.rs:7";
-        let (_, link) = find(&chars(text), at(text, "code"), &cwd(), exists(&[r"C:\code\x.rs"])).unwrap();
-        assert_eq!(link, Link::File { path: r"C:\code\x.rs".into(), line: Some(7), column: None });
+        let (_, link) = find(
+            &chars(text),
+            at(text, "code"),
+            &cwd(),
+            exists(&[r"C:\code\x.rs"]),
+        )
+        .unwrap();
+        assert_eq!(
+            link,
+            Link::File {
+                path: r"C:\code\x.rs".into(),
+                line: Some(7),
+                column: None
+            }
+        );
     }
 
     #[test]
     fn a_path_in_parentheses() {
         let text = "(see docs/guide.md)";
-        let (_, link) = find(&chars(text), at(text, "guide"), &cwd(), exists(&["C:/work/docs/guide.md"])).unwrap();
-        assert_eq!(link, Link::File { path: "C:/work/docs/guide.md".into(), line: None, column: None });
+        let (_, link) = find(
+            &chars(text),
+            at(text, "guide"),
+            &cwd(),
+            exists(&["C:/work/docs/guide.md"]),
+        )
+        .unwrap();
+        assert_eq!(
+            link,
+            Link::File {
+                path: "C:/work/docs/guide.md".into(),
+                line: None,
+                column: None
+            }
+        );
     }
 
     #[test]

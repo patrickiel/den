@@ -27,16 +27,26 @@ pub fn marks(base: &str, current: &str) -> Vec<(usize, Mark)> {
     if base.len() > MAX_BYTES || current.len() > MAX_BYTES {
         return Vec::new();
     }
-    let current = if current.contains('\r') { Cow::Owned(current.replace("\r\n", "\n")) } else { Cow::Borrowed(current) };
+    let current = if current.contains('\r') {
+        Cow::Owned(current.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(current)
+    };
     // This runs on every keystroke: a rougher diff beats a long one.
-    let diff = TextDiff::configure().timeout(Duration::from_millis(200)).diff_lines(base, &*current);
+    let diff = TextDiff::configure()
+        .timeout(Duration::from_millis(200))
+        .diff_lines(base, &*current);
     let mut out = Vec::new();
     for op in diff.ops() {
         match *op {
             DiffOp::Equal { .. } => {}
-            DiffOp::Insert { new_index, new_len, .. } => out.extend((new_index..new_index + new_len).map(|line| (line, Mark::Added))),
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => out.extend((new_index..new_index + new_len).map(|line| (line, Mark::Added))),
             DiffOp::Delete { new_index, .. } => out.push((new_index, Mark::Deleted)),
-            DiffOp::Replace { new_index, new_len, .. } => out.extend((new_index..new_index + new_len).map(|line| (line, Mark::Modified))),
+            DiffOp::Replace {
+                new_index, new_len, ..
+            } => out.extend((new_index..new_index + new_len).map(|line| (line, Mark::Modified))),
         }
     }
     out

@@ -53,7 +53,9 @@ pub fn apply_pending() {
 }
 
 fn apply_pending_in(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(id) = name.strip_suffix(REMOVE).filter(|id| valid_id(id)) {
@@ -80,7 +82,9 @@ pub fn installed() -> Vec<Installed> {
 }
 
 fn installed_in(dir: &Path) -> Vec<Installed> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut installed: Vec<_> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
@@ -89,7 +93,14 @@ fn installed_in(dir: &Path) -> Vec<Installed> {
             valid_id(&id).then(|| {
                 let dir = e.path();
                 let manifest = read_manifest(&dir).and_then(|m| {
-                    if m.id == id { Ok(m) } else { Err(format!("Its {MANIFEST} has the id \"{}\", but the folder is \"{id}\".", m.id)) }
+                    if m.id == id {
+                        Ok(m)
+                    } else {
+                        Err(format!(
+                            "Its {MANIFEST} has the id \"{}\", but the folder is \"{id}\".",
+                            m.id
+                        ))
+                    }
                 });
                 Installed { id, dir, manifest }
             })
@@ -100,7 +111,8 @@ fn installed_in(dir: &Path) -> Vec<Installed> {
 }
 
 fn read_manifest(dir: &Path) -> Result<Manifest, String> {
-    let text = std::fs::read_to_string(dir.join(MANIFEST)).map_err(|_| format!("No {MANIFEST}."))?;
+    let text =
+        std::fs::read_to_string(dir.join(MANIFEST)).map_err(|_| format!("No {MANIFEST}."))?;
     Manifest::parse(&text)
 }
 
@@ -108,7 +120,10 @@ fn read_manifest(dir: &Path) -> Result<Manifest, String> {
 
 /// From den to an extension's thread.
 pub enum Message {
-    Event { name: String, data: Value },
+    Event {
+        name: String,
+        data: Value,
+    },
     /// The last message; answered once the extension has deactivated.
     Deactivate(mpsc::Sender<()>),
 }
@@ -119,19 +134,48 @@ pub enum Report {
     Failed(String, String),
     Toast(String, String),
     /// Its buttons for the windows on a folder (`root`, as den sent it).
-    Buttons { id: String, root: String, buttons: Vec<Button> },
+    Buttons {
+        id: String,
+        root: String,
+        buttons: Vec<Button>,
+    },
     /// A command to run in a new terminal of the window on `root`.
-    Run { root: String, command: String, cwd: Option<String> },
+    Run {
+        root: String,
+        command: String,
+        cwd: Option<String>,
+    },
     /// A file to open in the window on `root`, at a position if given.
-    OpenFile { root: String, path: String, line: Option<u32>, column: Option<u32> },
+    OpenFile {
+        root: String,
+        path: String,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
     /// A tab of its view `view` in the window on `root`.
-    OpenView { id: String, root: String, view: String },
+    OpenView {
+        id: String,
+        root: String,
+        view: String,
+    },
     /// What its view `view` on `root` shows, laid over what it showed.
-    SetView { id: String, root: String, view: String, content: Box<view::Content> },
+    SetView {
+        id: String,
+        root: String,
+        view: String,
+        content: Box<view::Content>,
+    },
     /// A question for the user in the window on `root`.
-    Prompt { id: String, root: String, prompt: view::Prompt },
+    Prompt {
+        id: String,
+        root: String,
+        prompt: view::Prompt,
+    },
     /// A change to show side by side in the window on `root`.
-    OpenDiff { root: String, diff: view::Diff },
+    OpenDiff {
+        root: String,
+        diff: view::Diff,
+    },
     Copy(String),
 }
 
@@ -139,7 +183,12 @@ pub enum Report {
 /// DLL, activate it, then hand it the messages sent here. How that goes
 /// comes back as [`Report`]s.
 /// `settings` are its settings' values, for its `Context`.
-pub fn start(manifest: Manifest, dir: PathBuf, settings: serde_json::Map<String, Value>, reports: UnboundedSender<Report>) -> mpsc::Sender<Message> {
+pub fn start(
+    manifest: Manifest,
+    dir: PathBuf,
+    settings: serde_json::Map<String, Value>,
+    reports: UnboundedSender<Report>,
+) -> mpsc::Sender<Message> {
     let (tx, rx) = mpsc::channel();
     let name = format!("extension {}", manifest.id);
     let spawned = std::thread::Builder::new().name(name).spawn({
@@ -153,7 +202,13 @@ pub fn start(manifest: Manifest, dir: PathBuf, settings: serde_json::Map<String,
     tx
 }
 
-fn run(manifest: Manifest, dir: PathBuf, settings: serde_json::Map<String, Value>, messages: mpsc::Receiver<Message>, reports: UnboundedSender<Report>) {
+fn run(
+    manifest: Manifest,
+    dir: PathBuf,
+    settings: serde_json::Map<String, Value>,
+    messages: mpsc::Receiver<Message>,
+    reports: UnboundedSender<Report>,
+) {
     let id = manifest.id.clone();
     let (api, state) = match activate(&manifest, &dir, settings, reports.clone()) {
         Ok(running) => running,
@@ -168,7 +223,10 @@ fn run(manifest: Manifest, dir: PathBuf, settings: serde_json::Map<String, Value
     for message in messages {
         match message {
             Message::Event { name, data } => {
-                let (Ok(name), Ok(data)) = (CString::new(name), CString::new(data.to_string())) else { continue };
+                let (Ok(name), Ok(data)) = (CString::new(name), CString::new(data.to_string()))
+                else {
+                    continue;
+                };
                 // SAFETY: `state` came from this extension's `activate`; the strings live for the call.
                 unsafe { (api.event)(state, name.as_ptr(), data.as_ptr()) };
             }
@@ -196,9 +254,11 @@ fn activate(
     }
     // SAFETY: loading runs the DLL's initialisers. Installing it was the
     // user's decision to trust it; den can't check native code.
-    let library = unsafe { libloading::Library::new(&path) }.map_err(|e| format!("Cannot load {file}: {e}"))?;
+    let library = unsafe { libloading::Library::new(&path) }
+        .map_err(|e| format!("Cannot load {file}: {e}"))?;
     // SAFETY: the symbol has the type `register!` gives it.
-    let entry: abi::Entry = *unsafe { library.get::<abi::Entry>(den_extension::ENTRY) }.map_err(|_| "Not a den extension: it exports no den_extension_v1.".to_string())?;
+    let entry: abi::Entry = *unsafe { library.get::<abi::Entry>(den_extension::ENTRY) }
+        .map_err(|_| "Not a den extension: it exports no den_extension_v1.".to_string())?;
     // Never unloaded: code of it may run until den exits (its threads, statics).
     std::mem::forget(library);
     // SAFETY: the entry returns a pointer to a static table, or null.
@@ -208,23 +268,37 @@ fn activate(
     }
     let api: &'static abi::ExtensionApi = unsafe { &*api };
     if api.version != API_VERSION {
-        return Err(format!("Built for extension API {}, this den has {API_VERSION}.", api.version));
+        return Err(format!(
+            "Built for extension API {}, this den has {API_VERSION}.",
+            api.version
+        ));
     }
 
     let data_dir = data_dir(&manifest.id);
-    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Cannot create {}: {e}", data_dir.display()))?;
-    let context = Context { den_version: crate::update::current_version().into(), data_dir, settings };
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("Cannot create {}: {e}", data_dir.display()))?;
+    let context = Context {
+        den_version: crate::update::current_version().into(),
+        data_dir,
+        settings,
+    };
     let info = json!({ "id": manifest.id, "den_version": context.den_version, "data_dir": context.data_dir, "api": API_VERSION });
     // Both live as long as the process, as `HostApi` promises.
     let views = manifest.views.iter().map(|v| v.id.clone()).collect();
-    let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx { id: manifest.id.clone(), info, views, reports }));
+    let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx {
+        id: manifest.id.clone(),
+        info,
+        views,
+        reports,
+    }));
     let host: &'static abi::HostApi = Box::leak(Box::new(abi::HostApi {
         version: API_VERSION,
         ctx: (ctx as *const HostCtx).cast_mut().cast(),
         call: host_call,
         free: host_free,
     }));
-    let context = CString::new(serde_json::to_string(&context).unwrap_or_default()).unwrap_or_default();
+    let context =
+        CString::new(serde_json::to_string(&context).unwrap_or_default()).unwrap_or_default();
     // SAFETY: valid pointers; the extension catches its own panics.
     let state = unsafe { (api.activate)(host, context.as_ptr()) };
     if state.is_null() {
@@ -247,14 +321,21 @@ impl HostCtx {
     fn view(&self, args: &Value, method: &str) -> Result<String, String> {
         let view = string(args, "view", method)?;
         if !self.views.contains(&view) {
-            return Err(format!("{method}: the manifest declares no view \"{view}\""));
+            return Err(format!(
+                "{method}: the manifest declares no view \"{view}\""
+            ));
         }
         Ok(view)
     }
 
     /// The host methods of this API version.
     fn call(&self, method: &str, args: &Value) -> Result<Value, String> {
-        let message = || args["message"].as_str().map(str::to_string).ok_or_else(|| format!("{method} needs a \"message\""));
+        let message = || {
+            args["message"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{method} needs a \"message\""))
+        };
         match method {
             "log" => {
                 log(&self.id, &message()?);
@@ -264,40 +345,76 @@ impl HostCtx {
             "info" => Ok(self.info.clone()),
             "set_buttons" => {
                 let root = string(args, "root", method)?;
-                let buttons: Vec<Button> = serde_json::from_value(args["buttons"].clone()).map_err(|e| format!("set_buttons: bad \"buttons\": {e}"))?;
-                self.report(Report::Buttons { id: self.id.clone(), root, buttons })
+                let buttons: Vec<Button> = serde_json::from_value(args["buttons"].clone())
+                    .map_err(|e| format!("set_buttons: bad \"buttons\": {e}"))?;
+                self.report(Report::Buttons {
+                    id: self.id.clone(),
+                    root,
+                    buttons,
+                })
             }
             "run_in_terminal" => {
-                let (root, command) = (string(args, "root", method)?, string(args, "command", method)?);
+                let (root, command) = (
+                    string(args, "root", method)?,
+                    string(args, "command", method)?,
+                );
                 let cwd = args["cwd"].as_str().map(str::to_string);
                 self.report(Report::Run { root, command, cwd })
             }
             "open_file" => {
                 let (root, path) = (string(args, "root", method)?, string(args, "path", method)?);
-                let number = |key: &str| args[key].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0);
-                self.report(Report::OpenFile { root, path, line: number("line"), column: number("column") })
+                let number = |key: &str| {
+                    args[key]
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .filter(|n| *n > 0)
+                };
+                self.report(Report::OpenFile {
+                    root,
+                    path,
+                    line: number("line"),
+                    column: number("column"),
+                })
             }
             "open_view" => {
                 let (root, view) = (string(args, "root", method)?, self.view(args, method)?);
-                self.report(Report::OpenView { id: self.id.clone(), root, view })
+                self.report(Report::OpenView {
+                    id: self.id.clone(),
+                    root,
+                    view,
+                })
             }
             "set_view" => {
                 let (root, view) = (string(args, "root", method)?, self.view(args, method)?);
-                let content = serde_json::from_value(args["content"].clone()).map_err(|e| format!("set_view: bad \"content\": {e}"))?;
-                self.report(Report::SetView { id: self.id.clone(), root, view, content: Box::new(content) })
+                let content = serde_json::from_value(args["content"].clone())
+                    .map_err(|e| format!("set_view: bad \"content\": {e}"))?;
+                self.report(Report::SetView {
+                    id: self.id.clone(),
+                    root,
+                    view,
+                    content: Box::new(content),
+                })
             }
             "prompt" => {
                 let root = string(args, "root", method)?;
-                let prompt = serde_json::from_value(args["prompt"].clone()).map_err(|e| format!("prompt: bad \"prompt\": {e}"))?;
-                self.report(Report::Prompt { id: self.id.clone(), root, prompt })
+                let prompt = serde_json::from_value(args["prompt"].clone())
+                    .map_err(|e| format!("prompt: bad \"prompt\": {e}"))?;
+                self.report(Report::Prompt {
+                    id: self.id.clone(),
+                    root,
+                    prompt,
+                })
             }
             "open_diff" => {
                 let root = string(args, "root", method)?;
-                let diff = serde_json::from_value(args["diff"].clone()).map_err(|e| format!("open_diff: bad \"diff\": {e}"))?;
+                let diff = serde_json::from_value(args["diff"].clone())
+                    .map_err(|e| format!("open_diff: bad \"diff\": {e}"))?;
                 self.report(Report::OpenDiff { root, diff })
             }
             "copy" => self.report(Report::Copy(string(args, "text", method)?)),
-            _ => Err(format!("den has no method \"{method}\" (extension API {API_VERSION})")),
+            _ => Err(format!(
+                "den has no method \"{method}\" (extension API {API_VERSION})"
+            )),
         }
     }
 }
@@ -305,17 +422,26 @@ impl HostCtx {
 impl HostCtx {
     /// Hand `report` to den's UI thread.
     fn report(&self, report: Report) -> Result<Value, String> {
-        self.reports.unbounded_send(report).map_err(|_| "den is closing".to_string())?;
+        self.reports
+            .unbounded_send(report)
+            .map_err(|_| "den is closing".to_string())?;
         Ok(Value::Null)
     }
 }
 
 /// `args[key]`, which `method` needs.
 fn string(args: &Value, key: &str, method: &str) -> Result<String, String> {
-    args[key].as_str().map(str::to_string).ok_or_else(|| format!("{method} needs a \"{key}\""))
+    args[key]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{method} needs a \"{key}\""))
 }
 
-unsafe extern "C" fn host_call(ctx: *mut c_void, method: *const c_char, args: *const c_char) -> *mut c_char {
+unsafe extern "C" fn host_call(
+    ctx: *mut c_void,
+    method: *const c_char,
+    args: *const c_char,
+) -> *mut c_char {
     let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: `ctx` is the leaked `HostCtx` of this extension; the strings are C strings or null.
         let ctx = unsafe { &*ctx.cast::<HostCtx>() };
@@ -329,7 +455,9 @@ unsafe extern "C" fn host_call(ctx: *mut c_void, method: *const c_char, args: *c
         Err(error) => json!({ "error": error }),
     };
     // JSON escapes NUL, so this never fails.
-    CString::new(reply.to_string()).unwrap_or_default().into_raw()
+    CString::new(reply.to_string())
+        .unwrap_or_default()
+        .into_raw()
 }
 
 unsafe extern "C" fn host_free(text: *mut c_char) {
@@ -340,7 +468,13 @@ unsafe extern "C" fn host_free(text: *mut c_char) {
 }
 
 unsafe fn text(ptr: *const c_char) -> String {
-    if ptr.is_null() { String::new() } else { unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned() }
+    if ptr.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 static LOG: Mutex<()> = Mutex::new(());
@@ -350,8 +484,14 @@ pub fn log(id: &str, message: &str) {
     let _guard = LOG.lock();
     let path = log_path();
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         let _ = writeln!(file, "{} [{id}] {message}", utc(secs));
     }
 }
@@ -368,7 +508,12 @@ fn utc(secs: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", rest / 3600, rest / 60 % 60, rest % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
 }
 
 // -- Installing from GitHub ------------------------------------------------------
@@ -380,14 +525,22 @@ pub fn parse_repository(text: &str) -> Result<String, String> {
         .strip_prefix("https://")
         .or_else(|| text.strip_prefix("http://"))
         .map(|rest| rest.strip_prefix("www.").unwrap_or(rest))
-        .map(|rest| rest.strip_prefix("github.com/").ok_or("Only GitHub repositories can be installed from."))
+        .map(|rest| {
+            rest.strip_prefix("github.com/")
+                .ok_or("Only GitHub repositories can be installed from.")
+        })
         .transpose()?
         .unwrap_or(text);
     let mut parts = path.split('/');
     let (Some(owner), Some(repo)) = (parts.next(), parts.next()) else {
         return Err("Type the repository as owner/repo.".into());
     };
-    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) && !s.starts_with('.');
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            && !s.starts_with('.')
+    };
     if !ok(owner) || !ok(repo) {
         return Err("Type the repository as owner/repo.".into());
     }
@@ -401,8 +554,12 @@ fn release_url(repo: &str, file: &str) -> String {
 /// The manifest of `repo`'s latest release.
 pub fn fetch_manifest(repo: &str) -> Result<Manifest, String> {
     let text = match http::AGENT.get(&release_url(repo, MANIFEST)).call() {
-        Ok(response) => response.into_string().map_err(|e| format!("Cannot read {repo}'s {MANIFEST}: {e}"))?,
-        Err(ureq::Error::Status(404, _)) => return Err(format!("{repo} has no release with an {MANIFEST}.")),
+        Ok(response) => response
+            .into_string()
+            .map_err(|e| format!("Cannot read {repo}'s {MANIFEST}: {e}"))?,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err(format!("{repo} has no release with an {MANIFEST}."));
+        }
         Err(e) => return Err(format!("Cannot reach GitHub: {e}")),
     };
     let mut manifest = Manifest::parse(&text)?;
@@ -415,7 +572,8 @@ pub fn fetch_manifest(repo: &str) -> Result<Manifest, String> {
 // -- The index ---------------------------------------------------------------
 
 /// Where den reads the curated list of extensions.
-const INDEX_URL: &str = "https://raw.githubusercontent.com/patrickiel/den-extensions/main/index.json";
+const INDEX_URL: &str =
+    "https://raw.githubusercontent.com/patrickiel/den-extensions/main/index.json";
 /// Overrides [`INDEX_URL`] with another URL or a local file, for testing an index.
 const INDEX_ENV: &str = "DEN_EXTENSION_INDEX";
 
@@ -454,17 +612,27 @@ fn index_cache() -> PathBuf {
 }
 
 fn parse_index(text: &str) -> Result<Vec<Listing>, String> {
-    let index: Index = serde_json::from_str(text).map_err(|e| format!("Bad extension index: {e}"))?;
+    let index: Index =
+        serde_json::from_str(text).map_err(|e| format!("Bad extension index: {e}"))?;
     // One per id, and only ids that make safe folder names.
     let mut seen = std::collections::HashSet::new();
-    Ok(index.extensions.into_iter().filter(|l| valid_id(&l.id) && seen.insert(l.id.clone())).collect())
+    Ok(index
+        .extensions
+        .into_iter()
+        .filter(|l| valid_id(&l.id) && seen.insert(l.id.clone()))
+        .collect())
 }
 
 /// The index from the web (or [`INDEX_ENV`]), cached for [`cached_index`].
 pub fn fetch_index() -> Result<Vec<Listing>, String> {
     let source = std::env::var(INDEX_ENV).unwrap_or_else(|_| INDEX_URL.to_string());
     let text = if source.contains("://") {
-        http::AGENT.get(&source).call().map_err(|e| format!("Cannot reach the extension index: {e}"))?.into_string().map_err(|e| e.to_string())?
+        http::AGENT
+            .get(&source)
+            .call()
+            .map_err(|e| format!("Cannot reach the extension index: {e}"))?
+            .into_string()
+            .map_err(|e| e.to_string())?
     } else {
         std::fs::read_to_string(&source).map_err(|e| format!("Cannot read {source}: {e}"))?
     };
@@ -480,8 +648,16 @@ pub fn icon_path(listing: &Listing) -> Option<PathBuf> {
     if listing.icon_url.is_empty() {
         return None;
     }
-    let ext = if listing.icon_url.to_lowercase().ends_with(".svg") { "svg" } else { "png" };
-    Some(crate::settings::data_dir().join("extensions-icons").join(format!("{}-{}.{ext}", listing.id, listing.version)))
+    let ext = if listing.icon_url.to_lowercase().ends_with(".svg") {
+        "svg"
+    } else {
+        "png"
+    };
+    Some(
+        crate::settings::data_dir()
+            .join("extensions-icons")
+            .join(format!("{}-{}.{ext}", listing.id, listing.version)),
+    )
 }
 
 /// The bytes at `source`, a URL or (for a local test index) a file, up to `limit`.
@@ -491,7 +667,8 @@ fn read_source(source: &str, limit: u64) -> Result<Vec<u8>, http::Error> {
     }
     let file = std::fs::File::open(source).map_err(|_| http::Error::NotFound)?;
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit), &mut bytes).map_err(|e| http::Error::Other(e.to_string()))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, limit), &mut bytes)
+        .map_err(|e| http::Error::Other(e.to_string()))?;
     Ok(bytes)
 }
 
@@ -522,7 +699,12 @@ pub fn fetch_readme(url: &str) -> Result<String, String> {
 /// The index as last fetched, and how old that is; nothing before the first fetch.
 pub fn cached_index() -> Option<(Vec<Listing>, std::time::Duration)> {
     let path = index_cache();
-    let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().unwrap_or_default();
+    let age = std::fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .unwrap_or_default();
     Some((parse_index(&std::fs::read_to_string(path).ok()?).ok()?, age))
 }
 
@@ -538,11 +720,28 @@ pub fn install(manifest: &Manifest, cancel: &Cancel, progress: Progress) -> Resu
     let sha256 = manifest.asset_sha256();
     // The release has a zip per platform it was built for; none for this
     // one is the usual reason a download fails.
-    http::download(&release_url(&manifest.repository, &manifest.asset()), &archive, sha256, "Downloading", cancel, progress).map_err(|err| {
-        if err.contains("status code 404") { format!("{} has no build for {} in its latest release.", manifest.name, den_extension::PLATFORM) } else { err }
+    http::download(
+        &release_url(&manifest.repository, &manifest.asset()),
+        &archive,
+        sha256,
+        "Downloading",
+        cancel,
+        progress,
+    )
+    .map_err(|err| {
+        if err.contains("status code 404") {
+            format!(
+                "{} has no build for {} in its latest release.",
+                manifest.name,
+                den_extension::PLATFORM
+            )
+        } else {
+            err
+        }
     })?;
     let pending = dir.join(format!("{}{PENDING}", manifest.id));
-    let unpacked = process::unpack(&archive, &pending, "the extension").and_then(|()| check_unpacked(manifest, &pending));
+    let unpacked = process::unpack(&archive, &pending, "the extension")
+        .and_then(|()| check_unpacked(manifest, &pending));
     let _ = std::fs::remove_file(&archive);
     if let Err(err) = unpacked {
         let _ = std::fs::remove_dir_all(&pending);
@@ -556,7 +755,10 @@ pub fn install(manifest: &Manifest, cancel: &Cancel, progress: Progress) -> Resu
 fn check_unpacked(manifest: &Manifest, pending: &Path) -> Result<(), String> {
     let mut unpacked = read_manifest(pending)?;
     if unpacked.id != manifest.id {
-        return Err(format!("The release holds \"{}\", not \"{}\".", unpacked.id, manifest.id));
+        return Err(format!(
+            "The release holds \"{}\", not \"{}\".",
+            unpacked.id, manifest.id
+        ));
     }
     unpacked.check_api()?;
     if !pending.join(unpacked.library()).is_file() {
@@ -606,9 +808,21 @@ mod tests {
         let found = installed_in(&dir);
         let ids: Vec<_> = found.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["a-ext", "b-ext", "no-manifest"]);
-        assert!(found[0].manifest.as_ref().unwrap_err().contains("\"other\""));
+        assert!(
+            found[0]
+                .manifest
+                .as_ref()
+                .unwrap_err()
+                .contains("\"other\"")
+        );
         assert!(found[1].manifest.is_ok());
-        assert!(found[2].manifest.as_ref().unwrap_err().contains("No extension.json"));
+        assert!(
+            found[2]
+                .manifest
+                .as_ref()
+                .unwrap_err()
+                .contains("No extension.json")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -623,7 +837,9 @@ mod tests {
         put(&dir, "fresh.pending", "fresh");
         apply_pending_in(&dir);
         assert!(!dir.join("old").exists() && !dir.join("old.remove").exists());
-        assert!(dir.join("up").join("new.txt").is_file() && !dir.join("up").join(MANIFEST).exists());
+        assert!(
+            dir.join("up").join("new.txt").is_file() && !dir.join("up").join(MANIFEST).exists()
+        );
         assert!(dir.join("fresh").join(MANIFEST).is_file() && !dir.join("fresh.pending").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -631,9 +847,18 @@ mod tests {
     #[test]
     fn parses_repositories() {
         assert_eq!(parse_repository("me/ai-usage").unwrap(), "me/ai-usage");
-        assert_eq!(parse_repository(" https://github.com/me/ai-usage/ ").unwrap(), "me/ai-usage");
-        assert_eq!(parse_repository("https://github.com/me/ai.usage.git").unwrap(), "me/ai.usage");
-        assert_eq!(parse_repository("https://github.com/me/x/releases/tag/v1").unwrap(), "me/x");
+        assert_eq!(
+            parse_repository(" https://github.com/me/ai-usage/ ").unwrap(),
+            "me/ai-usage"
+        );
+        assert_eq!(
+            parse_repository("https://github.com/me/ai.usage.git").unwrap(),
+            "me/ai.usage"
+        );
+        assert_eq!(
+            parse_repository("https://github.com/me/x/releases/tag/v1").unwrap(),
+            "me/x"
+        );
         assert!(parse_repository("https://gitlab.com/me/x").is_err());
         assert!(parse_repository("justaname").is_err());
         assert!(parse_repository("me/../x").is_err());
@@ -649,8 +874,17 @@ mod tests {
             { "repo": "me/future", "id": "future", "name": "F", "version": "1.0.0", "api": 99 }
         ] }"#;
         let listings = parse_index(text).unwrap();
-        assert_eq!(listings.iter().map(|l| l.repo.as_str()).collect::<Vec<_>>(), ["me/a", "me/future"]);
-        assert_eq!((listings[0].icon_url.as_str(), listings[0].readme_url.as_str()), ("https://x/icon.svg", ""));
+        assert_eq!(
+            listings.iter().map(|l| l.repo.as_str()).collect::<Vec<_>>(),
+            ["me/a", "me/future"]
+        );
+        assert_eq!(
+            (
+                listings[0].icon_url.as_str(),
+                listings[0].readme_url.as_str()
+            ),
+            ("https://x/icon.svg", "")
+        );
         assert!(listings[0].loadable() && !listings[1].loadable());
         assert!(parse_index("{ nope").is_err());
     }
@@ -664,57 +898,152 @@ mod tests {
         fetch_icon_to(&source.to_string_lossy(), &target).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "<svg/>");
         assert!(!target.with_extension("part").exists());
-        assert!(fetch_icon_to(&dir.join("gone.svg").to_string_lossy(), &dir.join("cache").join("y.svg")).is_err());
+        assert!(
+            fetch_icon_to(
+                &dir.join("gone.svg").to_string_lossy(),
+                &dir.join("cache").join("y.svg")
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn host_methods_answer_or_refuse() {
         let (tx, _rx) = futures::channel::mpsc::unbounded();
-        let ctx = HostCtx { id: "t".into(), info: json!({ "id": "t" }), views: vec!["graph".into()], reports: tx };
+        let ctx = HostCtx {
+            id: "t".into(),
+            info: json!({ "id": "t" }),
+            views: vec!["graph".into()],
+            reports: tx,
+        };
         assert_eq!(ctx.call("info", &Value::Null).unwrap()["id"], "t");
         assert!(ctx.call("toast", &json!({ "message": "hi" })).is_ok());
         assert!(ctx.call("toast", &json!({})).is_err());
-        assert!(ctx.call("nope", &Value::Null).unwrap_err().contains("no method"));
+        assert!(
+            ctx.call("nope", &Value::Null)
+                .unwrap_err()
+                .contains("no method")
+        );
     }
 
     #[test]
     fn views_are_only_the_manifests() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let ctx = HostCtx { id: "t".into(), info: Value::Null, views: vec!["graph".into()], reports: tx };
-        ctx.call("open_view", &json!({ "root": "C:/p", "view": "graph" })).unwrap();
+        let ctx = HostCtx {
+            id: "t".into(),
+            info: Value::Null,
+            views: vec!["graph".into()],
+            reports: tx,
+        };
+        ctx.call("open_view", &json!({ "root": "C:/p", "view": "graph" }))
+            .unwrap();
         assert!(matches!(rx.try_recv().unwrap(), Report::OpenView { view, .. } if view == "graph"));
-        assert!(ctx.call("open_view", &json!({ "root": "C:/p", "view": "other" })).unwrap_err().contains("no view"));
-        ctx.call("set_view", &json!({ "root": "C:/p", "view": "graph", "content": { "selected": "a" } })).unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Report::SetView { content, .. } if content.selected.as_deref() == Some("a") && content.rows.is_none()));
-        assert!(ctx.call("set_view", &json!({ "root": "C:/p", "view": "graph", "content": { "rows": 3 } })).is_err());
+        assert!(
+            ctx.call("open_view", &json!({ "root": "C:/p", "view": "other" }))
+                .unwrap_err()
+                .contains("no view")
+        );
+        ctx.call(
+            "set_view",
+            &json!({ "root": "C:/p", "view": "graph", "content": { "selected": "a" } }),
+        )
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::SetView { content, .. } if content.selected.as_deref() == Some("a") && content.rows.is_none())
+        );
+        assert!(
+            ctx.call(
+                "set_view",
+                &json!({ "root": "C:/p", "view": "graph", "content": { "rows": 3 } })
+            )
+            .is_err()
+        );
         ctx.call("prompt", &json!({ "root": "C:/p", "prompt": { "id": "q", "title": "Name?", "fields": [{ "id": "n" }] } })).unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Report::Prompt { prompt, .. } if prompt.fields[0].kind == den_extension::view::FieldKind::Text));
-        ctx.call("open_diff", &json!({ "root": "C:/p", "diff": { "path": "a.rs", "hash": "abc" } })).unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Report::OpenDiff { diff, .. } if diff.hash.as_deref() == Some("abc")));
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::Prompt { prompt, .. } if prompt.fields[0].kind == den_extension::view::FieldKind::Text)
+        );
+        ctx.call(
+            "open_diff",
+            &json!({ "root": "C:/p", "diff": { "path": "a.rs", "hash": "abc" } }),
+        )
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::OpenDiff { diff, .. } if diff.hash.as_deref() == Some("abc"))
+        );
     }
 
     #[test]
     fn buttons_and_terminals_go_to_the_ui_thread() {
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let ctx = HostCtx { id: "t".into(), info: Value::Null, views: Vec::new(), reports: tx };
+        let ctx = HostCtx {
+            id: "t".into(),
+            info: Value::Null,
+            views: Vec::new(),
+            reports: tx,
+        };
         let buttons = json!([{ "id": "build", "label": "Build", "icon": "hammer" }]);
-        ctx.call("set_buttons", &json!({ "root": "C:/p", "buttons": buttons })).unwrap();
+        ctx.call(
+            "set_buttons",
+            &json!({ "root": "C:/p", "buttons": buttons }),
+        )
+        .unwrap();
         match rx.try_recv().unwrap() {
             Report::Buttons { id, root, buttons } => {
                 assert_eq!((id.as_str(), root.as_str()), ("t", "C:/p"));
-                assert_eq!((buttons[0].label.as_str(), buttons[0].icon.as_str(), buttons[0].tooltip.as_str()), ("Build", "hammer", ""));
+                assert_eq!(
+                    (
+                        buttons[0].label.as_str(),
+                        buttons[0].icon.as_str(),
+                        buttons[0].tooltip.as_str()
+                    ),
+                    ("Build", "hammer", "")
+                );
             }
             _ => panic!("not buttons"),
         }
-        assert!(ctx.call("set_buttons", &json!({ "root": "C:/p", "buttons": [{ "label": "no id" }] })).is_err());
-        assert!(ctx.call("set_buttons", &json!({ "buttons": [] })).unwrap_err().contains("\"root\""));
-        ctx.call("run_in_terminal", &json!({ "root": "C:/p", "command": "cargo build" })).unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Report::Run { command, cwd: None, .. } if command == "cargo build"));
-        assert!(ctx.call("run_in_terminal", &json!({ "root": "C:/p" })).is_err());
-        ctx.call("open_file", &json!({ "root": "C:/p", "path": "C:/p/a.rs", "line": 12 })).unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Report::OpenFile { line: Some(12), column: None, .. }));
-        assert!(ctx.call("open_file", &json!({ "root": "C:/p" })).unwrap_err().contains("\"path\""));
+        assert!(
+            ctx.call(
+                "set_buttons",
+                &json!({ "root": "C:/p", "buttons": [{ "label": "no id" }] })
+            )
+            .is_err()
+        );
+        assert!(
+            ctx.call("set_buttons", &json!({ "buttons": [] }))
+                .unwrap_err()
+                .contains("\"root\"")
+        );
+        ctx.call(
+            "run_in_terminal",
+            &json!({ "root": "C:/p", "command": "cargo build" }),
+        )
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::Run { command, cwd: None, .. } if command == "cargo build")
+        );
+        assert!(
+            ctx.call("run_in_terminal", &json!({ "root": "C:/p" }))
+                .is_err()
+        );
+        ctx.call(
+            "open_file",
+            &json!({ "root": "C:/p", "path": "C:/p/a.rs", "line": 12 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Report::OpenFile {
+                line: Some(12),
+                column: None,
+                ..
+            }
+        ));
+        assert!(
+            ctx.call("open_file", &json!({ "root": "C:/p" }))
+                .unwrap_err()
+                .contains("\"path\"")
+        );
     }
 
     /// Loads a real DLL: `cargo build -p hello-extension`, then
@@ -722,32 +1051,58 @@ mod tests {
     #[test]
     #[ignore]
     fn loads_the_hello_extension() {
-        let dll = std::env::current_dir().unwrap().join("target/debug/hello_extension.dll");
-        assert!(dll.is_file(), "build it first: cargo build -p hello-extension");
+        let dll = std::env::current_dir()
+            .unwrap()
+            .join("target/debug/hello_extension.dll");
+        assert!(
+            dll.is_file(),
+            "build it first: cargo build -p hello-extension"
+        );
         let appdata = temp("appdata");
         // SAFETY: only this ignored test reads APPDATA while it runs.
         unsafe { std::env::set_var("APPDATA", &appdata) };
         let ext = dir().join("hello-extension");
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::copy(&dll, ext.join("hello_extension.dll")).unwrap();
-        std::fs::copy("examples/hello-extension/extension.json", ext.join(MANIFEST)).unwrap();
+        std::fs::copy(
+            "examples/hello-extension/extension.json",
+            ext.join(MANIFEST),
+        )
+        .unwrap();
 
         let found = installed();
         let manifest = found[0].manifest.clone().unwrap();
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         let messages = start(manifest, found[0].dir.clone(), Default::default(), tx);
         let mut next = || futures::executor::block_on(futures::StreamExt::next(&mut rx)).unwrap();
-        assert!(matches!(next(), Report::Toast(id, message) if id == "hello-extension" && message.contains("Hello from an extension")));
+        assert!(
+            matches!(next(), Report::Toast(id, message) if id == "hello-extension" && message.contains("Hello from an extension"))
+        );
         assert!(matches!(next(), Report::Loaded(id) if id == "hello-extension"));
-        messages.send(Message::Event { name: den_extension::events::WORKSPACE_OPENED.into(), data: json!({ "root": "C:\\project" }) }).unwrap();
+        messages
+            .send(Message::Event {
+                name: den_extension::events::WORKSPACE_OPENED.into(),
+                data: json!({ "root": "C:\\project" }),
+            })
+            .unwrap();
         let (done_tx, done_rx) = mpsc::channel();
         messages.send(Message::Deactivate(done_tx)).unwrap();
-        done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         let log = std::fs::read_to_string(log_path()).unwrap();
         assert!(log.contains("[hello-extension] loaded 0.1.0"), "{log}");
-        assert!(log.contains("[hello-extension] opened C:\\project"), "{log}");
+        assert!(
+            log.contains("[hello-extension] opened C:\\project"),
+            "{log}"
+        );
         assert!(log.contains("[hello-extension] goodbye"), "{log}");
-        assert!(crate::settings::data_dir().join("extensions-data").join("hello-extension").is_dir());
+        assert!(
+            crate::settings::data_dir()
+                .join("extensions-data")
+                .join("hello-extension")
+                .is_dir()
+        );
     }
 
     /// Installs task-buttons from the live index as the Extensions view does,
@@ -759,17 +1114,36 @@ mod tests {
         // SAFETY: only this ignored test reads APPDATA while it runs.
         unsafe { std::env::set_var("APPDATA", &appdata) };
         let listings = fetch_index().unwrap();
-        let listing = listings.iter().find(|l| l.id == "task-buttons").expect("task-buttons is in the index");
+        let listing = listings
+            .iter()
+            .find(|l| l.id == "task-buttons")
+            .expect("task-buttons is in the index");
         assert!(listing.loadable());
         assert!(cached_index().is_some_and(|(cached, _)| cached == listings));
         fetch_icon(listing).unwrap();
-        assert!(fetch_readme(&listing.readme_url).unwrap().contains("Task Buttons"));
+        assert!(
+            fetch_readme(&listing.readme_url)
+                .unwrap()
+                .contains("Task Buttons")
+        );
 
         let manifest = fetch_manifest(&listing.repo).unwrap();
-        assert_eq!((manifest.version.as_str(), manifest.repository.as_str()), (listing.version.as_str(), "patrickiel/task-buttons"));
-        assert_eq!(manifest.sha256.len(), 64, "the release's extension.json carries the zip's sha256");
+        assert_eq!(
+            (manifest.version.as_str(), manifest.repository.as_str()),
+            (listing.version.as_str(), "patrickiel/task-buttons")
+        );
+        assert_eq!(
+            manifest.sha256.len(),
+            64,
+            "the release's extension.json carries the zip's sha256"
+        );
         install(&manifest, &Cancel::default(), &mut |_, _, _| {}).unwrap();
-        assert!(dir().join("task-buttons.pending").join(manifest.library()).is_file());
+        assert!(
+            dir()
+                .join("task-buttons.pending")
+                .join(manifest.library())
+                .is_file()
+        );
 
         apply_pending();
         let found = installed();
@@ -787,8 +1161,14 @@ mod tests {
         }
         let (done_tx, done_rx) = mpsc::channel();
         messages.send(Message::Deactivate(done_tx)).unwrap();
-        done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(std::fs::read_to_string(log_path()).unwrap().contains("[task-buttons] loaded 0.1.0"));
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(log_path())
+                .unwrap()
+                .contains("[task-buttons] loaded 0.1.0")
+        );
     }
 
     #[test]

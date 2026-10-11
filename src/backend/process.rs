@@ -22,7 +22,13 @@ pub fn no_window(cmd: &mut Command) {
 /// outputs captured. The input goes from its own thread, so a long one
 /// cannot deadlock against a full output pipe.
 pub fn output_with_input(mut cmd: Command, stdin: Option<&str>) -> std::io::Result<Output> {
-    cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     no_window(&mut cmd);
     let mut child = cmd.spawn()?;
     if let (Some(text), Some(mut pipe)) = (stdin.map(str::to_string), child.stdin.take()) {
@@ -48,11 +54,21 @@ pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), Stri
     };
     let mut cmd = Command::new(tar);
     // bsdtar tells the format itself; GNU tar needs the compression named.
-    cmd.arg(if cfg!(target_os = "linux") { "-xzf" } else { "-xf" }).arg(archive).arg("-C").arg(into);
+    cmd.arg(if cfg!(target_os = "linux") {
+        "-xzf"
+    } else {
+        "-xf"
+    })
+    .arg(archive)
+    .arg("-C")
+    .arg(into);
     no_window(&mut cmd);
     let out = cmd.output().map_err(|e| format!("Cannot run tar: {e}"))?;
     if !out.status.success() {
-        return Err(format!("Unpacking {what} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "Unpacking {what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }

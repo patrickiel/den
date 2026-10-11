@@ -38,7 +38,13 @@ pub struct GroupButtons {
 
 impl Default for GroupButtons {
     fn default() -> Self {
-        Self { shell: true, browser: true, split: true, maximize: true, tiles: true }
+        Self {
+            shell: true,
+            browser: true,
+            split: true,
+            maximize: true,
+            tiles: true,
+        }
     }
 }
 
@@ -101,7 +107,11 @@ fn yes() -> bool {
 impl Preset {
     /// The badge letter: the first letter of the name.
     pub fn letter(&self) -> String {
-        self.name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())
+        self.name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".into())
     }
 }
 
@@ -130,6 +140,11 @@ pub struct Settings {
     pub diff_layout: DiffLayout,
     pub smart_commit: SmartCommit,
     pub group_buttons: GroupButtons,
+    /// Generate Commit Message runs a local model or a command.
+    pub ai_engine: crate::backend::ai::Engine,
+    /// The command (prompt on its input, message on its output); den's
+    /// default, `claude -p`, when empty.
+    pub ai_command: String,
     /// Generate Commit Message: empty for the default model, a download URL
     /// (a preset's or a custom one) or a local .gguf file.
     pub ai_model: String,
@@ -162,7 +177,8 @@ pub struct Settings {
     /// Installed extensions that den does not load, by id.
     pub disabled_extensions: Vec<String>,
     /// What the user set of each extension's settings, by id and key.
-    pub extension_settings: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    pub extension_settings:
+        std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// The keys of the commands the user changed, by command id
     /// (`den.newTerminal`), in place of the defaults; none for unbound.
     pub keybindings: std::collections::BTreeMap<String, Vec<String>>,
@@ -171,7 +187,15 @@ pub struct Settings {
 impl Preset {
     /// A terminal preset running `command`, pinned to the tab strips.
     pub fn new(name: impl Into<String>, command: impl Into<String>) -> Self {
-        Self { name: name.into(), command: command.into(), agent: false, browser: false, pinned: true, color: None, icon: None }
+        Self {
+            name: name.into(),
+            command: command.into(),
+            agent: false,
+            browser: false,
+            pinned: true,
+            color: None,
+            icon: None,
+        }
     }
 
     /// Which kind of tab it opens, for the default groups.
@@ -191,8 +215,14 @@ impl Preset {
 /// default distribution too.
 pub fn default_presets() -> Vec<Preset> {
     let mut presets = vec![
-        Preset { agent: true, ..Preset::new("Claude Code", "claude") },
-        Preset { agent: true, ..Preset::new("Codex", "codex") },
+        Preset {
+            agent: true,
+            ..Preset::new("Claude Code", "claude")
+        },
+        Preset {
+            agent: true,
+            ..Preset::new("Codex", "codex")
+        },
     ];
     if crate::backend::wsl::default_distro().is_some() {
         presets.push(Preset::new("WSL", "wsl"));
@@ -218,6 +248,8 @@ impl Default for Settings {
             diff_layout: DiffLayout::Automatic,
             smart_commit: SmartCommit::Ask,
             group_buttons: GroupButtons::default(),
+            ai_engine: Default::default(),
+            ai_command: crate::backend::ai::DEFAULT_COMMAND.into(),
             ai_model: String::new(),
             ai_custom_models: Vec::new(),
             ai_context_size: 8192,
@@ -247,9 +279,21 @@ impl Global for Settings {}
 impl Settings {
     /// What Generate Commit Message runs with.
     pub fn ai_config(&self) -> crate::backend::ai::AiConfig {
-        crate::backend::ai::AiConfig {
+        use crate::backend::ai::{self, Engine};
+        let command = self.ai_command.trim();
+        ai::AiConfig {
+            engine: self.ai_engine,
+            command: if command.is_empty() {
+                ai::DEFAULT_COMMAND.into()
+            } else {
+                command.into()
+            },
             model: self.ai_model.clone(),
-            context: self.ai_context_size.clamp(1024, 131_072),
+            context: if self.ai_engine == Engine::Command {
+                ai::COMMAND_CONTEXT
+            } else {
+                self.ai_context_size.clamp(1024, 131_072)
+            },
             threads: self.ai_threads,
             gpu: self.ai_gpu,
             style: self.ai_system_prompt.clone(),
@@ -357,7 +401,10 @@ impl AppState {
     }
 
     pub fn session(&self, root: &Path) -> Session {
-        self.sessions.get(&session_key(root)).cloned().unwrap_or_default()
+        self.sessions
+            .get(&session_key(root))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn session_mut(&mut self, root: &Path) -> &mut Session {
@@ -394,7 +441,18 @@ fn session_key(root: &Path) -> String {
 pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
     let parts: Vec<Vec<String>> = paths
         .iter()
-        .map(|path| path.components().rev().map(|c| c.as_os_str().to_string_lossy().trim_end_matches(['\\', '/']).to_string()).filter(|s| !s.is_empty()).collect())
+        .map(|path| {
+            path.components()
+                .rev()
+                .map(|c| {
+                    c.as_os_str()
+                        .to_string_lossy()
+                        .trim_end_matches(['\\', '/'])
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
         .collect();
     let tail = |ix: usize, depth: usize| -> String {
         let mut names: Vec<&str> = parts[ix].iter().take(depth).map(String::as_str).collect();
@@ -405,10 +463,15 @@ pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
     // Lengthen every name that clashes with another until none do (or a path
     // has no parents left).
     loop {
-        let names: Vec<String> = (0..paths.len()).map(|ix| tail(ix, depth[ix]).to_lowercase()).collect();
+        let names: Vec<String> = (0..paths.len())
+            .map(|ix| tail(ix, depth[ix]).to_lowercase())
+            .collect();
         let mut grew = false;
         for ix in 0..paths.len() {
-            let clash = names.iter().enumerate().any(|(other, name)| other != ix && *name == names[ix]);
+            let clash = names
+                .iter()
+                .enumerate()
+                .any(|(other, name)| other != ix && *name == names[ix]);
             if clash && depth[ix] < parts[ix].len() {
                 depth[ix] += 1;
                 grew = true;
@@ -425,11 +488,16 @@ pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
 /// as `\\wsl.localhost\…`, the form den builds from git's paths there.
 pub fn strip_verbatim(path: PathBuf) -> PathBuf {
     let plain = match path.to_string_lossy().strip_prefix(r"\\?\") {
-        Some(rest) => PathBuf::from(rest.strip_prefix(r"UNC\").map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}"))),
+        Some(rest) => PathBuf::from(
+            rest.strip_prefix(r"UNC\")
+                .map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}")),
+        ),
         None => path.clone(),
     };
     match crate::backend::wsl::split(&plain) {
-        Some((distro, linux)) => crate::backend::wsl::to_windows(Some(&distro), &linux).unwrap_or(plain),
+        Some((distro, linux)) => {
+            crate::backend::wsl::to_windows(Some(&distro), &linux).unwrap_or(plain)
+        }
         None => plain,
     }
 }
@@ -439,7 +507,11 @@ pub fn strip_verbatim(path: PathBuf) -> PathBuf {
 /// A debug build keeps its own, `den-dev` beside it, so working on den
 /// neither reads nor changes the installed app's settings and state.
 pub(crate) fn data_dir() -> PathBuf {
-    app_dir(if cfg!(debug_assertions) { "den-dev" } else { "den" })
+    app_dir(if cfg!(debug_assertions) {
+        "den-dev"
+    } else {
+        "den"
+    })
 }
 
 /// The installed app's folder, for downloads a debug build shares with it
@@ -455,25 +527,35 @@ fn app_dir(name: &str) -> PathBuf {
     } else if cfg!(target_os = "macos") {
         home().map(|home| home.join("Library").join("Application Support"))
     } else {
-        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|home| home.join(".config")))
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|home| home.join(".config")))
     };
     base.unwrap_or_else(|| PathBuf::from(".")).join(name)
 }
 
 /// The most recent folder that still exists, read before the app starts.
 pub fn last_folder() -> Option<PathBuf> {
-    read_json::<AppState>("state.json")?.recent.into_iter().find(|p| p.is_dir())
+    read_json::<AppState>("state.json")?
+        .recent
+        .into_iter()
+        .find(|p| p.is_dir())
 }
 
 /// The settings file: the defaults when there is none. One that cannot be
 /// read is kept beside as `settings.json.bad`, and den starts with the
 /// defaults, so the file stays as it is until a setting changes.
 fn read_settings(path: &Path) -> Settings {
-    let Ok(text) = std::fs::read_to_string(path) else { return Settings::default() };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Settings::default();
+    };
     match serde_json::from_str(&text) {
         Ok(settings) => settings,
         Err(err) => {
-            eprintln!("den: {} cannot be read ({err}); starting with the defaults", path.display());
+            eprintln!(
+                "den: {} cannot be read ({err}); starting with the defaults",
+                path.display()
+            );
             let _ = std::fs::copy(path, path.with_extension("json.bad"));
             Settings::default()
         }
@@ -526,9 +608,12 @@ impl Global for Pending {}
 /// starts the wait over), off the UI thread.
 fn write_later(file: File, cx: &mut App) {
     let task = cx.spawn(async move |cx| {
-        cx.background_executor().timer(Duration::from_millis(500)).await;
+        cx.background_executor()
+            .timer(Duration::from_millis(500))
+            .await;
         let text = cx.update(|cx| file.text(cx));
-        cx.background_spawn(async move { write_file(file, &text) }).await;
+        cx.background_spawn(async move { write_file(file, &text) })
+            .await;
     });
     let pending = cx.default_global::<Pending>();
     match file {
@@ -553,7 +638,9 @@ fn write_file(file: File, text: &str) {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     let hash = hasher.finish();
-    let Ok(mut written) = WRITTEN.lock() else { return };
+    let Ok(mut written) = WRITTEN.lock() else {
+        return;
+    };
     if written[file as usize] == hash {
         return;
     }
@@ -582,7 +669,9 @@ fn write_text(path: &Path, text: &str) -> std::io::Result<()> {
 pub fn mono_font(cx: &App) -> SharedString {
     let family = &Settings::get(cx).font_family;
     if family.trim().is_empty() {
-        gpui_kit::component::ActiveTheme::theme(cx).mono_font_family.clone()
+        gpui_kit::component::ActiveTheme::theme(cx)
+            .mono_font_family
+            .clone()
     } else {
         family.trim().to_string().into()
     }
@@ -597,9 +686,18 @@ mod tests {
     fn plain_paths_from_canonicalize() {
         let plain = |p: &str| strip_verbatim(PathBuf::from(p));
         assert_eq!(plain(r"\\?\C:\Users\me"), PathBuf::from(r"C:\Users\me"));
-        assert_eq!(plain(r"\\?\UNC\server\share\x"), PathBuf::from(r"\\server\share\x"));
-        assert_eq!(plain(r"\\?\UNC\wsl.localhost\Ubuntu\home\me"), PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me"));
-        assert_eq!(plain(r"\\wsl$\Ubuntu\home\me"), PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me"));
+        assert_eq!(
+            plain(r"\\?\UNC\server\share\x"),
+            PathBuf::from(r"\\server\share\x")
+        );
+        assert_eq!(
+            plain(r"\\?\UNC\wsl.localhost\Ubuntu\home\me"),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me")
+        );
+        assert_eq!(
+            plain(r"\\wsl$\Ubuntu\home\me"),
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\me")
+        );
         assert_eq!(plain("/Users/me"), PathBuf::from("/Users/me"));
     }
 
@@ -614,15 +712,24 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         let settings = read_settings(&path);
         assert_eq!(settings.editor_font_size, 14.);
-        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), "{ not json");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(),
+            "{ not json"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn session_keys_are_stable() {
         // The keys are in state.json: a change would orphan every saved session.
-        assert_eq!(session_key(Path::new(r"C:\Users\me\project")), "d6959baf11742046");
-        assert_eq!(session_key(Path::new(r"c:\users\ME\project")), session_key(Path::new(r"C:\Users\me\project")));
+        assert_eq!(
+            session_key(Path::new(r"C:\Users\me\project")),
+            "d6959baf11742046"
+        );
+        assert_eq!(
+            session_key(Path::new(r"c:\users\ME\project")),
+            session_key(Path::new(r"C:\Users\me\project"))
+        );
     }
 
     #[test]
@@ -642,7 +749,10 @@ mod tests {
 
     #[test]
     fn just_the_name_when_it_is_unique() {
-        assert_eq!(names(&[r"C:\repos\den", r"C:\repos\den2"]), vec!["den", "den2"]);
+        assert_eq!(
+            names(&[r"C:\repos\den", r"C:\repos\den2"]),
+            vec!["den", "den2"]
+        );
     }
 
     #[test]
@@ -651,6 +761,9 @@ mod tests {
             names(&[r"C:\a\x\debug", r"C:\b\x\debug", r"C:\c\target"]),
             vec![r"a\x\debug", r"b\x\debug", "target"]
         );
-        assert_eq!(names(&[r"C:\a\debug", r"C:\b\Debug"]), vec![r"a\debug", r"b\Debug"]);
+        assert_eq!(
+            names(&[r"C:\a\debug", r"C:\b\Debug"]),
+            vec![r"a\debug", r"b\Debug"]
+        );
     }
 }

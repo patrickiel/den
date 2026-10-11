@@ -13,7 +13,12 @@ pub(crate) fn install_progress_key(id: &str) -> String {
 static DOWNLOADS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn download_progress(key: &str) -> Option<String> {
-    DOWNLOADS.lock().ok()?.iter().find(|(k, _)| k == key).map(|(_, progress)| progress.clone())
+    DOWNLOADS
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, progress)| progress.clone())
 }
 
 fn set_download_progress(key: &str, progress: Option<String>) {
@@ -32,7 +37,12 @@ pub(crate) fn start_download(
     what: impl Into<String>,
     window: &mut Window,
     cx: &mut App,
-    job: impl FnOnce(&crate::backend::http::Cancel, crate::backend::http::Progress) -> Result<(), String> + Send + 'static,
+    job: impl FnOnce(
+        &crate::backend::http::Cancel,
+        crate::backend::http::Progress,
+    ) -> Result<(), String>
+    + Send
+    + 'static,
 ) {
     start_download_then(key, what, window, cx, job, |_, _| {});
 }
@@ -43,7 +53,12 @@ pub(crate) fn start_download_then(
     what: impl Into<String>,
     window: &mut Window,
     cx: &mut App,
-    job: impl FnOnce(&crate::backend::http::Cancel, crate::backend::http::Progress) -> Result<(), String> + Send + 'static,
+    job: impl FnOnce(
+        &crate::backend::http::Cancel,
+        crate::backend::http::Progress,
+    ) -> Result<(), String>
+    + Send
+    + 'static,
     done: impl FnOnce(&mut Window, &mut App) + 'static,
 ) {
     if download_progress(&key).is_some() {
@@ -52,11 +67,18 @@ pub(crate) fn start_download_then(
     set_download_progress(&key, Some("Starting…".into()));
     let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Result<(), String>>>();
     std::thread::spawn(move || {
-        let result = job(&crate::backend::http::Cancel::default(), &mut |stage, done, total| {
-            let progress = if total == 0 { format!("{stage}…") } else { format!("{}%", done * 100 / total) };
-            set_download_progress(&key, Some(progress));
-            _ = tx.unbounded_send(None);
-        });
+        let result = job(
+            &crate::backend::http::Cancel::default(),
+            &mut |stage, done, total| {
+                let progress = if total == 0 {
+                    format!("{stage}…")
+                } else {
+                    format!("{}%", done * 100 / total)
+                };
+                set_download_progress(&key, Some(progress));
+                _ = tx.unbounded_send(None);
+            },
+        );
         set_download_progress(&key, None);
         _ = tx.unbounded_send(Some(result));
     });
@@ -68,7 +90,9 @@ pub(crate) fn start_download_then(
         while let Some(update) = rx.next().await {
             _ = handle.update(cx, |_, window, cx| {
                 match update {
-                    Some(Err(err)) => crate::toast::push(window, format!("Could not download {what}: {err}"), cx),
+                    Some(Err(err)) => {
+                        crate::toast::push(window, format!("Could not download {what}: {err}"), cx)
+                    }
                     Some(Ok(())) => {
                         if let Some(done) = done.take() {
                             done(window, cx);
@@ -85,7 +109,12 @@ pub(crate) fn start_download_then(
 
 /// Fetch `repo`'s latest release, ask, and download it for the next start.
 /// `current` is the installed version when this is an update.
-pub(crate) fn get_extension(repo: String, current: Option<String>, window: &mut Window, cx: &mut App) {
+pub(crate) fn get_extension(
+    repo: String,
+    current: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     use gpui_kit::component::WindowExt as _;
     let handle = window.window_handle();
     cx.spawn(async move |cx| {

@@ -58,7 +58,10 @@ impl Entry {
 
     /// Whether this start runs it (or tried to).
     pub fn started(&self) -> bool {
-        matches!(self.status, Status::Loading | Status::Loaded | Status::Failed(_))
+        matches!(
+            self.status,
+            Status::Loading | Status::Loaded | Status::Failed(_)
+        )
     }
 }
 
@@ -84,7 +87,10 @@ pub fn want_icons(listings: Vec<Listing>, cx: &mut App) {
     // Each icon is looked at once a session. This runs as the cards draw, so
     // the global is only touched (which wakes the views) for new ones.
     let asked = &cx.global::<Extensions>().icons_asked;
-    let new: Vec<Listing> = listings.into_iter().filter(|listing| !asked.contains(&icon_key(listing))).collect();
+    let new: Vec<Listing> = listings
+        .into_iter()
+        .filter(|listing| !asked.contains(&icon_key(listing)))
+        .collect();
     if new.is_empty() {
         return;
     }
@@ -98,14 +104,20 @@ pub fn want_icons(listings: Vec<Listing>, cx: &mut App) {
             None => {}
         }
     }
-    let start = ICON_FETCHES.saturating_sub(extensions.icon_fetches).min(extensions.icon_queue.len());
+    let start = ICON_FETCHES
+        .saturating_sub(extensions.icon_fetches)
+        .min(extensions.icon_queue.len());
     extensions.icon_fetches += start;
     for _ in 0..start {
         cx.spawn(async move |cx| {
             // Each runner takes icons off the queue until it is empty.
-            while let Some(listing) = cx.update(|cx| cx.global_mut::<Extensions>().icon_queue.pop_front()) {
+            while let Some(listing) =
+                cx.update(|cx| cx.global_mut::<Extensions>().icon_queue.pop_front())
+            {
                 let key = icon_key(&listing);
-                let fetched = cx.background_spawn(async move { backend::fetch_icon(&listing) }).await;
+                let fetched = cx
+                    .background_spawn(async move { backend::fetch_icon(&listing) })
+                    .await;
                 if fetched.is_ok() {
                     // Into the global, which wakes the views.
                     cx.update(|cx| _ = cx.global_mut::<Extensions>().icons_ready.insert(key));
@@ -143,7 +155,11 @@ pub struct Extensions {
     /// What each extension's views show, by extension, folder and view.
     views: Vec<ViewData>,
     /// The open windows by their folder, for `run_in_terminal`.
-    windows: Vec<(PathBuf, WeakEntity<crate::workspace::Workspace>, AnyWindowHandle)>,
+    windows: Vec<(
+        PathBuf,
+        WeakEntity<crate::workspace::Workspace>,
+        AnyWindowHandle,
+    )>,
 }
 
 pub struct Buttons {
@@ -188,15 +204,32 @@ impl Extensions {
 
     /// What extension `id`'s view `view` on `root` shows, if it said yet.
     pub fn view(&self, id: &str, root: &Path, view: &str) -> Option<&den_extension::view::Content> {
-        self.views.iter().find(|v| v.id == id && v.root == root && v.view == view).map(|v| &v.content)
+        self.views
+            .iter()
+            .find(|v| v.id == id && v.root == root && v.view == view)
+            .map(|v| &v.content)
     }
 
     /// The same, to change it here (a click's selection, before the extension answers).
-    pub fn view_mut(&mut self, id: &str, root: &Path, view: &str) -> &mut den_extension::view::Content {
-        let ix = match self.views.iter().position(|v| v.id == id && v.root == root && v.view == view) {
+    pub fn view_mut(
+        &mut self,
+        id: &str,
+        root: &Path,
+        view: &str,
+    ) -> &mut den_extension::view::Content {
+        let ix = match self
+            .views
+            .iter()
+            .position(|v| v.id == id && v.root == root && v.view == view)
+        {
             Some(ix) => ix,
             None => {
-                self.views.push(ViewData { id: id.to_string(), root: root.to_path_buf(), view: view.to_string(), content: Default::default() });
+                self.views.push(ViewData {
+                    id: id.to_string(),
+                    root: root.to_path_buf(),
+                    view: view.to_string(),
+                    content: Default::default(),
+                });
                 self.views.len() - 1
             }
         };
@@ -205,7 +238,12 @@ impl Extensions {
 
     /// The manifest's declaration of extension `id`'s view `view`.
     pub fn view_kind(&self, id: &str, view: &str) -> Option<&den_extension::View> {
-        self.entry(id)?.manifest.as_ref()?.views.iter().find(|v| v.id == view)
+        self.entry(id)?
+            .manifest
+            .as_ref()?
+            .views
+            .iter()
+            .find(|v| v.id == view)
     }
 }
 
@@ -221,12 +259,23 @@ pub fn init(cx: &mut App) {
             Ok(manifest) if disabled.contains(&installed.id) => (Some(manifest), Status::Disabled),
             Ok(manifest) => {
                 let settings = manifest.settings_values(&user_settings(&installed.id, cx));
-                let tx = backend::start(manifest.clone(), installed.dir.clone(), settings, reports.clone());
+                let tx = backend::start(
+                    manifest.clone(),
+                    installed.dir.clone(),
+                    settings,
+                    reports.clone(),
+                );
                 extensions.running.push((installed.id.clone(), tx));
                 (Some(manifest), Status::Loading)
             }
         };
-        extensions.entries.push(Entry { id: installed.id, dir: installed.dir, manifest, status, change: None });
+        extensions.entries.push(Entry {
+            id: installed.id,
+            dir: installed.dir,
+            manifest,
+            status,
+            change: None,
+        });
     }
     // Their keys go into den's keymap (`keymap::init`).
     cx.set_global(extensions);
@@ -260,36 +309,70 @@ pub fn init(cx: &mut App) {
 fn on_report(report: Report, cx: &mut App) {
     let (id, status, toast) = match report {
         Report::Loaded(id) => (id, Some(Status::Loaded), None),
-        Report::Failed(id, err) => (id, Some(Status::Failed(err.clone())), Some(format!("failed to start: {err}"))),
+        Report::Failed(id, err) => (
+            id,
+            Some(Status::Failed(err.clone())),
+            Some(format!("failed to start: {err}")),
+        ),
         Report::Toast(id, message) => (id, None, Some(message)),
         Report::Buttons { id, root, buttons } => {
             let extensions = cx.global_mut::<Extensions>();
             let root = PathBuf::from(root);
-            extensions.buttons.retain(|b| !(b.id == id && b.root == root));
+            extensions
+                .buttons
+                .retain(|b| !(b.id == id && b.root == root));
             if !buttons.is_empty() {
                 extensions.buttons.push(Buttons { id, root, buttons });
             }
             return;
         }
-        Report::Run { root, command, cwd } => return run_in_terminal(Path::new(&root), command, cwd.map(PathBuf::from), cx),
-        Report::OpenFile { root, path, line, column } => return open_file(Path::new(&root), PathBuf::from(path), line, column, cx),
-        Report::OpenView { id, root, view } => {
-            return in_window(Path::new(&root), "open_view", cx, |workspace, window, cx| workspace.open_extension_view(id, view, window, cx));
+        Report::Run { root, command, cwd } => {
+            return run_in_terminal(Path::new(&root), command, cwd.map(PathBuf::from), cx);
         }
-        Report::SetView { id, root, view, content } => {
-            cx.global_mut::<Extensions>().view_mut(&id, Path::new(&root), &view).merge(*content);
+        Report::OpenFile {
+            root,
+            path,
+            line,
+            column,
+        } => return open_file(Path::new(&root), PathBuf::from(path), line, column, cx),
+        Report::OpenView { id, root, view } => {
+            return in_window(
+                Path::new(&root),
+                "open_view",
+                cx,
+                |workspace, window, cx| workspace.open_extension_view(id, view, window, cx),
+            );
+        }
+        Report::SetView {
+            id,
+            root,
+            view,
+            content,
+        } => {
+            cx.global_mut::<Extensions>()
+                .view_mut(&id, Path::new(&root), &view)
+                .merge(*content);
             return;
         }
         Report::Prompt { id, root, prompt } => {
-            return in_window(Path::new(&root), "prompt", cx, |_, window, cx| crate::extension_view::prompt(id, PathBuf::from(&root), prompt, window, cx));
+            return in_window(Path::new(&root), "prompt", cx, |_, window, cx| {
+                crate::extension_view::prompt(id, PathBuf::from(&root), prompt, window, cx)
+            });
         }
         Report::OpenDiff { root, diff } => {
-            return in_window(Path::new(&root), "open_diff", cx, |workspace, window, cx| workspace.open_extension_diff(diff, window, cx));
+            return in_window(
+                Path::new(&root),
+                "open_diff",
+                cx,
+                |workspace, window, cx| workspace.open_extension_diff(diff, window, cx),
+            );
         }
         Report::Copy(text) => return cx.write_to_clipboard(ClipboardItem::new_string(text)),
     };
     let extensions = cx.global_mut::<Extensions>();
-    let Some(entry) = extensions.entry_mut(&id) else { return };
+    let Some(entry) = extensions.entry_mut(&id) else {
+        return;
+    };
     if let Some(status) = status {
         entry.status = status;
     }
@@ -301,8 +384,16 @@ fn on_report(report: Report, cx: &mut App) {
 
 fn show_toast(title: String, message: String, cx: &mut App) {
     use gpui_kit::component::notification::Notification;
-    let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else { return };
-    _ = window.update(cx, |_, window, cx| crate::toast::push(window, Notification::new().title(title).message(message), cx));
+    let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
+        return;
+    };
+    _ = window.update(cx, |_, window, cx| {
+        crate::toast::push(
+            window,
+            Notification::new().title(title).message(message),
+            cx,
+        )
+    });
 }
 
 /// Read the index: from the cache, then from the web when the cache is old,
@@ -346,30 +437,59 @@ pub fn refresh_index(force: bool, cx: &mut App) {
 
 /// The listings not installed, in index order.
 pub fn uninstalled<'a>(available: &'a [Listing], entries: &[Entry]) -> Vec<&'a Listing> {
-    available.iter().filter(|l| !entries.iter().any(|e| e.id == l.id)).collect()
+    available
+        .iter()
+        .filter(|l| !entries.iter().any(|e| e.id == l.id))
+        .collect()
 }
 
 /// The index's listing for `entry` when it has a newer version than installed.
 pub fn update_available<'a>(entry: &Entry, available: &'a [Listing]) -> Option<&'a Listing> {
     let installed = &entry.manifest.as_ref()?.version;
-    available.iter().find(|l| l.id == entry.id && l.loadable() && crate::update::newer(&l.version, installed))
+    available
+        .iter()
+        .find(|l| l.id == entry.id && l.loadable() && crate::update::newer(&l.version, installed))
 }
 
 /// A window opened on `root`; it is forgotten once it closes.
-pub fn window_opened(root: PathBuf, workspace: WeakEntity<crate::workspace::Workspace>, window: AnyWindowHandle, cx: &mut App) {
+pub fn window_opened(
+    root: PathBuf,
+    workspace: WeakEntity<crate::workspace::Workspace>,
+    window: AnyWindowHandle,
+    cx: &mut App,
+) {
     if !cx.has_global::<Extensions>() {
         return;
     }
     let extensions = cx.global_mut::<Extensions>();
-    extensions.windows.retain(|(_, workspace, _)| workspace.upgrade().is_some());
+    extensions
+        .windows
+        .retain(|(_, workspace, _)| workspace.upgrade().is_some());
     extensions.windows.push((root, workspace, window));
 }
 
 /// Run `f` on the workspace of the window on `root`, logged when there is none.
-fn in_window(root: &Path, what: &str, cx: &mut App, f: impl FnOnce(&mut crate::workspace::Workspace, &mut Window, &mut Context<crate::workspace::Workspace>)) {
-    let window = cx.global::<Extensions>().windows.iter().find(|(r, w, _)| r == root && w.upgrade().is_some()).map(|(_, w, h)| (w.clone(), *h));
+fn in_window(
+    root: &Path,
+    what: &str,
+    cx: &mut App,
+    f: impl FnOnce(
+        &mut crate::workspace::Workspace,
+        &mut Window,
+        &mut Context<crate::workspace::Workspace>,
+    ),
+) {
+    let window = cx
+        .global::<Extensions>()
+        .windows
+        .iter()
+        .find(|(r, w, _)| r == root && w.upgrade().is_some())
+        .map(|(_, w, h)| (w.clone(), *h));
     let Some((workspace, handle)) = window else {
-        backend::log("den", &format!("{what}: no window is open on {}", root.display()));
+        backend::log(
+            "den",
+            &format!("{what}: no window is open on {}", root.display()),
+        );
         return;
     };
     _ = handle.update(cx, |_, window, cx| {
@@ -378,36 +498,60 @@ fn in_window(root: &Path, what: &str, cx: &mut App, f: impl FnOnce(&mut crate::w
 }
 
 fn run_in_terminal(root: &Path, command: String, cwd: Option<PathBuf>, cx: &mut App) {
-    in_window(root, "run_in_terminal", cx, |workspace, window, cx| workspace.run_in_terminal(command, cwd, window, cx));
+    in_window(root, "run_in_terminal", cx, |workspace, window, cx| {
+        workspace.run_in_terminal(command, cwd, window, cx)
+    });
 }
 
 fn open_file(root: &Path, path: PathBuf, line: Option<u32>, column: Option<u32>, cx: &mut App) {
     // Relative to the folder, as an extension may well name it.
-    let path = if path.is_relative() { root.join(path) } else { path };
-    in_window(root, "open_file", cx, |workspace, window, cx| workspace.open_file_at(path, line, column, window, cx));
+    let path = if path.is_relative() {
+        root.join(path)
+    } else {
+        path
+    };
+    in_window(root, "open_file", cx, |workspace, window, cx| {
+        workspace.open_file_at(path, line, column, window, cx)
+    });
 }
 
 /// The commands of the extensions this start runs, with the extension's id
 /// and name, for den's menu.
 pub fn commands(cx: &App) -> Vec<(String, String, Command)> {
-    let Some(extensions) = cx.try_global::<Extensions>() else { return Vec::new() };
+    let Some(extensions) = cx.try_global::<Extensions>() else {
+        return Vec::new();
+    };
     extensions
         .entries
         .iter()
         .filter(|e| e.started())
         .filter_map(|e| Some((e, e.manifest.as_ref()?)))
-        .flat_map(|(e, m)| m.commands.iter().map(|c| (e.id.clone(), m.name.clone(), c.clone())))
+        .flat_map(|(e, m)| {
+            m.commands
+                .iter()
+                .map(|c| (e.id.clone(), m.name.clone(), c.clone()))
+        })
         .collect()
 }
 
 /// Run extension `id`'s command `command` for the window on `root`.
 pub fn run_command(id: &str, command: &str, root: &Path, cx: &App) {
-    send(id, den_extension::events::COMMAND, serde_json::json!({ "root": root, "id": command }), cx);
+    send(
+        id,
+        den_extension::events::COMMAND,
+        serde_json::json!({ "root": root, "id": command }),
+        cx,
+    );
 }
 
 /// A click on extension `id`'s button `button` in the window on `root`.
 pub fn button_clicked(id: &str, root: &Path, button: &str, cx: &App) {
-    send(id, den_extension::events::BUTTON_CLICKED, serde_json::json!({ "root": root, "id": button }), cx);
+    send(
+        id,
+        den_extension::events::BUTTON_CLICKED,
+        serde_json::json!({ "root": root, "id": button }),
+        cx,
+    );
 }
 
 /// Something done in extension `id`'s view (`den_extension::events::VIEW_ACTION`).
@@ -416,17 +560,27 @@ pub fn view_event(id: &str, name: &str, data: Value, cx: &App) {
 }
 
 fn send(id: &str, name: &str, data: Value, cx: &App) {
-    let Some(extensions) = cx.try_global::<Extensions>() else { return };
+    let Some(extensions) = cx.try_global::<Extensions>() else {
+        return;
+    };
     if let Some((_, tx)) = extensions.running.iter().find(|(running, _)| running == id) {
-        _ = tx.send(Message::Event { name: name.to_string(), data });
+        _ = tx.send(Message::Event {
+            name: name.to_string(),
+            data,
+        });
     }
 }
 
 /// Send an event (`den_extension::events`) to every running extension.
 pub fn broadcast(name: &str, data: Value, cx: &App) {
-    let Some(extensions) = cx.try_global::<Extensions>() else { return };
+    let Some(extensions) = cx.try_global::<Extensions>() else {
+        return;
+    };
     for (_, tx) in &extensions.running {
-        _ = tx.send(Message::Event { name: name.to_string(), data: data.clone() });
+        _ = tx.send(Message::Event {
+            name: name.to_string(),
+            data: data.clone(),
+        });
     }
 }
 
@@ -452,12 +606,21 @@ pub fn set_enabled(id: &str, enabled: bool, cx: &mut App) {
 
 /// What the user set of `id`'s settings.
 fn user_settings(id: &str, cx: &App) -> serde_json::Map<String, Value> {
-    Settings::get(cx).extension_settings.get(id).cloned().unwrap_or_default()
+    Settings::get(cx)
+        .extension_settings
+        .get(id)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Every setting's value for `id`, defaults included.
 pub fn settings_values(id: &str, cx: &App) -> serde_json::Map<String, Value> {
-    let Some(manifest) = Extensions::get(cx).entry(id).and_then(|e| e.manifest.as_ref()) else { return Default::default() };
+    let Some(manifest) = Extensions::get(cx)
+        .entry(id)
+        .and_then(|e| e.manifest.as_ref())
+    else {
+        return Default::default();
+    };
     manifest.settings_values(&user_settings(id, cx))
 }
 
@@ -475,11 +638,19 @@ pub fn set_setting(id: &str, key: &str, value: Option<Value>, cx: &mut App) {
         }
     });
     let settings = settings_values(id, cx);
-    send(id, den_extension::events::SETTINGS_CHANGED, serde_json::json!({ "settings": settings }), cx);
+    send(
+        id,
+        den_extension::events::SETTINGS_CHANGED,
+        serde_json::json!({ "settings": settings }),
+        cx,
+    );
 }
 
 pub fn is_enabled(id: &str, cx: &App) -> bool {
-    !Settings::get(cx).disabled_extensions.iter().any(|d| d == id)
+    !Settings::get(cx)
+        .disabled_extensions
+        .iter()
+        .any(|d| d == id)
 }
 
 pub fn uninstall(id: &str, cx: &mut App) -> Result<(), String> {
@@ -514,7 +685,11 @@ pub fn pattern_matches(pattern: &str, path: &str) -> bool {
         static COMPILED: std::cell::RefCell<std::collections::HashMap<String, Option<regex::Regex>>> = Default::default();
     }
     COMPILED.with_borrow_mut(|compiled| {
-        compiled.entry(pattern.to_string()).or_insert_with(|| regex::Regex::new(pattern).ok()).as_ref().is_some_and(|re| re.is_match(path))
+        compiled
+            .entry(pattern.to_string())
+            .or_insert_with(|| regex::Regex::new(pattern).ok())
+            .as_ref()
+            .is_some_and(|re| re.is_match(path))
     })
 }
 
@@ -536,16 +711,38 @@ mod tests {
     }
 
     fn entry(id: &str, version: &str) -> Entry {
-        let manifest = den_extension::Manifest::parse(&format!(r#"{{"id":"{id}","name":"{id}","version":"{version}","api":1}}"#)).unwrap();
-        Entry { id: id.into(), dir: Default::default(), manifest: Some(manifest), status: Status::Loaded, change: None }
+        let manifest = den_extension::Manifest::parse(&format!(
+            r#"{{"id":"{id}","name":"{id}","version":"{version}","api":1}}"#
+        ))
+        .unwrap();
+        Entry {
+            id: id.into(),
+            dir: Default::default(),
+            manifest: Some(manifest),
+            status: Status::Loaded,
+            change: None,
+        }
     }
 
     #[test]
     fn the_index_offers_what_is_not_installed_and_newer_versions() {
-        let available = [listing("a", "1.2.0", 1), listing("b", "1.0.0", 1), listing("c", "2.0.0", 99)];
+        let available = [
+            listing("a", "1.2.0", 1),
+            listing("b", "1.0.0", 1),
+            listing("c", "2.0.0", 99),
+        ];
         let entries = [entry("a", "1.1.0"), entry("c", "1.0.0")];
-        assert_eq!(uninstalled(&available, &entries).iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["b"]);
-        assert_eq!(update_available(&entries[0], &available).map(|l| l.version.as_str()), Some("1.2.0"));
+        assert_eq!(
+            uninstalled(&available, &entries)
+                .iter()
+                .map(|l| l.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        assert_eq!(
+            update_available(&entries[0], &available).map(|l| l.version.as_str()),
+            Some("1.2.0")
+        );
         // Not for a den too old to load it.
         assert!(update_available(&entries[1], &available).is_none());
         assert!(update_available(&entry("a", "1.2.0"), &available).is_none());

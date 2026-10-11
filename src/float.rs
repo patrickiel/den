@@ -16,7 +16,12 @@ pub struct FloatWindow {
 }
 
 impl FloatWindow {
-    pub fn new(workspace: Entity<Workspace>, id: u64, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        workspace: Entity<Workspace>,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let weak = workspace.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             let from = crate::browser::hwnd(window);
@@ -31,11 +36,15 @@ impl FloatWindow {
         let _subscriptions = vec![
             cx.observe_window_bounds(window, move |this, window, cx| {
                 let bounds = window.bounds();
-                _ = this.workspace.update(cx, |workspace, cx| workspace.float_moved(id, bounds, cx));
+                _ = this
+                    .workspace
+                    .update(cx, |workspace, cx| workspace.float_moved(id, bounds, cx));
             }),
             cx.observe_window_activation(window, move |this, window, cx| {
                 if window.is_window_active() {
-                    _ = this.workspace.update(cx, |workspace, cx| workspace.window_activated(Some(id), cx));
+                    _ = this
+                        .workspace
+                        .update(cx, |workspace, cx| workspace.window_activated(Some(id), cx));
                 }
             }),
             // The main window closed, or turned to another folder.
@@ -55,7 +64,10 @@ impl FloatWindow {
 
     /// The focus handle of this window's active tab.
     pub fn focus(&self, cx: &App) -> Option<FocusHandle> {
-        self.workspace.upgrade()?.read(cx).window_focus(Some(self.id), cx)
+        self.workspace
+            .upgrade()?
+            .read(cx)
+            .window_focus(Some(self.id), cx)
     }
 }
 
@@ -63,7 +75,9 @@ impl Render for FloatWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id;
         match self.workspace.upgrade() {
-            Some(workspace) => workspace.update(cx, |workspace, cx| workspace.render_float(id, window, cx)),
+            Some(workspace) => {
+                workspace.update(cx, |workspace, cx| workspace.render_float(id, window, cx))
+            }
             None => Empty.into_any_element(),
         }
     }

@@ -113,7 +113,9 @@ impl Node {
             return Some(self);
         }
         match self {
-            Node::Split { children, .. } => children.iter_mut().find_map(|child| child.find_mut(target)),
+            Node::Split { children, .. } => {
+                children.iter_mut().find_map(|child| child.find_mut(target))
+            }
             Node::Group { .. } => None,
         }
     }
@@ -192,8 +194,16 @@ impl Tree {
     }
 
     pub fn with_floats(root: Node, floats: Vec<Float>) -> Self {
-        let next_id = floats.iter().map(|f| f.id.max(f.root.max_id())).fold(root.max_id(), u64::max) + 1;
-        let mut tree = Self { root, floats, next_id };
+        let next_id = floats
+            .iter()
+            .map(|f| f.id.max(f.root.max_id()))
+            .fold(root.max_id(), u64::max)
+            + 1;
+        let mut tree = Self {
+            root,
+            floats,
+            next_id,
+        };
         tree.normalize();
         tree
     }
@@ -218,7 +228,10 @@ impl Tree {
 
     /// The float `id` lies in; `None` for the main window.
     pub fn float_of(&self, id: NodeId) -> Option<u64> {
-        self.floats.iter().find(|f| f.root.find(id).is_some()).map(|f| f.id)
+        self.floats
+            .iter()
+            .find(|f| f.root.find(id).is_some())
+            .map(|f| f.id)
     }
 
     /// The root of a window: the main one for `None`.
@@ -242,7 +255,11 @@ impl Tree {
 
     /// Move `src` into a new float; its id. The main window's root leaves
     /// an empty group behind; a float's root is a window already.
-    pub fn float_out(&mut self, src: NodeId, bounds: Option<[f32; 4]>) -> Option<(u64, HashMap<NodeId, NodeId>)> {
+    pub fn float_out(
+        &mut self,
+        src: NodeId,
+        bounds: Option<[f32; 4]>,
+    ) -> Option<(u64, HashMap<NodeId, NodeId>)> {
         let (node, remap) = if self.root.id() == src {
             let empty = Node::Group {
                 id: self.mint(),
@@ -256,7 +273,11 @@ impl Tree {
             self.detach(src)?
         };
         let id = self.mint();
-        self.floats.push(Float { id, root: node, bounds });
+        self.floats.push(Float {
+            id,
+            root: node,
+            bounds,
+        });
         Some((id, remap))
     }
 
@@ -343,7 +364,11 @@ impl Tree {
     pub fn parent_of(&self, id: NodeId) -> Option<(NodeId, usize)> {
         let mut found = None;
         self.walk(&mut |node| {
-            if let Node::Split { id: split, children, .. } = node
+            if let Node::Split {
+                id: split,
+                children,
+                ..
+            } = node
                 && let Some(ix) = children.iter().position(|child| child.id() == id)
             {
                 found = Some((*split, ix));
@@ -354,7 +379,8 @@ impl Tree {
 
     /// Whether `inner` is `outer` or lies inside it.
     pub fn contains(&self, outer: NodeId, inner: NodeId) -> bool {
-        self.find(outer).is_some_and(|node| node.find(inner).is_some())
+        self.find(outer)
+            .is_some_and(|node| node.find(inner).is_some())
     }
 
     /// The group next to `group` towards `side` (Alt+arrows): up to the nearest
@@ -367,7 +393,11 @@ impl Tree {
             if let Some(Node::Split { axis, children, .. }) = self.find(parent)
                 && *axis == side.axis()
             {
-                let next = if side.after() { ix.checked_add(1).filter(|n| *n < children.len()) } else { ix.checked_sub(1) };
+                let next = if side.after() {
+                    ix.checked_add(1).filter(|n| *n < children.len())
+                } else {
+                    ix.checked_sub(1)
+                };
                 if let Some(next) = next {
                     return Some(descend(&children[next], side));
                 }
@@ -384,7 +414,12 @@ impl Tree {
     pub fn insert_beside(&mut self, target: NodeId, side: Side, node: Node) -> bool {
         let axis = side.axis();
         if let Some((parent, ix)) = self.parent_of(target)
-            && let Some(Node::Split { axis: parent_axis, children, sizes, .. }) = self.find_mut(parent)
+            && let Some(Node::Split {
+                axis: parent_axis,
+                children,
+                sizes,
+                ..
+            }) = self.find_mut(parent)
             && *parent_axis == axis
         {
             let half = sizes[ix] / 2.0;
@@ -395,7 +430,9 @@ impl Tree {
             return true;
         }
         let split_id = self.mint();
-        let Some(slot) = self.find_mut(target) else { return false };
+        let Some(slot) = self.find_mut(target) else {
+            return false;
+        };
         let existing = std::mem::replace(
             slot,
             Node::Group {
@@ -404,7 +441,11 @@ impl Tree {
                 active: 0,
             },
         );
-        let children = if side.after() { vec![existing, node] } else { vec![node, existing] };
+        let children = if side.after() {
+            vec![existing, node]
+        } else {
+            vec![node, existing]
+        };
         *slot = Node::Split {
             id: split_id,
             axis,
@@ -433,7 +474,10 @@ impl Tree {
             return Some((self.floats.remove(ix).root, HashMap::new()));
         }
         let (parent, ix) = self.parent_of(id)?;
-        let Some(Node::Split { children, sizes, .. }) = self.find_mut(parent) else {
+        let Some(Node::Split {
+            children, sizes, ..
+        }) = self.find_mut(parent)
+        else {
             return None;
         };
         let node = children.remove(ix);
@@ -445,7 +489,12 @@ impl Tree {
 
     /// Move `src` beside `target`. Refused for a target inside `src` or the
     /// root itself (it has nowhere to go).
-    pub fn move_node(&mut self, src: NodeId, target: NodeId, side: Side) -> Option<HashMap<NodeId, NodeId>> {
+    pub fn move_node(
+        &mut self,
+        src: NodeId,
+        target: NodeId,
+        side: Side,
+    ) -> Option<HashMap<NodeId, NodeId>> {
         if self.contains(src, target) || self.root.id() == src {
             return None;
         }
@@ -471,7 +520,9 @@ impl Tree {
     /// Move the boundary after child `ix` of `split` to `at` (a fraction of
     /// the split from its start), keeping each side at least `min`.
     pub fn resize(&mut self, split: NodeId, ix: usize, at: f32, min: f32) {
-        let Some(Node::Split { sizes, .. }) = self.find_mut(split) else { return };
+        let Some(Node::Split { sizes, .. }) = self.find_mut(split) else {
+            return;
+        };
         if ix + 1 >= sizes.len() {
             return;
         }
@@ -482,8 +533,16 @@ impl Tree {
         sizes[ix + 1] = pair - first;
     }
 
-    pub fn add_tab(&mut self, group: NodeId, pane: PaneId, ix: Option<usize>, activate: bool) -> bool {
-        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else { return false };
+    pub fn add_tab(
+        &mut self,
+        group: NodeId,
+        pane: PaneId,
+        ix: Option<usize>,
+        activate: bool,
+    ) -> bool {
+        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else {
+            return false;
+        };
         let at = ix.unwrap_or(tabs.len()).min(tabs.len());
         tabs.insert(at, pane);
         if activate || tabs.len() == 1 {
@@ -497,7 +556,9 @@ impl Tree {
     /// Take a tab out of its group (which stays, empty or not).
     pub fn remove_tab(&mut self, pane: PaneId) -> Option<NodeId> {
         let group = self.group_of(pane)?;
-        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else { return None };
+        let Some(Node::Group { tabs, active, .. }) = self.find_mut(group) else {
+            return None;
+        };
         let ix = tabs.iter().position(|p| *p == pane)?;
         tabs.remove(ix);
         if ix < *active || (*active >= tabs.len() && *active > 0) {
@@ -508,7 +569,9 @@ impl Tree {
 
     /// Move a tab into `group` at `ix` (the end when `None`), showing it.
     pub fn move_tab(&mut self, pane: PaneId, group: NodeId, ix: Option<usize>) -> bool {
-        let Some(from) = self.group_of(pane) else { return false };
+        let Some(from) = self.group_of(pane) else {
+            return false;
+        };
         let mut ix = ix;
         if from == group
             && let (Some(at), Some(old)) = (ix, self.tabs(group).iter().position(|p| *p == pane))
@@ -521,7 +584,9 @@ impl Tree {
     }
 
     pub fn activate(&mut self, pane: PaneId) {
-        let Some(group) = self.group_of(pane) else { return };
+        let Some(group) = self.group_of(pane) else {
+            return;
+        };
         if let Some(Node::Group { tabs, active, .. }) = self.find_mut(group)
             && let Some(ix) = tabs.iter().position(|p| *p == pane)
         {
@@ -569,7 +634,11 @@ fn descend(node: &Node, side: Side) -> NodeId {
     match node {
         Node::Group { id, .. } => *id,
         Node::Split { axis, children, .. } => {
-            let child = if *axis == side.axis() && !side.after() { children.last() } else { children.first() };
+            let child = if *axis == side.axis() && !side.after() {
+                children.last()
+            } else {
+                children.first()
+            };
             child.map_or(node.id(), |child| descend(child, side))
         }
     }
@@ -586,10 +655,18 @@ pub fn resolve(remap: &HashMap<NodeId, NodeId>, mut id: NodeId) -> NodeId {
 fn tidy(node: Node, remap: &mut HashMap<NodeId, NodeId>) -> Option<Node> {
     match node {
         Node::Group { .. } => Some(node),
-        Node::Split { id, axis, children, sizes } => {
+        Node::Split {
+            id,
+            axis,
+            children,
+            sizes,
+        } => {
             let mut kept_children = Vec::new();
             let mut kept_sizes = Vec::new();
-            for (child, size) in children.into_iter().zip(sizes.into_iter().chain(std::iter::repeat(0.0))) {
+            for (child, size) in children
+                .into_iter()
+                .zip(sizes.into_iter().chain(std::iter::repeat(0.0)))
+            {
                 if let Some(child) = tidy(child, remap) {
                     kept_children.push(child);
                     kept_sizes.push(size);
@@ -645,17 +722,34 @@ mod tests {
     fn splitting_a_lone_group_wraps_it() {
         let mut tree = Tree::new();
         let new = tree.split(1, Side::Right).unwrap();
-        let Node::Split { axis, children, .. } = &tree.root else { panic!("root is a split") };
+        let Node::Split { axis, children, .. } = &tree.root else {
+            panic!("root is a split")
+        };
         assert_eq!(*axis, Axis::Horizontal);
-        assert_eq!(children.iter().map(Node::id).collect::<Vec<_>>(), vec![1, new]);
+        assert_eq!(
+            children.iter().map(Node::id).collect::<Vec<_>>(),
+            vec![1, new]
+        );
     }
 
     #[test]
     fn splitting_along_the_parent_axis_joins_the_parent() {
-        let mut tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[]), group(2, &[])]));
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![group(1, &[]), group(2, &[])],
+        ));
         let new = tree.split(1, Side::Right).unwrap();
-        let Node::Split { children, sizes, .. } = &tree.root else { panic!() };
-        assert_eq!(children.iter().map(Node::id).collect::<Vec<_>>(), vec![1, new, 2]);
+        let Node::Split {
+            children, sizes, ..
+        } = &tree.root
+        else {
+            panic!()
+        };
+        assert_eq!(
+            children.iter().map(Node::id).collect::<Vec<_>>(),
+            vec![1, new, 2]
+        );
         assert!((sizes.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         assert!((sizes[0] - 0.25).abs() < 1e-5);
     }
@@ -666,10 +760,19 @@ mod tests {
         let mut tree = Tree::from_root(split(
             10,
             Axis::Horizontal,
-            vec![group(1, &[]), split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])])],
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
         ));
         assert!(tree.flip(11));
-        assert!(matches!(tree.find(11), Some(Node::Split { axis: Axis::Horizontal, .. })));
+        assert!(matches!(
+            tree.find(11),
+            Some(Node::Split {
+                axis: Axis::Horizontal,
+                ..
+            })
+        ));
         assert_eq!(tree.groups_under(11), vec![2, 3]);
     }
 
@@ -678,7 +781,10 @@ mod tests {
         let mut tree = Tree::from_root(split(
             10,
             Axis::Horizontal,
-            vec![group(1, &[]), split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])])],
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
         ));
         let (node, remap) = tree.detach(3).unwrap();
         assert_eq!(node.id(), 3);
@@ -693,7 +799,10 @@ mod tests {
         let mut tree = Tree::from_root(split(
             10,
             Axis::Horizontal,
-            vec![group(1, &[]), split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])])],
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
         ));
         assert!(tree.move_node(3, 11, Side::Left).is_some());
         assert_eq!(tree.groups(), vec![1, 3, 2]);
@@ -704,7 +813,10 @@ mod tests {
         let mut tree = Tree::from_root(split(
             10,
             Axis::Horizontal,
-            vec![group(1, &[]), split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])])],
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
         ));
         assert!(tree.move_node(11, 2, Side::Left).is_none());
         assert!(tree.move_node(10, 1, Side::Left).is_none());
@@ -712,17 +824,30 @@ mod tests {
 
     #[test]
     fn moving_beside_the_root_wraps_everything() {
-        let mut tree = Tree::from_root(split(10, Axis::Vertical, vec![group(1, &[]), group(2, &[])]));
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Vertical,
+            vec![group(1, &[]), group(2, &[])],
+        ));
         assert!(tree.move_node(2, 10, Side::Left).is_some());
         // 10 collapsed into 1 after 2 left, so 2 now sits beside 1.
-        let Node::Split { axis, children, .. } = &tree.root else { panic!() };
+        let Node::Split { axis, children, .. } = &tree.root else {
+            panic!()
+        };
         assert_eq!(*axis, Axis::Horizontal);
-        assert_eq!(children.iter().map(Node::id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(
+            children.iter().map(Node::id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
     }
 
     #[test]
     fn tabs_move_between_groups_and_groups_stay_when_emptied() {
-        let mut tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[100, 101]), group(2, &[])]));
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![group(1, &[100, 101]), group(2, &[])],
+        ));
         assert!(tree.move_tab(100, 2, None));
         assert_eq!(tree.tabs(1), &[101]);
         assert_eq!(tree.tabs(2), &[100]);
@@ -752,9 +877,15 @@ mod tests {
 
     #[test]
     fn resizing_keeps_the_pair_total() {
-        let mut tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[]), group(2, &[]), group(3, &[])]));
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![group(1, &[]), group(2, &[]), group(3, &[])],
+        ));
         tree.resize(10, 0, 0.5, 0.05);
-        let Node::Split { sizes, .. } = &tree.root else { panic!() };
+        let Node::Split { sizes, .. } = &tree.root else {
+            panic!()
+        };
         assert!((sizes[0] - 0.5).abs() < 1e-5);
         assert!((sizes[0] + sizes[1] - 2.0 / 3.0).abs() < 1e-5);
         assert!((sizes[2] - 1.0 / 3.0).abs() < 1e-5);
@@ -766,7 +897,10 @@ mod tests {
         let tree = Tree::from_root(split(
             10,
             Axis::Horizontal,
-            vec![group(1, &[]), split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])])],
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
         ));
         assert_eq!(tree.neighbor(1, Side::Right), Some(2));
         assert_eq!(tree.neighbor(3, Side::Left), Some(1));
@@ -778,7 +912,11 @@ mod tests {
 
     #[test]
     fn floating_out_and_back() {
-        let mut tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[100]), group(2, &[101])]));
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![group(1, &[100]), group(2, &[101])],
+        ));
         let (float, remap) = tree.float_out(2, None).unwrap();
         // 10 collapsed into 1, which is the main root now.
         assert_eq!(remap.get(&10), Some(&1));
@@ -836,7 +974,11 @@ mod tests {
 
     #[test]
     fn layouts_round_trip_through_json() {
-        let tree = Tree::from_root(split(10, Axis::Horizontal, vec![group(1, &[100]), group(2, &[])]));
+        let tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![group(1, &[100]), group(2, &[])],
+        ));
         let json = serde_json::to_string(&tree.root).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(back, tree.root);

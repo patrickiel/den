@@ -37,7 +37,11 @@ pub enum Tool {
     PowerShell(Option<PathBuf>),
     /// A downloaded dprint plugin: dprint, the plugin, and the file name the
     /// text goes by (dprint picks the language by it).
-    Dprint { exe: PathBuf, plugin: &'static Kit, name: String },
+    Dprint {
+        exe: PathBuf,
+        plugin: &'static Kit,
+        name: String,
+    },
 }
 
 impl Tool {
@@ -59,8 +63,33 @@ impl Tool {
 }
 
 const PRETTIER: &[&str] = &[
-    "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json", "jsonc", "json5", "css", "scss", "less", "html", "htm", "vue", "svelte", "md",
-    "markdown", "mdx", "yaml", "yml", "graphql", "gql", "hbs", "handlebars",
+    "js",
+    "mjs",
+    "cjs",
+    "jsx",
+    "ts",
+    "mts",
+    "cts",
+    "tsx",
+    "json",
+    "jsonc",
+    "json5",
+    "css",
+    "scss",
+    "less",
+    "html",
+    "htm",
+    "vue",
+    "svelte",
+    "md",
+    "markdown",
+    "mdx",
+    "yaml",
+    "yml",
+    "graphql",
+    "gql",
+    "hbs",
+    "handlebars",
 ];
 const C_FAMILY: &[&str] = &["c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx", "m", "mm"];
 const SHELL: &[&str] = &["sh", "bash", "zsh"];
@@ -68,7 +97,10 @@ const XML: &[&str] = &["xml", "svg", "xsd", "xsl", "xslt", "wsdl"];
 const POWERSHELL_FILES: &[&str] = &["ps1", "psm1", "psd1"];
 
 fn extension(path: &Path) -> String {
-    path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase()
+    path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 /// The formatter for `path`, if one is installed or downloaded; `Err` says
@@ -78,13 +110,17 @@ pub fn tool_for(path: &Path) -> Result<Tool, String> {
     let native = |make: fn(PathBuf) -> Tool, exe: &str| on_path(exe).map(make);
     let found = match ext.as_str() {
         e if PRETTIER.contains(&e) => prettier(path).map(Tool::Prettier),
-        "rs" => return native(Tool::Rustfmt, "rustfmt").ok_or_else(|| "rustfmt is not installed: rustup component add rustfmt".into()),
+        "rs" => {
+            return native(Tool::Rustfmt, "rustfmt")
+                .ok_or_else(|| "rustfmt is not installed: rustup component add rustfmt".into());
+        }
         "py" | "pyi" => native(Tool::Ruff, "ruff").or_else(|| native(Tool::Black, "black")),
         "go" => native(Tool::Gofmt, "gofmt"),
         e if SHELL.contains(&e) => native(Tool::Shfmt, "shfmt"),
         e if C_FAMILY.contains(&e) => native(Tool::ClangFormat, "clang-format"),
         "lua" => native(Tool::Stylua, "stylua").or_else(|| installed(&STYLUA).map(Tool::Stylua)),
-        "java" => native(Tool::JavaFormat, "google-java-format").or_else(|| installed(&JAVA_FORMAT).map(Tool::JavaFormat)),
+        "java" => native(Tool::JavaFormat, "google-java-format")
+            .or_else(|| installed(&JAVA_FORMAT).map(Tool::JavaFormat)),
         e if POWERSHELL_FILES.contains(&e) => match installed(&PSSCRIPTANALYZER) {
             Some(module) => Some(Tool::PowerShell(Some(module))),
             None => psscriptanalyzer_installed().then_some(Tool::PowerShell(None)),
@@ -99,7 +135,10 @@ pub fn tool_for(path: &Path) -> Result<Tool, String> {
     {
         return Ok(Tool::Dprint { exe, plugin, name });
     }
-    let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     Err(match kit_for(path) {
         Some(kit) => format!("{} is not installed", kit.name),
         None => format!("no formatter for {file}"),
@@ -109,7 +148,11 @@ pub fn tool_for(path: &Path) -> Result<Tool, String> {
 /// The project's Prettier (`node_modules/.bin` in the file's folder or one
 /// above it), else one on PATH.
 fn prettier(path: &Path) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "prettier.cmd" } else { "prettier" };
+    let exe = if cfg!(windows) {
+        "prettier.cmd"
+    } else {
+        "prettier"
+    };
     path.ancestors()
         .skip(1)
         .map(|dir| dir.join("node_modules").join(".bin").join(exe))
@@ -118,9 +161,17 @@ fn prettier(path: &Path) -> Option<PathBuf> {
 }
 
 /// `name` on PATH, with the Windows program extensions tried.
-fn on_path(name: &str) -> Option<PathBuf> {
-    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-    search_path().iter().find_map(|dir| exts.iter().map(|ext| dir.join(format!("{name}{ext}"))).find(|p| p.is_file()))
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
+    let exts: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat", ""]
+    } else {
+        &[""]
+    };
+    search_path().iter().find_map(|dir| {
+        exts.iter()
+            .map(|ext| dir.join(format!("{name}{ext}")))
+            .find(|p| p.is_file())
+    })
 }
 
 /// The folders of PATH. On Windows the saved user and machine PATH follow
@@ -129,11 +180,16 @@ fn on_path(name: &str) -> Option<PathBuf> {
 /// PATH over at start; see `main`.)
 fn search_path() -> Vec<PathBuf> {
     #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     #[cfg(windows)]
     for (key, sub) in [
         (windows_registry::CURRENT_USER, "Environment"),
-        (windows_registry::LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (
+            windows_registry::LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
     ] {
         if let Ok(saved) = key.open(sub).and_then(|k| k.get_string("Path")) {
             dirs.extend(std::env::split_paths(&expand_env(&saved)));
@@ -151,7 +207,11 @@ fn expand_env(text: &str) -> String {
     while let Some(start) = rest.find('%') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        match after.find('%').filter(|&end| end > 0).and_then(|end| Some((end, std::env::var(&after[..end]).ok()?))) {
+        match after
+            .find('%')
+            .filter(|&end| end > 0)
+            .and_then(|end| Some((end, std::env::var(&after[..end]).ok()?)))
+        {
             Some((end, value)) => {
                 out.push_str(&value);
                 rest = &after[end + 1..];
@@ -168,7 +228,9 @@ fn expand_env(text: &str) -> String {
 
 /// Whether PSScriptAnalyzer is in a folder PowerShell loads modules from.
 fn psscriptanalyzer_installed() -> bool {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PSModulePath").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PSModulePath")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     // Each PowerShell adds the user's folders itself, so den's environment may lack them.
     #[cfg(windows)]
     {
@@ -177,7 +239,9 @@ fn psscriptanalyzer_installed() -> bool {
             .and_then(|k| k.get_string("Personal"))
             .map(|d| PathBuf::from(expand_env(&d)))
             .ok()
-            .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Documents")));
+            .or_else(|| {
+                std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Documents"))
+            });
         let programs = std::env::var_os("ProgramFiles").map(PathBuf::from);
         for base in documents.into_iter().chain(programs) {
             dirs.push(base.join("WindowsPowerShell").join("Modules"));
@@ -187,7 +251,13 @@ fn psscriptanalyzer_installed() -> bool {
     #[cfg(not(windows))]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            dirs.push(PathBuf::from(home).join(".local").join("share").join("powershell").join("Modules"));
+            dirs.push(
+                PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("powershell")
+                    .join("Modules"),
+            );
         }
         dirs.push(PathBuf::from("/usr/local/share/powershell/Modules"));
         dirs.push(PathBuf::from("/usr/local/microsoft/powershell/7/Modules"));
@@ -233,7 +303,11 @@ const APPLE_ARM: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 static DPRINT: Kit = Kit {
     name: "dprint",
     formats: "runs the plugins",
-    file: if cfg!(windows) { "dprint.exe" } else { "dprint" },
+    file: if cfg!(windows) {
+        "dprint.exe"
+    } else {
+        "dprint"
+    },
     dir: "dprint-0.59.0",
     url: if cfg!(windows) {
         "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-pc-windows-msvc.zip"
@@ -253,8 +327,25 @@ static DPRINT: Kit = Kit {
     size: "9 MB",
 };
 
-const fn plugin(name: &'static str, formats: &'static str, file: &'static str, dir: &'static str, url: &'static str, sha256: &'static str, size: &'static str) -> Kit {
-    Kit { name, formats, file, dir, url, sha256, kind: Kind::Plugin, size }
+const fn plugin(
+    name: &'static str,
+    formats: &'static str,
+    file: &'static str,
+    dir: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    size: &'static str,
+) -> Kit {
+    Kit {
+        name,
+        formats,
+        file,
+        dir,
+        url,
+        sha256,
+        kind: Kind::Plugin,
+        size,
+    }
 }
 
 static PRETTIER_PLUGIN: Kit = plugin(
@@ -361,7 +452,11 @@ static CMAKE: Kit = plugin(
 static STYLUA: Kit = Kit {
     name: "StyLua",
     formats: "Lua",
-    file: if cfg!(windows) { "stylua.exe" } else { "stylua" },
+    file: if cfg!(windows) {
+        "stylua.exe"
+    } else {
+        "stylua"
+    },
     dir: "stylua-2.5.2",
     url: if cfg!(windows) {
         "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-windows-x86_64.zip"
@@ -386,7 +481,11 @@ static STYLUA: Kit = Kit {
 static JAVA_FORMAT: Kit = Kit {
     name: "google-java-format",
     formats: "Java",
-    file: if cfg!(windows) { "google-java-format.exe" } else { "google-java-format" },
+    file: if cfg!(windows) {
+        "google-java-format.exe"
+    } else {
+        "google-java-format"
+    },
     dir: "google-java-format-1.37.0",
     url: if cfg!(windows) {
         "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_windows-x86-64.exe"
@@ -413,8 +512,16 @@ static PSSCRIPTANALYZER: Kit = Kit {
     formats: "PowerShell",
     file: "PSScriptAnalyzer.psd1",
     dir: "PSScriptAnalyzer-1.25.0",
-    url: if cfg!(windows) { "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0" } else { "" },
-    sha256: if cfg!(windows) { "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60" } else { "" },
+    url: if cfg!(windows) {
+        "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0"
+    } else {
+        ""
+    },
+    sha256: if cfg!(windows) {
+        "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60"
+    } else {
+        ""
+    },
     kind: Kind::Zip,
     size: "15 MB",
 };
@@ -431,7 +538,11 @@ impl Kit {
     /// The download it takes to use this: its own, and dprint's for a plugin
     /// while dprint is missing.
     pub fn download_size(&self) -> String {
-        if self.kind == Kind::Plugin && !DPRINT.is_installed() { format!("{} + dprint {}", self.size, DPRINT.size) } else { self.size.to_string() }
+        if self.kind == Kind::Plugin && !DPRINT.is_installed() {
+            format!("{} + dprint {}", self.size, DPRINT.size)
+        } else {
+            self.size.to_string()
+        }
     }
 }
 
@@ -457,7 +568,14 @@ pub fn kits() -> &'static [&'static Kit] {
     // The ones with a download for this platform (Windows and macOS).
     static OFFERED: std::sync::OnceLock<Vec<&'static Kit>> = std::sync::OnceLock::new();
     OFFERED.get_or_init(|| {
-        if cfg!(any(windows, target_os = "macos")) { KITS.iter().copied().filter(|kit| !kit.url.is_empty()).collect() } else { Vec::new() }
+        if cfg!(any(windows, target_os = "macos")) {
+            KITS.iter()
+                .copied()
+                .filter(|kit| !kit.url.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        }
     })
 }
 
@@ -472,7 +590,11 @@ fn offered(kit: &'static Kit) -> bool {
 fn plugin_for(path: &Path) -> Option<(&'static Kit, String)> {
     let file = path.file_name()?.to_str()?.to_lowercase();
     let ext = extension(path);
-    if file == "dockerfile" || file == "containerfile" || file.starts_with("dockerfile.") || ext == "dockerfile" {
+    if file == "dockerfile"
+        || file == "containerfile"
+        || file.starts_with("dockerfile.")
+        || ext == "dockerfile"
+    {
         return Some((&DOCKERFILE, "Dockerfile".into()));
     }
     if file == "cmakelists.txt" {
@@ -539,7 +661,14 @@ pub fn install(kit: &'static Kit, cancel: &Cancel, progress: Progress) -> Result
     let dest = root.join(kit.dir);
     if kit.kind == Kind::Zip {
         let archive = root.join("downloads").join(format!("{}.zip", kit.dir));
-        http::download(kit.url, &archive, Some(kit.sha256), kit.name, cancel, progress)?;
+        http::download(
+            kit.url,
+            &archive,
+            Some(kit.sha256),
+            kit.name,
+            cancel,
+            progress,
+        )?;
         let tmp = root.join(format!("{}.tmp", kit.dir));
         process::unpack(&archive, &tmp, kit.name)?;
         let _ = std::fs::remove_dir_all(&dest);
@@ -562,13 +691,18 @@ pub fn install(kit: &'static Kit, cancel: &Cancel, progress: Progress) -> Result
         }
     }
     // Other versions, and what earlier dens downloaded, go.
-    let keep: Vec<&str> = kits().iter().map(|k| k.dir).chain(["downloads", "dprint-cache", "dprint-config"]).collect();
+    let keep: Vec<&str> = kits()
+        .iter()
+        .map(|k| k.dir)
+        .chain(["downloads", "dprint-cache", "dprint-config"])
+        .collect();
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         if !keep.contains(&entry.file_name().to_string_lossy().as_ref()) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    let file = installed(kit).ok_or_else(|| format!("The {} download has no {}", kit.name, kit.file))?;
+    let file =
+        installed(kit).ok_or_else(|| format!("The {} download has no {}", kit.name, kit.file))?;
     // A program downloaded as a plain file has no mode yet; one from a zip
     // may have lost it.
     #[cfg(unix)]
@@ -585,12 +719,18 @@ fn warm_up(kit: &'static Kit, file: &Path) -> Result<(), String> {
     let exe = installed(&DPRINT).ok_or("dprint is not installed")?;
     let config = write_dprint_config(kit, file)?;
     let mut cmd = Command::new(exe);
-    cmd.args(["fmt", "--stdin", plugin_sample(kit), "--config"]).arg(config).env("DPRINT_CACHE_DIR", dprint_cache());
+    cmd.args(["fmt", "--stdin", plugin_sample(kit), "--config"])
+        .arg(config)
+        .env("DPRINT_CACHE_DIR", dprint_cache());
     let out = output(cmd, "")?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("{} does not run: {}", kit.name, String::from_utf8_lossy(&out.stderr).trim()))
+        Err(format!(
+            "{} does not run: {}",
+            kit.name,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 
@@ -621,7 +761,11 @@ fn write_dprint_config(kit: &Kit, file: &Path) -> Result<PathBuf, String> {
         reference = format!("{reference}@{}", kit.sha256);
     }
     let path = dir.join(format!("{}.json", kit.dir));
-    std::fs::write(&path, serde_json::json!({ "plugins": [reference] }).to_string()).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &path,
+        serde_json::json!({ "plugins": [reference] }).to_string(),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(path)
 }
 
@@ -758,9 +902,17 @@ pub fn run(tool: &Tool, path: &Path, text: &str) -> Result<String, String> {
             cmd
         }
         Tool::PowerShell(module) => {
-            let shell = on_path("pwsh").or_else(|| on_path("powershell")).unwrap_or_else(|| "powershell".into());
+            let shell = on_path("pwsh")
+                .or_else(|| on_path("powershell"))
+                .unwrap_or_else(|| "powershell".into());
             let mut cmd = Command::new(shell);
-            cmd.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", &crate::terminal::encode_powershell(POWERSHELL)]);
+            cmd.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                &crate::terminal::encode_powershell(POWERSHELL),
+            ]);
             cmd.env("DEN_FORMAT_PATH", &file);
             if let Some(module) = module {
                 cmd.env("DEN_PSSA", module);
@@ -768,10 +920,13 @@ pub fn run(tool: &Tool, path: &Path, text: &str) -> Result<String, String> {
             cmd
         }
         Tool::Dprint { exe, plugin, name } => {
-            let plugin_file = installed(plugin).ok_or_else(|| format!("{} is not installed", plugin.name))?;
+            let plugin_file =
+                installed(plugin).ok_or_else(|| format!("{} is not installed", plugin.name))?;
             let config = write_dprint_config(plugin, &plugin_file)?;
             let mut cmd = Command::new(exe);
-            cmd.args(["fmt", "--stdin", name, "--config"]).arg(config).env("DPRINT_CACHE_DIR", dprint_cache());
+            cmd.args(["fmt", "--stdin", name, "--config"])
+                .arg(config)
+                .env("DPRINT_CACHE_DIR", dprint_cache());
             cmd
         }
     };
@@ -784,8 +939,16 @@ pub fn run(tool: &Tool, path: &Path, text: &str) -> Result<String, String> {
         Ok(keep_line_endings(text, formatted))
     } else {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let err = if err.is_empty() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { err };
-        Err(if err.is_empty() { format!("{} failed ({})", tool.name(), out.status) } else { err.lines().take(6).collect::<Vec<_>>().join("\n") })
+        let err = if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err
+        };
+        Err(if err.is_empty() {
+            format!("{} failed ({})", tool.name(), out.status)
+        } else {
+            err.lines().take(6).collect::<Vec<_>>().join("\n")
+        })
     }
 }
 
@@ -798,7 +961,11 @@ fn output(cmd: Command, text: &str) -> Result<std::process::Output, String> {
 /// Windows ones on Windows, Prettier Unix ones).
 fn keep_line_endings(original: &str, formatted: String) -> String {
     let unix = formatted.replace("\r\n", "\n");
-    if original.contains("\r\n") { unix.replace('\n', "\r\n") } else { unix }
+    if original.contains("\r\n") {
+        unix.replace('\n', "\r\n")
+    } else {
+        unix
+    }
 }
 
 #[cfg(test)]
@@ -814,7 +981,9 @@ mod tests {
 
     #[test]
     fn edition_from_the_nearest_manifest() {
-        let here = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("main.rs");
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs");
         assert_eq!(rust_edition(&here), "2024");
     }
 
@@ -827,17 +996,29 @@ mod tests {
     fn registry_strings_expand_known_variables() {
         let path = std::env::var("PATH").unwrap();
         assert_eq!(expand_env("%PATH%\\bin"), format!("{path}\\bin"));
-        assert_eq!(expand_env("100% %DEN_NO_SUCH_VAR% 5%"), "100% %DEN_NO_SUCH_VAR% 5%");
+        assert_eq!(
+            expand_env("100% %DEN_NO_SUCH_VAR% 5%"),
+            "100% %DEN_NO_SUCH_VAR% 5%"
+        );
         assert_eq!(expand_env("%%"), "%%");
     }
 
     #[test]
     fn plugins_by_file_name() {
         let name = |p: &str| plugin_for(Path::new(p)).map(|(kit, name)| (kit.name, name));
-        assert_eq!(name("src/App.svelte"), Some(("Prettier", "file.svelte".into())));
+        assert_eq!(
+            name("src/App.svelte"),
+            Some(("Prettier", "file.svelte".into()))
+        );
         assert_eq!(name("index.HTM"), Some(("Prettier", "file.html".into())));
-        assert_eq!(name("Dockerfile"), Some(("Dockerfile", "Dockerfile".into())));
-        assert_eq!(name("CMakeLists.txt"), Some(("cmakefmt", "CMakeLists.cmake".into())));
+        assert_eq!(
+            name("Dockerfile"),
+            Some(("Dockerfile", "Dockerfile".into()))
+        );
+        assert_eq!(
+            name("CMakeLists.txt"),
+            Some(("cmakefmt", "CMakeLists.cmake".into()))
+        );
         assert_eq!(name("main.cpp"), Some(("clang-format", "file.cpp".into())));
         assert_eq!(name("page.hbs"), None);
     }

@@ -50,7 +50,9 @@ pub fn apply(cx: &mut App) {
 /// Paint the window with a theme without choosing it (Settings' menu, on
 /// hover); `apply` goes back to the chosen one.
 pub fn preview(choice: ThemeChoice, color_theme: &str, cx: &mut App) {
-    let imported = (!color_theme.is_empty()).then(|| load(color_theme)).flatten();
+    let imported = (!color_theme.is_empty())
+        .then(|| load(color_theme))
+        .flatten();
     let theme = match &imported {
         Some(theme) => theme,
         None => builtin(choice == ThemeChoice::Dark),
@@ -100,16 +102,34 @@ fn load(id: &str) -> Option<VsTheme> {
 /// Returns its id.
 pub fn import(path: &Path) -> anyhow::Result<String> {
     let value = resolve(path, 0)?;
-    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let name = value["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| label_of(&stem));
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name = value["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| label_of(&stem));
     let mut value = value;
     value["name"] = json!(name);
     // Checks it is a theme at all.
     parse(&value.to_string(), &stem)?;
-    let slug: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let id = format!("user-{}", slug.trim_matches('-').chars().take(60).collect::<String>());
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let id = format!(
+        "user-{}",
+        slug.trim_matches('-').chars().take(60).collect::<String>()
+    );
     std::fs::create_dir_all(themes_dir())?;
-    std::fs::write(themes_dir().join(format!("{id}.json")), serde_json::to_string_pretty(&value)?)?;
+    std::fs::write(
+        themes_dir().join(format!("{id}.json")),
+        serde_json::to_string_pretty(&value)?,
+    )?;
     Ok(id)
 }
 
@@ -120,16 +140,22 @@ pub fn remove(id: &str) {
 /// A theme file with its `include` chain folded in: the including file's
 /// colours and token rules win, as in VS Code.
 fn resolve(path: &Path, depth: usize) -> anyhow::Result<Value> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut value: Value = serde_json::from_str(&strip_jsonc(&text)).context("not a JSON file")?;
     if !value.is_object() {
         bail!("not a theme file");
     }
-    let Some(include) = value["include"].as_str().map(str::to_string) else { return Ok(value) };
+    let Some(include) = value["include"].as_str().map(str::to_string) else {
+        return Ok(value);
+    };
     if depth >= 8 {
         bail!("includes go too deep");
     }
-    let base = resolve(&path.parent().unwrap_or(Path::new(".")).join(include), depth + 1)?;
+    let base = resolve(
+        &path.parent().unwrap_or(Path::new(".")).join(include),
+        depth + 1,
+    )?;
     let mut colors = base["colors"].as_object().cloned().unwrap_or_default();
     colors.extend(value["colors"].as_object().cloned().unwrap_or_default());
     let mut tokens = base["tokenColors"].as_array().cloned().unwrap_or_default();
@@ -153,20 +179,38 @@ pub fn parse(text: &str, id: &str) -> anyhow::Result<VsTheme> {
     let value: Value = serde_json::from_str(&strip_jsonc(text)).context("not a JSON file")?;
     let colors: HashMap<String, String> = value["colors"]
         .as_object()
-        .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).filter(|(_, v)| !v.is_empty()).collect())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .filter(|(_, v)| !v.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let token_colors = value["tokenColors"].as_array().cloned().unwrap_or_default();
     if colors.is_empty() && token_colors.is_empty() {
-        return Err(anyhow!("no \"colors\" or \"tokenColors\": not a VS Code color theme"));
+        return Err(anyhow!(
+            "no \"colors\" or \"tokenColors\": not a VS Code color theme"
+        ));
     }
     let dark = match value["type"].as_str().map(str::to_lowercase).as_deref() {
         Some("light" | "hclight" | "hc-light") => false,
         Some(_) => true,
         // No type: guess from the editor's background.
-        None => colors.get("editor.background").and_then(|bg| luminance(bg)).is_none_or(|l| l <= 128.),
+        None => colors
+            .get("editor.background")
+            .and_then(|bg| luminance(bg))
+            .is_none_or(|l| l <= 128.),
     };
-    let name = value["name"].as_str().map(str::to_string).unwrap_or_else(|| label_of(id));
-    Ok(VsTheme { name, dark, colors, token_colors })
+    let name = value["name"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| label_of(id));
+    Ok(VsTheme {
+        name,
+        dark,
+        colors,
+        token_colors,
+    })
 }
 
 /// 0 (black) to 255 (white), as the W3C weighs the channels.
@@ -178,13 +222,20 @@ fn luminance(hex: &str) -> Option<f32> {
 /// `monokai-color-theme` → "Monokai", `dark_modern` → "Dark Modern".
 fn label_of(stem: &str) -> String {
     let lower = stem.to_lowercase();
-    let stem = lower.strip_suffix("color-theme").or_else(|| lower.strip_suffix("color_theme")).unwrap_or(&lower);
+    let stem = lower
+        .strip_suffix("color-theme")
+        .or_else(|| lower.strip_suffix("color_theme"))
+        .unwrap_or(&lower);
     let words: Vec<String> = stem
         .split(['-', '_', ' '])
         .filter(|w| !w.is_empty())
         .map(|w| w[..1].to_uppercase() + &w[1..])
         .collect();
-    if words.is_empty() { "Theme".into() } else { words.join(" ") }
+    if words.is_empty() {
+        "Theme".into()
+    } else {
+        words.join(" ")
+    }
 }
 
 /// JSON with the comments and trailing commas VS Code allows, made plain.
@@ -211,7 +262,9 @@ pub fn strip_jsonc(text: &str) -> String {
             }
             b'/' if bytes.get(i + 1) == Some(&b'*') => {
                 out.push_str(&text[start..i]);
-                i = text[i + 2..].find("*/").map_or(bytes.len(), |end| i + 2 + end + 2);
+                i = text[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |end| i + 2 + end + 2);
                 start = i;
             }
             _ => i += 1,
@@ -236,7 +289,12 @@ pub fn strip_jsonc(text: &str) -> String {
         } else if c == '"' {
             in_string = true;
             result.push(c);
-        } else if c == ',' && chars[k + 1..].iter().find(|c| !c.is_whitespace()).is_some_and(|n| *n == '}' || *n == ']') {
+        } else if c == ','
+            && chars[k + 1..]
+                .iter()
+                .find(|c| !c.is_whitespace())
+                .is_some_and(|n| *n == '}' || *n == ']')
+        {
             // dropped
         } else {
             result.push(c);
@@ -271,32 +329,95 @@ fn to_config(theme: &VsTheme, base: &VsTheme) -> Value {
     };
     set("background", &["editor.background"]);
     set("foreground", &["foreground", "editor.foreground"]);
-    set("border", &["sideBar.border", "panel.border", "editorGroup.border", "contrastBorder"]);
-    set("muted.background", &["editorWidget.background", "input.background"]);
-    set("muted.foreground", &["descriptionForeground", "disabledForeground"]);
-    set("accent.background", &["toolbar.hoverBackground", "list.hoverBackground"]);
+    set(
+        "border",
+        &[
+            "sideBar.border",
+            "panel.border",
+            "editorGroup.border",
+            "contrastBorder",
+        ],
+    );
+    set(
+        "muted.background",
+        &["editorWidget.background", "input.background"],
+    );
+    set(
+        "muted.foreground",
+        &["descriptionForeground", "disabledForeground"],
+    );
+    set(
+        "accent.background",
+        &["toolbar.hoverBackground", "list.hoverBackground"],
+    );
     set("accent.foreground", &["foreground", "editor.foreground"]);
     set("primary.background", &["button.background", "focusBorder"]);
-    set("primary.hover.background", &["button.hoverBackground", "button.background"]);
-    set("primary.active.background", &["button.hoverBackground", "button.background"]);
+    set(
+        "primary.hover.background",
+        &["button.hoverBackground", "button.background"],
+    );
+    set(
+        "primary.active.background",
+        &["button.hoverBackground", "button.background"],
+    );
     set("primary.foreground", &["button.foreground"]);
-    set("secondary.background", &["button.secondaryBackground", "input.background"]);
-    set("secondary.hover.background", &["button.secondaryHoverBackground", "toolbar.hoverBackground"]);
-    set("secondary.active.background", &["button.secondaryHoverBackground", "toolbar.hoverBackground"]);
-    set("secondary.foreground", &["button.secondaryForeground", "foreground"]);
-    set("popover.background", &["menu.background", "dropdown.background", "editorWidget.background"]);
+    set(
+        "secondary.background",
+        &["button.secondaryBackground", "input.background"],
+    );
+    set(
+        "secondary.hover.background",
+        &["button.secondaryHoverBackground", "toolbar.hoverBackground"],
+    );
+    set(
+        "secondary.active.background",
+        &["button.secondaryHoverBackground", "toolbar.hoverBackground"],
+    );
+    set(
+        "secondary.foreground",
+        &["button.secondaryForeground", "foreground"],
+    );
+    set(
+        "popover.background",
+        &[
+            "menu.background",
+            "dropdown.background",
+            "editorWidget.background",
+        ],
+    );
     set("popover.foreground", &["menu.foreground", "foreground"]);
-    set("input.border", &["input.border", "dropdown.border", "widget.border"]);
+    set(
+        "input.border",
+        &["input.border", "dropdown.border", "widget.border"],
+    );
     set("ring", &["focusBorder"]);
     set("caret", &["editorCursor.foreground", "foreground"]);
     set("selection.background", &["editor.selectionBackground"]);
     set("link", &["textLink.foreground"]);
-    set("link.hover", &["textLink.activeForeground", "textLink.foreground"]);
-    set("link.active", &["textLink.activeForeground", "textLink.foreground"]);
-    set("list.background", &["sideBar.background", "editor.background"]);
-    set("list.even.background", &["sideBar.background", "editor.background"]);
+    set(
+        "link.hover",
+        &["textLink.activeForeground", "textLink.foreground"],
+    );
+    set(
+        "link.active",
+        &["textLink.activeForeground", "textLink.foreground"],
+    );
+    set(
+        "list.background",
+        &["sideBar.background", "editor.background"],
+    );
+    set(
+        "list.even.background",
+        &["sideBar.background", "editor.background"],
+    );
     set("list.hover.background", &["list.hoverBackground"]);
-    set("list.active.background", &["list.activeSelectionBackground", "list.inactiveSelectionBackground"]);
+    set(
+        "list.active.background",
+        &[
+            "list.activeSelectionBackground",
+            "list.inactiveSelectionBackground",
+        ],
+    );
     set("list.active.border", &["list.focusOutline", "focusBorder"]);
     set("sidebar.background", &["sideBar.background"]);
     set("sidebar.foreground", &["sideBar.foreground", "foreground"]);
@@ -305,28 +426,74 @@ fn to_config(theme: &VsTheme, base: &VsTheme) -> Value {
     set("sidebar.accent.foreground", &["foreground"]);
     set("sidebar.primary.background", &["button.background"]);
     set("sidebar.primary.foreground", &["button.foreground"]);
-    set("title_bar.background", &["titleBar.activeBackground", "sideBar.background"]);
+    set(
+        "title_bar.background",
+        &["titleBar.activeBackground", "sideBar.background"],
+    );
     set("title_bar.border", &["titleBar.border", "sideBar.border"]);
     set("status_bar.background", &["statusBar.background"]);
     set("status_bar.border", &["statusBar.border", "sideBar.border"]);
     set("tab_bar.background", &["editorGroupHeader.tabsBackground"]);
-    set("tab.background", &["tab.inactiveBackground", "editorGroupHeader.tabsBackground"]);
-    set("tab.active.background", &["tab.activeBackground", "editor.background"]);
+    set(
+        "tab.background",
+        &["tab.inactiveBackground", "editorGroupHeader.tabsBackground"],
+    );
+    set(
+        "tab.active.background",
+        &["tab.activeBackground", "editor.background"],
+    );
     set("tab.foreground", &["tab.inactiveForeground"]);
     set("tab.active.foreground", &["tab.activeForeground"]);
-    set("scrollbar.thumb.background", &["scrollbarSlider.background"]);
-    set("scrollbar.thumb.hover.background", &["scrollbarSlider.hoverBackground"]);
-    set("danger.background", &["inputValidation.errorBorder", "errorForeground"]);
-    set("danger.hover.background", &["inputValidation.errorBorder", "errorForeground"]);
-    set("danger.active.background", &["inputValidation.errorBorder", "errorForeground"]);
-    set("warning.background", &["notificationsWarningIcon.foreground", "editorWarning.foreground"]);
-    set("info.background", &["notificationsInfoIcon.foreground", "editorInfo.foreground"]);
-    set("success.background", &["gitDecoration.addedResourceForeground"]);
+    set(
+        "scrollbar.thumb.background",
+        &["scrollbarSlider.background"],
+    );
+    set(
+        "scrollbar.thumb.hover.background",
+        &["scrollbarSlider.hoverBackground"],
+    );
+    set(
+        "danger.background",
+        &["inputValidation.errorBorder", "errorForeground"],
+    );
+    set(
+        "danger.hover.background",
+        &["inputValidation.errorBorder", "errorForeground"],
+    );
+    set(
+        "danger.active.background",
+        &["inputValidation.errorBorder", "errorForeground"],
+    );
+    set(
+        "warning.background",
+        &[
+            "notificationsWarningIcon.foreground",
+            "editorWarning.foreground",
+        ],
+    );
+    set(
+        "info.background",
+        &["notificationsInfoIcon.foreground", "editorInfo.foreground"],
+    );
+    set(
+        "success.background",
+        &["gitDecoration.addedResourceForeground"],
+    );
     set("drop_target.background", &["editorGroup.dropBackground"]);
     set("drag.border", &["focusBorder"]);
-    for (key, ansi) in [("red", "Red"), ("green", "Green"), ("yellow", "Yellow"), ("blue", "Blue"), ("magenta", "Magenta"), ("cyan", "Cyan")] {
+    for (key, ansi) in [
+        ("red", "Red"),
+        ("green", "Green"),
+        ("yellow", "Yellow"),
+        ("blue", "Blue"),
+        ("magenta", "Magenta"),
+        ("cyan", "Cyan"),
+    ] {
         set(&format!("base.{key}"), &[&format!("terminal.ansi{ansi}")]);
-        set(&format!("base.{key}.light"), &[&format!("terminal.ansiBright{ansi}")]);
+        set(
+            &format!("base.{key}.light"),
+            &[&format!("terminal.ansiBright{ansi}")],
+        );
     }
 
     let mut highlight = Map::new();
@@ -337,15 +504,28 @@ fn to_config(theme: &VsTheme, base: &VsTheme) -> Value {
     };
     put("editor.background", &["editor.background"]);
     put("editor.foreground", &["editor.foreground", "foreground"]);
-    put("editor.active_line.background", &["editor.lineHighlightBackground"]);
+    put(
+        "editor.active_line.background",
+        &["editor.lineHighlightBackground"],
+    );
     put("editor.line_number", &["editorLineNumber.foreground"]);
-    put("editor.active_line_number", &["editorLineNumber.activeForeground"]);
-    put("editor.gutter.background", &["editorGutter.background", "editor.background"]);
+    put(
+        "editor.active_line_number",
+        &["editorLineNumber.activeForeground"],
+    );
+    put(
+        "editor.gutter.background",
+        &["editorGutter.background", "editor.background"],
+    );
     put("error", &["editorError.foreground", "errorForeground"]);
     put("warning", &["editorWarning.foreground"]);
     put("info", &["editorInfo.foreground"]);
     // A theme without token colours (a workbench-only file) keeps its kind's.
-    let tokens = if theme.token_colors.is_empty() { &base.token_colors } else { &theme.token_colors };
+    let tokens = if theme.token_colors.is_empty() {
+        &base.token_colors
+    } else {
+        &theme.token_colors
+    };
     highlight.insert("syntax".into(), Value::Object(syntax(tokens)));
 
     json!({
@@ -359,11 +539,20 @@ fn to_config(theme: &VsTheme, base: &VsTheme) -> Value {
 /// Tree-sitter capture → the TextMate scopes that colour it, most specific first.
 const CAPTURES: &[(&str, &[&str])] = &[
     ("attribute", &["entity.other.attribute-name"]),
-    ("boolean", &["constant.language.boolean", "constant.language"]),
+    (
+        "boolean",
+        &["constant.language.boolean", "constant.language"],
+    ),
     ("comment", &["comment"]),
     ("comment.doc", &["comment.block.documentation", "comment"]),
-    ("constant", &["variable.other.constant", "constant.language", "constant"]),
-    ("constructor", &["entity.name.type.class", "entity.name.type"]),
+    (
+        "constant",
+        &["variable.other.constant", "constant.language", "constant"],
+    ),
+    (
+        "constructor",
+        &["entity.name.type.class", "entity.name.type"],
+    ),
     ("embedded", &["meta.embedded"]),
     ("emphasis", &["markup.italic"]),
     ("emphasis.strong", &["markup.bold"]),
@@ -375,25 +564,59 @@ const CAPTURES: &[(&str, &[&str])] = &[
     ("link_uri", &["markup.underline.link"]),
     ("number", &["constant.numeric"]),
     ("operator", &["keyword.operator"]),
-    ("preproc", &["meta.preprocessor", "keyword.control.directive"]),
-    ("property", &["variable.other.property", "support.type.property-name", "variable.other.object.property"]),
+    (
+        "preproc",
+        &["meta.preprocessor", "keyword.control.directive"],
+    ),
+    (
+        "property",
+        &[
+            "variable.other.property",
+            "support.type.property-name",
+            "variable.other.object.property",
+        ],
+    ),
     ("punctuation", &["punctuation"]),
-    ("punctuation.bracket", &["punctuation.bracket", "punctuation"]),
-    ("punctuation.delimiter", &["punctuation.separator", "punctuation"]),
-    ("punctuation.list_marker", &["punctuation.definition.list", "markup.list"]),
-    ("punctuation.special", &["punctuation.definition.template-expression", "punctuation"]),
+    (
+        "punctuation.bracket",
+        &["punctuation.bracket", "punctuation"],
+    ),
+    (
+        "punctuation.delimiter",
+        &["punctuation.separator", "punctuation"],
+    ),
+    (
+        "punctuation.list_marker",
+        &["punctuation.definition.list", "markup.list"],
+    ),
+    (
+        "punctuation.special",
+        &["punctuation.definition.template-expression", "punctuation"],
+    ),
     ("string", &["string"]),
     ("string.escape", &["constant.character.escape"]),
     ("string.regex", &["string.regexp"]),
     ("string.special", &["string.other", "string"]),
-    ("string.special.symbol", &["constant.other.symbol", "string"]),
+    (
+        "string.special.symbol",
+        &["constant.other.symbol", "string"],
+    ),
     ("tag", &["entity.name.tag"]),
-    ("tag.doctype", &["meta.tag.metadata.doctype", "entity.name.tag"]),
+    (
+        "tag.doctype",
+        &["meta.tag.metadata.doctype", "entity.name.tag"],
+    ),
     ("text.code.span", &["markup.inline.raw"]),
     ("text.literal", &["markup.inline.raw", "string"]),
     ("title", &["markup.heading", "entity.name.section"]),
-    ("type", &["entity.name.type", "support.type", "support.class"]),
-    ("variable", &["variable.other.readwrite", "variable.other", "variable"]),
+    (
+        "type",
+        &["entity.name.type", "support.type", "support.class"],
+    ),
+    (
+        "variable",
+        &["variable.other.readwrite", "variable.other", "variable"],
+    ),
     ("variable.special", &["variable.language"]),
     ("variant", &["variable.other.enummember", "constant.other"]),
 ];
@@ -404,14 +627,20 @@ fn syntax(tokens: &[Value]) -> Map<String, Value> {
     let mut rules: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     for entry in tokens {
         let settings = &entry["settings"];
-        let foreground = settings["foreground"].as_str().filter(|v| Rgba::try_from(*v).is_ok()).map(str::to_string);
+        let foreground = settings["foreground"]
+            .as_str()
+            .filter(|v| Rgba::try_from(*v).is_ok())
+            .map(str::to_string);
         let style = settings["fontStyle"].as_str().map(|s| s.trim().to_string());
         if foreground.is_none() && style.is_none() {
             continue;
         }
         let scopes: Vec<String> = match &entry["scope"] {
             Value::String(s) => s.split(',').map(str::to_string).collect(),
-            Value::Array(list) => list.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            Value::Array(list) => list
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
             _ => continue,
         };
         for raw in scopes {
@@ -428,11 +657,15 @@ fn syntax(tokens: &[Value]) -> Map<String, Value> {
             rules
                 .iter()
                 .enumerate()
-                .filter(|(_, (scope, ..))| target == scope || target.starts_with(&format!("{scope}.")))
+                .filter(|(_, (scope, ..))| {
+                    target == scope || target.starts_with(&format!("{scope}."))
+                })
                 .max_by_key(|(ix, (scope, ..))| (scope.len(), *ix))
                 .map(|(_, rule)| rule.clone())
         });
-        let Some((_, foreground, style)) = found else { continue };
+        let Some((_, foreground, style)) = found else {
+            continue;
+        };
         let mut entry = Map::new();
         if let Some(color) = foreground {
             entry.insert("color".into(), json!(color));
@@ -455,10 +688,28 @@ fn syntax(tokens: &[Value]) -> Map<String, Value> {
 /// The terminal palette for `theme`.
 fn terminal_palette(theme: &VsTheme, base: &VsTheme) -> crate::terminal::colors::TermColors {
     let c = merged(theme, base);
-    let color = |keys: &[&str]| c(keys).and_then(|hex| Rgba::try_from(hex.as_str()).ok()).map(Hsla::from);
+    let color = |keys: &[&str]| {
+        c(keys)
+            .and_then(|hex| Rgba::try_from(hex.as_str()).ok())
+            .map(Hsla::from)
+    };
     const NAMES: [&str; 16] = [
-        "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "BrightBlack", "BrightRed", "BrightGreen", "BrightYellow", "BrightBlue",
-        "BrightMagenta", "BrightCyan", "BrightWhite",
+        "Black",
+        "Red",
+        "Green",
+        "Yellow",
+        "Blue",
+        "Magenta",
+        "Cyan",
+        "White",
+        "BrightBlack",
+        "BrightRed",
+        "BrightGreen",
+        "BrightYellow",
+        "BrightBlue",
+        "BrightMagenta",
+        "BrightCyan",
+        "BrightWhite",
     ];
     let mut ansi = crate::terminal::colors::TermColors::default().ansi;
     for (slot, name) in ansi.iter_mut().zip(NAMES) {
@@ -466,7 +717,11 @@ fn terminal_palette(theme: &VsTheme, base: &VsTheme) -> crate::terminal::colors:
             *slot = value;
         }
     }
-    let background = color(&["terminal.background", "panel.background", "editor.background"]);
+    let background = color(&[
+        "terminal.background",
+        "panel.background",
+        "editor.background",
+    ]);
     let foreground = color(&["terminal.foreground", "foreground"]);
     crate::terminal::colors::TermColors {
         ansi,
@@ -482,10 +737,12 @@ fn terminal_palette(theme: &VsTheme, base: &VsTheme) -> crate::terminal::colors:
 /// den's Dark or Light (VS Code's Dark Modern and Light Modern, Dark+ and
 /// Light+ token colours), each built once.
 pub fn builtin(dark: bool) -> &'static VsTheme {
-    static BUILTIN: std::sync::LazyLock<[VsTheme; 2]> = std::sync::LazyLock::new(|| [make(false), make(true)]);
+    static BUILTIN: std::sync::LazyLock<[VsTheme; 2]> =
+        std::sync::LazyLock::new(|| [make(false), make(true)]);
     fn make(dark: bool) -> VsTheme {
         let value = if dark { dark_theme() } else { light_theme() };
-        parse(&value.to_string(), if dark { "dark" } else { "light" }).expect("built-in themes parse")
+        parse(&value.to_string(), if dark { "dark" } else { "light" })
+            .expect("built-in themes parse")
     }
     &BUILTIN[dark as usize]
 }
@@ -730,10 +987,26 @@ mod tests {
 
     #[test]
     fn kind_from_type_or_background() {
-        assert!(!parse(r##"{"type":"light","colors":{"a":"#fff"}}"##, "x").unwrap().dark);
-        assert!(!parse(r##"{"colors":{"editor.background":"#fafafa"}}"##, "x").unwrap().dark);
-        assert!(!parse(r##"{"colors":{"editor.background":"#fff"}}"##, "x").unwrap().dark);
-        assert!(parse(r##"{"colors":{"editor.background":"#101010"}}"##, "x").unwrap().dark);
+        assert!(
+            !parse(r##"{"type":"light","colors":{"a":"#fff"}}"##, "x")
+                .unwrap()
+                .dark
+        );
+        assert!(
+            !parse(r##"{"colors":{"editor.background":"#fafafa"}}"##, "x")
+                .unwrap()
+                .dark
+        );
+        assert!(
+            !parse(r##"{"colors":{"editor.background":"#fff"}}"##, "x")
+                .unwrap()
+                .dark
+        );
+        assert!(
+            parse(r##"{"colors":{"editor.background":"#101010"}}"##, "x")
+                .unwrap()
+                .dark
+        );
         assert!(parse("{}", "x").is_err());
     }
 
@@ -755,7 +1028,8 @@ mod tests {
     fn built_in_themes_become_component_themes() {
         for dark in [true, false] {
             let theme = builtin(dark);
-            let config: gpui_kit::component::ThemeConfig = serde_json::from_value(to_config(theme, theme)).unwrap();
+            let config: gpui_kit::component::ThemeConfig =
+                serde_json::from_value(to_config(theme, theme)).unwrap();
             assert!(config.highlight.is_some());
         }
     }

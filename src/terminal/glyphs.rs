@@ -19,7 +19,13 @@ pub struct Rect {
 }
 
 const fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
-    Rect { x, y, w, h, alpha: 1.0 }
+    Rect {
+        x,
+        y,
+        w,
+        h,
+        alpha: 1.0,
+    }
 }
 
 const UPPER_LEFT: Rect = rect(0.0, 0.0, 0.5, 0.5);
@@ -46,7 +52,10 @@ pub fn block(c: char) -> Option<SmallVec<[Rect; 3]>> {
         0x2590 => smallvec![rect(0.5, 0.0, 0.5, 1.0)],
         0x2591..=0x2593 => {
             let alpha = (code - 0x2590) as f32 * 0.25;
-            smallvec![Rect { alpha, ..rect(0.0, 0.0, 1.0, 1.0) }]
+            smallvec![Rect {
+                alpha,
+                ..rect(0.0, 0.0, 1.0, 1.0)
+            }]
         }
         0x2594 => smallvec![rect(0.0, 0.0, 1.0, 0.125)],
         0x2595 => smallvec![rect(0.875, 0.0, 0.125, 1.0)],
@@ -109,7 +118,13 @@ pub fn arms(c: char) -> Option<Arms> {
         '╷' => (false, true, false, false, false),
         _ => return None,
     };
-    Some(Arms { up, down, left, right, heavy })
+    Some(Arms {
+        up,
+        down,
+        left,
+        right,
+        heavy,
+    })
 }
 
 #[cfg(test)]
@@ -118,18 +133,42 @@ mod tests {
 
     #[test]
     fn eighths_grow_from_their_edge() {
-        assert_eq!(block('▁').as_deref(), Some([rect(0.0, 0.875, 1.0, 0.125)].as_slice()));
-        assert_eq!(block('▇').as_deref(), Some([rect(0.0, 0.125, 1.0, 0.875)].as_slice()));
-        assert_eq!(block('▉').as_deref(), Some([rect(0.0, 0.0, 0.875, 1.0)].as_slice()));
-        assert_eq!(block('▏').as_deref(), Some([rect(0.0, 0.0, 0.125, 1.0)].as_slice()));
+        assert_eq!(
+            block('▁').as_deref(),
+            Some([rect(0.0, 0.875, 1.0, 0.125)].as_slice())
+        );
+        assert_eq!(
+            block('▇').as_deref(),
+            Some([rect(0.0, 0.125, 1.0, 0.875)].as_slice())
+        );
+        assert_eq!(
+            block('▉').as_deref(),
+            Some([rect(0.0, 0.0, 0.875, 1.0)].as_slice())
+        );
+        assert_eq!(
+            block('▏').as_deref(),
+            Some([rect(0.0, 0.0, 0.125, 1.0)].as_slice())
+        );
     }
 
     #[test]
     fn halves_and_quadrants() {
-        assert_eq!(block('▀').as_deref(), Some([rect(0.0, 0.0, 1.0, 0.5)].as_slice()));
-        assert_eq!(block('▄').as_deref(), Some([rect(0.0, 0.5, 1.0, 0.5)].as_slice()));
-        assert_eq!(block('▐').as_deref(), Some([rect(0.5, 0.0, 0.5, 1.0)].as_slice()));
-        assert_eq!(block('▚').as_deref(), Some([UPPER_LEFT, LOWER_RIGHT].as_slice()));
+        assert_eq!(
+            block('▀').as_deref(),
+            Some([rect(0.0, 0.0, 1.0, 0.5)].as_slice())
+        );
+        assert_eq!(
+            block('▄').as_deref(),
+            Some([rect(0.0, 0.5, 1.0, 0.5)].as_slice())
+        );
+        assert_eq!(
+            block('▐').as_deref(),
+            Some([rect(0.5, 0.0, 0.5, 1.0)].as_slice())
+        );
+        assert_eq!(
+            block('▚').as_deref(),
+            Some([UPPER_LEFT, LOWER_RIGHT].as_slice())
+        );
     }
 
     #[test]

@@ -19,7 +19,11 @@ pub const ENCODINGS: &[(&str, &str, &str)] = &[
     ("windows-1257", "Baltic (Windows 1257)", "Windows 1257"),
     ("iso-8859-4", "Baltic (ISO 8859-4)", "ISO 8859-4"),
     ("iso-8859-14", "Celtic (ISO 8859-14)", "ISO 8859-14"),
-    ("windows-1250", "Central European (Windows 1250)", "Windows 1250"),
+    (
+        "windows-1250",
+        "Central European (Windows 1250)",
+        "Windows 1250",
+    ),
     ("iso-8859-2", "Central European (ISO 8859-2)", "ISO 8859-2"),
     ("windows-1251", "Cyrillic (Windows 1251)", "Windows 1251"),
     ("ibm866", "Cyrillic (CP 866)", "CP 866"),
@@ -46,14 +50,18 @@ pub const ENCODINGS: &[(&str, &str, &str)] = &[
 
 /// The status bar's name for `id`.
 pub fn short_name(id: &str) -> &str {
-    ENCODINGS.iter().find(|(e, ..)| *e == id).map_or(id, |(_, _, short)| short)
+    ENCODINGS
+        .iter()
+        .find(|(e, ..)| *e == id)
+        .map_or(id, |(_, _, short)| short)
 }
 
 /// A file read for a tab is limited to this many bytes.
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 fn lookup(label: &str) -> Result<&'static encoding_rs::Encoding, String> {
-    encoding_rs::Encoding::for_label(label.as_bytes()).ok_or_else(|| format!("unknown encoding {label}"))
+    encoding_rs::Encoding::for_label(label.as_bytes())
+        .ok_or_else(|| format!("unknown encoding {label}"))
 }
 
 /// Read a file: in `encoding`, else by its BOM (UTF-8, UTF-16 LE/BE), else
@@ -62,7 +70,10 @@ fn lookup(label: &str) -> Result<&'static encoding_rs::Encoding, String> {
 pub fn read(path: &Path, encoding: Option<&str>) -> Result<(String, String), String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_BYTES {
-        return Err(format!("The file is larger than {} MB.", MAX_BYTES / 1024 / 1024));
+        return Err(format!(
+            "The file is larger than {} MB.",
+            MAX_BYTES / 1024 / 1024
+        ));
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let encoding = match encoding {
@@ -71,7 +82,9 @@ pub fn read(path: &Path, encoding: Option<&str>) -> Result<(String, String), Str
             [0xEF, 0xBB, 0xBF, ..] => "utf8bom".into(),
             [0xFF, 0xFE, ..] => "utf16le".into(),
             [0xFE, 0xFF, ..] => "utf16be".into(),
-            _ if bytes.iter().take(8000).any(|&b| b == 0) => return Err("This is a binary file.".into()),
+            _ if bytes.iter().take(8000).any(|&b| b == 0) => {
+                return Err("This is a binary file.".into());
+            }
             _ if std::str::from_utf8(&bytes).is_ok() => "utf8".into(),
             _ => "windows-1252".into(),
         },
@@ -91,13 +104,24 @@ pub fn write(path: &Path, text: &str, encoding: &str) -> Result<(), String> {
     let bytes: Vec<u8> = match encoding {
         "utf8" => text.as_bytes().to_vec(),
         "utf8bom" => [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat(),
-        "utf16le" => [0xFEFFu16].into_iter().chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
-        "utf16be" => [0xFEFFu16].into_iter().chain(text.encode_utf16()).flat_map(u16::to_be_bytes).collect(),
+        "utf16le" => [0xFEFFu16]
+            .into_iter()
+            .chain(text.encode_utf16())
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        "utf16be" => [0xFEFFu16]
+            .into_iter()
+            .chain(text.encode_utf16())
+            .flat_map(u16::to_be_bytes)
+            .collect(),
         label => {
             let enc = lookup(label)?;
             let (bytes, _, unmappable) = enc.encode(text);
             if unmappable {
-                return Err(format!("the text has characters that {} cannot represent", enc.name()));
+                return Err(format!(
+                    "the text has characters that {} cannot represent",
+                    enc.name()
+                ));
             }
             bytes.into_owned()
         }
@@ -136,7 +160,10 @@ pub fn detect_indent(text: &str) -> Option<(bool, usize)> {
     if tabs > spaced {
         return Some((true, 4));
     }
-    let width = (2..=8).max_by_key(|&w| (widths[w], usize::from(w == 4))).filter(|&w| widths[w] > 0).unwrap_or(4);
+    let width = (2..=8)
+        .max_by_key(|&w| (widths[w], usize::from(w == 4)))
+        .filter(|&w| widths[w] > 0)
+        .unwrap_or(4);
     Some((false, width))
 }
 
@@ -146,7 +173,10 @@ mod tests {
 
     #[test]
     fn indentation() {
-        assert_eq!(detect_indent("a {\n  b\n  c {\n    d\n  }\n}\n"), Some((false, 2)));
+        assert_eq!(
+            detect_indent("a {\n  b\n  c {\n    d\n  }\n}\n"),
+            Some((false, 2))
+        );
         assert_eq!(detect_indent("fn x() {\n    y();\n}\n"), Some((false, 4)));
         assert_eq!(detect_indent("a\n\tb\n\tc\n"), Some((true, 4)));
         assert_eq!(detect_indent("plain\ntext\n"), None);
@@ -159,9 +189,15 @@ mod tests {
         let path = dir.join("x.txt");
         write(&path, "Grüße", "windows-1252").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"Gr\xfc\xdfe");
-        assert_eq!(read(&path, None).unwrap(), ("Grüße".to_string(), "windows-1252".to_string()));
+        assert_eq!(
+            read(&path, None).unwrap(),
+            ("Grüße".to_string(), "windows-1252".to_string())
+        );
         write(&path, "hé", "utf16le").unwrap();
-        assert_eq!(read(&path, None).unwrap(), ("hé".to_string(), "utf16le".to_string()));
+        assert_eq!(
+            read(&path, None).unwrap(),
+            ("hé".to_string(), "utf16le".to_string())
+        );
         assert!(write(&path, "日本", "windows-1252").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }

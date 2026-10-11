@@ -105,7 +105,11 @@ if [ -n "$DEN_INIT_COMMAND" ]; then
 fi
 "#;
 
-const ZSH_FILES: &[(&str, &str)] = &[(".zshenv", ZSHENV), (".zprofile", ZPROFILE), (".zshrc", ZSHRC)];
+const ZSH_FILES: &[(&str, &str)] = &[
+    (".zshenv", ZSHENV),
+    (".zprofile", ZPROFILE),
+    (".zshrc", ZSHRC),
+];
 
 /// Set `cmd` (the shell `shell`) up with den's rc files for terminal `pane`,
 /// `command` run first; `false` for a shell den has no files for (or when
@@ -114,7 +118,9 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
     if !cfg!(unix) {
         return false;
     }
-    let Some(name) = Path::new(shell).file_name().and_then(|n| n.to_str()) else { return false };
+    let Some(name) = Path::new(shell).file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
     // The files first: `cmd` is left alone unless they are there.
     let dir = crate::settings::data_dir().join("shell").join(name);
     match name {
@@ -122,7 +128,9 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
             if !write(&dir, ZSH_FILES) {
                 return false;
             }
-            let user = std::env::var_os("ZDOTDIR").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+            let user = std::env::var_os("ZDOTDIR")
+                .or_else(|| std::env::var_os("HOME"))
+                .unwrap_or_default();
             cmd.env("ZDOTDIR", &dir);
             cmd.env("DEN_USER_ZDOTDIR", user);
             cmd.arg("-l");
@@ -181,7 +189,14 @@ pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>)
     if let Some(command) = command {
         cmd.env("DEN_INIT_COMMAND", agent::inject(pane, command, true));
     }
-    let names = ["DEN_ZSH/p", "DEN_BASH/p", "DEN_CLAUDE_HOOKS/p", "DEN_INIT_COMMAND", "TERM", "COLORTERM"];
+    let names = [
+        "DEN_ZSH/p",
+        "DEN_BASH/p",
+        "DEN_CLAUDE_HOOKS/p",
+        "DEN_INIT_COMMAND",
+        "TERM",
+        "COLORTERM",
+    ];
     cmd.env("WSLENV", crate::backend::wsl::wslenv(&names));
 }
 
@@ -192,7 +207,8 @@ fn write(dir: &PathBuf, files: &[(&str, &str)]) -> bool {
     }
     files.iter().all(|(name, text)| {
         let path = dir.join(name);
-        std::fs::read_to_string(&path).ok().as_deref() == Some(*text) || std::fs::write(&path, text).is_ok()
+        std::fs::read_to_string(&path).ok().as_deref() == Some(*text)
+            || std::fs::write(&path, text).is_ok()
     })
 }
 
@@ -209,11 +225,16 @@ mod tests {
     #[test]
     fn rc_files_reset_the_tab_variables() {
         for rc in [ZSHRC, BASHRC] {
-            assert!(rc.contains("unset DEN_INIT_COMMAND"), "the first command must not reach child shells");
+            assert!(
+                rc.contains("unset DEN_INIT_COMMAND"),
+                "the first command must not reach child shells"
+            );
             assert!(rc.contains("--settings \"$DEN_CLAUDE_HOOKS\""));
         }
         // ZDOTDIR goes back before the first command runs, so its children see the user's files.
-        let restore = ZSHRC.find("ZDOTDIR=\"$DEN_USER_ZDOTDIR\"").expect("zshrc restores ZDOTDIR");
+        let restore = ZSHRC
+            .find("ZDOTDIR=\"$DEN_USER_ZDOTDIR\"")
+            .expect("zshrc restores ZDOTDIR");
         assert!(restore < ZSHRC.find("eval \"$__den_init\"").unwrap());
         assert!(ZSHRC.contains("unalias claude") && BASHRC.contains("unalias claude"));
     }

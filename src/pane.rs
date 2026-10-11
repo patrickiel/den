@@ -27,7 +27,10 @@ pub enum PaneEvent {
     /// Open a URL in a new browser tab (a page's link to a new window).
     OpenBrowser(String),
     /// The program in it wants the user.
-    Alert { kind: AlertKind, message: Option<String> },
+    Alert {
+        kind: AlertKind,
+        message: Option<String>,
+    },
     /// It saved this file.
     Saved(std::path::PathBuf),
 }
@@ -76,7 +79,12 @@ pub trait PaneHandle {
     fn is_dirty(&self, cx: &App) -> bool;
     fn dump(&self, cx: &App) -> Value;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
-    fn subscribe(&self, id: crate::layout::PaneId, window: &mut Window, cx: &mut Context<Workspace>) -> Subscription;
+    fn subscribe(
+        &self,
+        id: crate::layout::PaneId,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Subscription;
 }
 
 impl<T: Pane> PaneHandle for Entity<T> {
@@ -112,14 +120,33 @@ impl<T: Pane> PaneHandle for Entity<T> {
         Focusable::focus_handle(self.read(cx), cx)
     }
 
-    fn subscribe(&self, id: crate::layout::PaneId, window: &mut Window, cx: &mut Context<Workspace>) -> Subscription {
-        cx.subscribe_in(self, window, move |this, _, event: &PaneEvent, window, cx| match event {
-            PaneEvent::Changed => this.pane_changed(id, cx),
-            PaneEvent::OpenFile { path, line, column } => this.open_file_at(path.clone(), *line, *column, window, cx),
-            PaneEvent::OpenBrowser(url) => this.open_browser(None, Some(url.clone()), window, cx),
-            PaneEvent::Alert { kind, message } => this.pane_alert(id, *kind, message.clone(), window, cx),
-            PaneEvent::Saved(path) => crate::extensions::broadcast(den_extension::events::FILE_SAVED, serde_json::json!({ "root": this.root, "path": path }), cx),
-        })
+    fn subscribe(
+        &self,
+        id: crate::layout::PaneId,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            self,
+            window,
+            move |this, _, event: &PaneEvent, window, cx| match event {
+                PaneEvent::Changed => this.pane_changed(id, cx),
+                PaneEvent::OpenFile { path, line, column } => {
+                    this.open_file_at(path.clone(), *line, *column, window, cx)
+                }
+                PaneEvent::OpenBrowser(url) => {
+                    this.open_browser(None, Some(url.clone()), window, cx)
+                }
+                PaneEvent::Alert { kind, message } => {
+                    this.pane_alert(id, *kind, message.clone(), window, cx)
+                }
+                PaneEvent::Saved(path) => crate::extensions::broadcast(
+                    den_extension::events::FILE_SAVED,
+                    serde_json::json!({ "root": this.root, "path": path }),
+                    cx,
+                ),
+            },
+        )
     }
 }
 
@@ -140,8 +167,14 @@ struct Registry(HashMap<&'static str, Builder>);
 impl Global for Registry {}
 
 /// Make panes of `kind` buildable from what they saved.
-pub fn register(cx: &mut App, kind: &'static str, build: impl Fn(&Value, &mut Window, &mut App) -> PaneRef + 'static) {
-    cx.default_global::<Registry>().0.insert(kind, Rc::new(build));
+pub fn register(
+    cx: &mut App,
+    kind: &'static str,
+    build: impl Fn(&Value, &mut Window, &mut App) -> PaneRef + 'static,
+) {
+    cx.default_global::<Registry>()
+        .0
+        .insert(kind, Rc::new(build));
 }
 
 /// Make a saved pane again; a kind this build does not have becomes a
