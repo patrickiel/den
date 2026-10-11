@@ -319,6 +319,7 @@ fn den_commands() -> Vec<Command> {
     let mut list = vec![
         command("den.showCommands", "Show All Commands", ShowCommands, &["ctrl-shift-p", "f1"], &["cmd-shift-p", "f1"]),
         // File
+        command("den.newFile", "File: New Untitled Text File", NewFile, &["ctrl-n"], &["cmd-n"]),
         command("den.openFolder", "File: Open Folder…", OpenFolder, &["ctrl-k ctrl-o", "ctrl-shift-o"], &["cmd-k cmd-o", "cmd-shift-o"]),
         command("den.openFolderInNewWindow", "File: Open Folder in New Window…", OpenFolderInNewWindow, &["ctrl-shift-n"], &["cmd-shift-n"]),
         command("den.openFiles", "File: Open Files…", OpenFiles, &["ctrl-o"], &["cmd-o"]),

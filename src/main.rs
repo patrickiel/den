@@ -52,6 +52,7 @@ use gpui_kit::*;
 actions!(
     den,
     [
+        NewFile,
         SaveFile,
         FormatDocument,
         OpenSettings,
@@ -197,6 +198,7 @@ pub(crate) fn set_menus(cx: &mut App) {
         menu(
             "File",
             vec![
+                MenuItem::action("New File", NewFile),
                 MenuItem::action("Open Folder…", OpenFolder),
                 MenuItem::action("Open Folder in New Window…", OpenFolderInNewWindow),
                 MenuItem::action("Open Files…", OpenFiles),
@@ -310,6 +312,7 @@ fn on_unfocused_actions(cx: &mut App) {
         });
     }
     let forwarded: &[fn(&mut App)] = &[
+        forward::<NewFile>,
         forward::<SaveFile>,
         forward::<FormatDocument>,
         forward::<OpenSettings>,

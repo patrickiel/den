@@ -724,7 +724,7 @@ impl Workspace {
 
     /// A tab goes: the history keeps it as its file, if it has one.
     fn forget_pane(&mut self, pane: PaneId, cx: &App) {
-        let file = self.pane_as::<FilePanel>(pane).map(|file| file.read(cx).path().to_path_buf());
+        let file = self.pane_as::<FilePanel>(pane).and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf));
         self.panes.remove(&pane);
         self.pane_subscriptions.remove(&pane);
         self.tree.remove_tab(pane);
@@ -1298,7 +1298,7 @@ impl Workspace {
     /// Open a file: as the preview tab (a single click; focus stays where it
     /// is, and the next preview replaces it), or kept, as in den.
     pub fn open_file(&mut self, path: PathBuf, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let existing = self.find_pane::<FilePanel>(|file| file.path() == path, cx);
+        let existing = self.find_pane::<FilePanel>(|file| file.path() == Some(path.as_path()), cx);
         match existing {
             Some(pane) => {
                 if !preview && self.preview == Some(pane) {
@@ -1330,6 +1330,18 @@ impl Workspace {
         }
     }
 
+    /// A new untitled file, as VS Code's Ctrl+N: an empty tab named by the
+    /// lowest free number, saved where Save As says. In `group`, else where
+    /// files go.
+    pub(crate) fn new_untitled(&mut self, group: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
+        let taken: HashSet<String> = self.panes_of::<FilePanel>().filter_map(|(_, file)| file.read(cx).untitled_name()).collect();
+        let name = (1..).map(|n| format!("Untitled-{n}")).find(|name| !taken.contains(name)).unwrap_or_default();
+        let path = self.root.join(name);
+        let file = cx.new(|cx| FilePanel::untitled(path, window, cx));
+        let group = group.unwrap_or_else(|| self.target_group(Kind::Files));
+        self.add_pane(file, group, true, window, cx);
+    }
+
     /// Keep the preview tab open (editing it, or double-clicking it), or turn
     /// a kept tab back into the preview.
     pub(crate) fn toggle_preview(&mut self, pane: PaneId, cx: &mut Context<Self>) {
@@ -1358,7 +1370,7 @@ impl Workspace {
     }
 
     fn file_pane(&self, path: &std::path::Path, cx: &App) -> Option<Entity<FilePanel>> {
-        self.panes_of::<FilePanel>().map(|(_, file)| file).find(|file| file.read(cx).path() == path)
+        self.panes_of::<FilePanel>().map(|(_, file)| file).find(|file| file.read(cx).path() == Some(path))
     }
 
     /// Move an open file's cursor to `line` and `column` (both from 1).
@@ -1665,7 +1677,7 @@ impl Workspace {
     /// Code; a mix, or a shell among them, a shell.
     pub(crate) fn open_more(&mut self, group: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         match self.defaults.get(group) {
-            Some(Kind::Files) => return self.explorer.update(cx, |explorer, cx| explorer.new_file(window, cx)),
+            Some(Kind::Files) => return self.new_untitled(Some(group), window, cx),
             Some(Kind::Terminals) => return self.open_terminal(Some(group), None, false, window, cx),
             Some(Kind::Agents) => {
                 let preset = Settings::get(cx).presets.iter().find(|p| p.kind() == Kind::Agents).map(|p| p.command.clone());
@@ -2144,7 +2156,7 @@ impl Workspace {
         self.tree
             .active_tab(self.active_group)
             .and_then(|pane| self.pane_as::<FilePanel>(pane))
-            .map(|file| file.read(cx).path().to_path_buf())
+            .and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf))
     }
 
     /// Tell the extensions when the active file changed since they last heard.
@@ -2215,6 +2227,7 @@ impl Workspace {
                     .item(item("Show All Commands", &crate::ShowCommands, |_, window, cx| crate::keymap::open_palette(window, cx)))
                     .separator()
                     .label("FILE")
+                    .item(item("New File", &crate::NewFile, |this, window, cx| this.new_untitled(None, window, cx)))
                     .item(item("Open Folder…", &OpenFolder, |this, window, cx| this.prompt_open_folder(false, window, cx)))
                     .item(item("Open Folder in New Window…", &OpenFolderInNewWindow, |this, window, cx| this.prompt_open_folder(true, window, cx)))
                     .item(item("Open Files…", &OpenFiles, |this, window, cx| this.prompt_open_files(window, cx)))
@@ -2341,6 +2354,7 @@ impl Workspace {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| this.modifiers_changed(event.modifiers, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(false, window, cx)))
             .on_action(cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)))
+            .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| this.new_untitled(None, window, cx)))
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.open_terminal(None, None, false, window, cx)))
             .on_action(cx.listener(|this, _: &NewBrowser, window, cx| this.open_browser(None, None, window, cx)))
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))

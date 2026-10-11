@@ -37,7 +37,10 @@ pub const SETTINGS: &str = "Settings";
 pub fn init(cx: &mut App) {
     pane::register(cx, FILE, |data, window, cx| {
         let path = PathBuf::from(data["path"].as_str().unwrap_or_default());
-        Rc::new(cx.new(|cx| FilePanel::new(path, window, cx)))
+        match data["untitled"].as_bool() {
+            Some(true) => Rc::new(cx.new(|cx| FilePanel::untitled(path, window, cx))),
+            _ => Rc::new(cx.new(|cx| FilePanel::new(path, window, cx))),
+        }
     });
     pane::register(cx, crate::browser::BROWSER, |data, window, cx| {
         let url = data["url"].as_str().map(str::to_string);
@@ -86,7 +89,10 @@ impl Look {
 }
 
 pub struct FilePanel {
+    /// For an untitled tab, its name in the folder Save As starts in.
     path: PathBuf,
+    /// A new file not saved yet (Ctrl+N): saving asks where to.
+    untitled: bool,
     look: Look,
     /// Markdown and SVG: the preview shows instead of the source.
     preview: bool,
@@ -123,6 +129,26 @@ impl FilePanel {
                 Err(err) => (String::new(), "utf8".to_string(), Some(SharedString::from(err))),
             }
         };
+        Self::with_text(path, look, text, encoding, error, window, cx)
+    }
+
+    /// An empty tab named `path`'s file name, as VS Code's Untitled-1: on
+    /// disk only once saved, where Save As puts it.
+    pub fn untitled(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::with_text(path, Look::Text, String::new(), "utf8".to_string(), None, window, cx);
+        this.untitled = true;
+        this
+    }
+
+    fn with_text(
+        path: PathBuf,
+        look: Look,
+        text: String,
+        encoding: String,
+        error: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let indent = crate::encoding::detect_indent(&text).unwrap_or((false, 4));
         let crlf = text.contains("\r\n");
         let state = crate::settings::AppState::get(cx);
@@ -175,6 +201,7 @@ impl FilePanel {
         cx.defer_in(window, |this, _, cx| this.refresh_git_base(cx));
         Self {
             path,
+            untitled: false,
             look,
             preview,
             svg: None,
@@ -192,14 +219,20 @@ impl FilePanel {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The file on disk; none while untitled.
+    pub fn path(&self) -> Option<&Path> {
+        (!self.untitled).then_some(self.path.as_path())
+    }
+
+    /// An untitled tab's name (`Untitled-1`).
+    pub fn untitled_name(&self) -> Option<String> {
+        self.untitled.then(|| self.path.file_name().unwrap_or_default().to_string_lossy().to_string())
     }
 
     /// Read the file from the git index again (after a save, a stage, a
     /// checkout), in the background, and mark the lines anew.
     pub fn refresh_git_base(&mut self, cx: &mut Context<Self>) {
-        if self.look == Look::Image {
+        if self.look == Look::Image || self.untitled {
             return;
         }
         let path = self.path.clone();
@@ -242,7 +275,7 @@ impl FilePanel {
     /// Take what is on disk now (an agent edited the file, `git checkout`),
     /// keeping the cursor. A tab with unsaved changes keeps them.
     pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.look == Look::Image {
+        if self.look == Look::Image || self.untitled {
             return cx.notify();
         }
         self.refresh_git_base(cx);
@@ -269,6 +302,10 @@ impl FilePanel {
     fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
         if self.look == Look::Image {
             return;
+        }
+        // Where to first; formatted by what the name it gets says.
+        if self.untitled {
+            return self.save_as(window, cx);
         }
         // Format on save, when the file has a formatter; saved either way.
         if Settings::get(cx).format_on_save {
@@ -347,7 +384,32 @@ impl FilePanel {
         .detach();
     }
 
+    /// Ask where to save an untitled tab, then save it there as that file.
+    fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let name = self.untitled_name().unwrap_or_default();
+        let picked = cx.prompt_for_new_path(&dir, Some(&name));
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(path) = picked.await.ok().and_then(Result::ok).flatten() else { return };
+            _ = this.update_in(cx, |this, window, cx| {
+                // Text it stays, whatever the name; a picture would not save.
+                this.look = match Look::of(&path) {
+                    Look::Image => Look::Text,
+                    look => look,
+                };
+                this.set_language(&language_of(&path), cx);
+                this.path = path;
+                this.untitled = false;
+                this.save(&SaveFile, window, cx);
+            });
+        })
+        .detach();
+    }
+
     fn write(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.untitled {
+            return self.save_as(window, cx);
+        }
         let text = self.editor.read(cx).value();
         match crate::encoding::write(&self.path, &text, &self.encoding) {
             Ok(()) => {
@@ -442,7 +504,11 @@ impl Pane for FilePanel {
     }
 
     fn dump(&self, _: &App) -> Value {
-        json!({ "path": self.path.to_string_lossy() })
+        // An untitled tab comes back empty, as its unsaved edits are lost.
+        match self.untitled {
+            true => json!({ "path": self.path.to_string_lossy(), "untitled": true }),
+            false => json!({ "path": self.path.to_string_lossy() }),
+        }
     }
 }
 
@@ -573,6 +639,9 @@ impl FilePanel {
     /// Read the file again in `encoding` (unsaved changes would be lost:
     /// refused while there are any).
     fn reopen_with(&mut self, encoding: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.untitled {
+            return;
+        }
         if self.dirty {
             crate::toast::push(window, "Save or undo the changes before reopening the file in another encoding.", cx);
             return;
@@ -593,6 +662,10 @@ impl FilePanel {
 
     /// Save in `encoding` from now on.
     fn save_with(&mut self, encoding: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.untitled {
+            self.encoding = encoding.to_string();
+            return self.save_as(window, cx);
+        }
         let previous = std::mem::replace(&mut self.encoding, encoding.to_string());
         let text = self.editor.read(cx).value();
         if let Err(err) = crate::encoding::write(&self.path, &text, encoding) {

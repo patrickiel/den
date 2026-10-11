@@ -1002,7 +1002,8 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, window, cx| this.toggle_maximize(group, false, window, cx))),
                 )
             })
-            .when(buttons.tiles, |this| {
+            // Tiles only mean something with two tabs or more; kept while tiled so it can be undone.
+            .when(buttons.tiles && (tabs.len() > 1 || self.is_maximized(group, true)), |this| {
                 let tiled = self.is_maximized(group, true);
                 this.child(
                     Button::new(("group-tiles", group))
@@ -1140,13 +1141,15 @@ impl Workspace {
             .item(menu_action(this, "Close All", move |ws, window, cx| ws.request_close_panes(tabs.clone(), window, cx)).icon(Icon::new(IconName::ListX)));
 
         if let Ok(file) = view.clone().downcast::<FilePanel>() {
-            let path = file.read(cx).path().to_path_buf();
+            let path = file.read(cx).path().map(std::path::Path::to_path_buf);
             menu = menu.separator();
             if self.preview == Some(pane) {
                 menu = menu.item(menu_action(this, "Keep Open", move |ws, _, cx| ws.toggle_preview(pane, cx)).icon(Icon::new(IconName::Pin)));
             }
-            menu = path_items(menu, this, &path, &self.root);
-            let dir = path.parent().map(|dir| dir.to_path_buf()).unwrap_or_else(|| self.root.clone());
+            if let Some(path) = &path {
+                menu = path_items(menu, this, path, &self.root);
+            }
+            let dir = path.as_deref().and_then(|path| path.parent()).map(|dir| dir.to_path_buf()).unwrap_or_else(|| self.root.clone());
             menu = menu.item(
                 menu_action(this, "Open Terminal Here", move |ws, window, cx| ws.open_shell_in(dir.clone(), window, cx)).icon(Icon::new(IconName::SquareTerminal)),
             );
