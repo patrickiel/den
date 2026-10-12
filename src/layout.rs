@@ -506,11 +506,18 @@ impl Tree {
         Some(remap)
     }
 
-    /// Lay a container's children out along its other axis.
+    /// Lay a container, and every container nested in it, out along its
+    /// other axis.
     pub fn flip(&mut self, split: NodeId) -> bool {
-        match self.find_mut(split) {
-            Some(Node::Split { axis, .. }) => {
+        fn flip_all(node: &mut Node) {
+            if let Node::Split { axis, children, .. } = node {
                 *axis = axis.other();
+                children.iter_mut().for_each(flip_all);
+            }
+        }
+        match self.find_mut(split) {
+            Some(node @ Node::Split { .. }) => {
+                flip_all(node);
                 true
             }
             _ => false,
@@ -774,6 +781,33 @@ mod tests {
             })
         ));
         assert_eq!(tree.groups_under(11), vec![2, 3]);
+    }
+
+    #[test]
+    fn flipping_flips_nested_containers() {
+        let mut tree = Tree::from_root(split(
+            10,
+            Axis::Horizontal,
+            vec![
+                group(1, &[]),
+                split(11, Axis::Vertical, vec![group(2, &[]), group(3, &[])]),
+            ],
+        ));
+        assert!(tree.flip(10));
+        assert!(matches!(
+            tree.find(10),
+            Some(Node::Split {
+                axis: Axis::Vertical,
+                ..
+            })
+        ));
+        assert!(matches!(
+            tree.find(11),
+            Some(Node::Split {
+                axis: Axis::Horizontal,
+                ..
+            })
+        ));
     }
 
     #[test]
