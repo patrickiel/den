@@ -32,6 +32,7 @@ mod overlays;
 mod pane;
 mod panels;
 mod preset_icon;
+mod quick_open;
 mod repo;
 mod scm;
 mod search;
@@ -87,6 +88,7 @@ actions!(
         ShowAll,
         Quit,
         ShowCommands,
+        QuickOpen,
         OpenKeyboardShortcuts,
         ToggleSidebar,
         ToggleMaximizeGroup,
@@ -250,6 +252,7 @@ pub(crate) fn set_menus(cx: &mut App) {
             "View",
             vec![
                 MenuItem::action("Show All Commands", ShowCommands),
+                MenuItem::action("Go to File…", QuickOpen),
                 MenuItem::separator(),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Explorer", FocusExplorer),
@@ -376,6 +379,7 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<CheckForUpdates>,
         forward::<NewAgent>,
         forward::<ShowCommands>,
+        forward::<QuickOpen>,
         forward::<OpenKeyboardShortcuts>,
         forward::<ToggleSidebar>,
         forward::<ToggleMaximizeGroup>,

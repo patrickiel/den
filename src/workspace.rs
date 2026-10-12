@@ -8,7 +8,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -1704,6 +1704,23 @@ impl Workspace {
         }
     }
 
+    /// Quick Open over the folder, the open editors' files listed first; the
+    /// command palette when `commands` (its query starts `>`).
+    fn quick_open(&mut self, commands: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .tree
+            .panes()
+            .into_iter()
+            .filter_map(|id| self.pane_as::<FilePanel>(id))
+            .filter_map(|file| file.read(cx).path().map(Path::to_path_buf))
+            .collect();
+        // Ctrl's release goes to the dialog, not here: let it go now, or the
+        // group numbers would come up behind the dialog and stay.
+        self.modifiers_changed(Modifiers::default(), cx);
+        let workspace = cx.entity().downgrade();
+        crate::quick_open::open(self.root.clone(), open, commands, workspace, window, cx);
+    }
+
     /// A new untitled file, as VS Code's Ctrl+N: an empty tab named by the
     /// lowest free number, saved where Save As says. In `group`, else where
     /// files go.
@@ -3040,7 +3057,12 @@ impl Workspace {
                     .item(item(
                         "Show All Commands",
                         &crate::ShowCommands,
-                        |_, window, cx| crate::keymap::open_palette(window, cx),
+                        |this, window, cx| this.quick_open(true, window, cx),
+                    ))
+                    .item(item(
+                        "Go to File…",
+                        &crate::QuickOpen,
+                        |this, window, cx| this.quick_open(false, window, cx),
                     ))
                     .separator()
                     .label("FILE")
@@ -3319,8 +3341,11 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &crate::NavigateForward, window, cx| {
                 this.navigate(false, window, cx)
             }))
-            .on_action(cx.listener(|_, _: &crate::ShowCommands, window, cx| {
-                crate::keymap::open_palette(window, cx)
+            .on_action(cx.listener(|this, _: &crate::ShowCommands, window, cx| {
+                this.quick_open(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::QuickOpen, window, cx| {
+                this.quick_open(false, window, cx)
             }))
     }
 }

@@ -212,19 +212,7 @@ impl Search {
     }
 
     fn walk(&self, budget: &Budget, cancel: &AtomicBool, tx: mpsc::Sender<FileMatch>) {
-        let ignore = self.use_ignore_files;
-        let mut builder = WalkBuilder::new(&self.root);
-        builder
-            .hidden(false) // dotfiles are searched, as in VS Code
-            .parents(false) // ignore files above the root do not apply (VS Code's search.useParentIgnoreFiles)
-            .git_global(false)
-            .ignore(ignore)
-            .git_ignore(ignore)
-            .git_exclude(ignore)
-            .require_git(false) // a .gitignore counts outside a repository too
-            .follow_links(true); // the walker detects link loops
-        let filter = self.filter.clone();
-        builder.filter_entry(move |e| e.depth() == 0 || !filter.excluded(e.path()));
+        let builder = walker(&self.root, self.use_ignore_files, self.filter.clone());
         builder.build_parallel().run(|| {
             let tx = tx.clone();
             Box::new(move |entry| {
@@ -255,6 +243,55 @@ impl Search {
             });
         }
     }
+}
+
+/// The walk of `root` that the search makes: with the ignore files when `ignore`, and without what
+/// `filter` excludes.
+fn walker(root: &Path, ignore: bool, filter: Arc<Filter>) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false) // dotfiles are searched, as in VS Code
+        .parents(false) // ignore files above the root do not apply (VS Code's search.useParentIgnoreFiles)
+        .git_global(false)
+        .ignore(ignore)
+        .git_ignore(ignore)
+        .git_exclude(ignore)
+        .require_git(false) // a .gitignore counts outside a repository too
+        .follow_links(true) // the walker detects link loops
+        .filter_entry(move |e| e.depth() == 0 || !filter.excluded(e.path()));
+    builder
+}
+
+/// The files under `root` that a search would look at, relative with `/` separators (for Quick
+/// Open); at most `max`, in no particular order.
+pub fn files(root: &Path, max: usize) -> Vec<String> {
+    let query = Query {
+        use_ignore_files: true,
+        ..Query::default()
+    };
+    let Ok(filter) = Filter::new(root, &query) else {
+        return Vec::new();
+    };
+    let filter = Arc::new(filter);
+    let (tx, rx) = mpsc::channel();
+    let count = AtomicUsize::new(0);
+    walker(root, true, filter.clone()).build_parallel().run(|| {
+        let (tx, filter, count) = (tx.clone(), filter.clone(), &count);
+        Box::new(move |entry| {
+            if count.load(Ordering::Relaxed) >= max {
+                return WalkState::Quit;
+            }
+            if let Ok(entry) = entry
+                && entry.file_type().is_some_and(|t| t.is_file())
+            {
+                count.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(filter.rel(entry.path()));
+            }
+            WalkState::Continue
+        })
+    });
+    drop(tx);
+    rx.into_iter().take(max).collect()
 }
 
 /// The matches in one file; none for files that are too big, binary or unreadable.

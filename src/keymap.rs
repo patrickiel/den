@@ -408,6 +408,13 @@ fn den_commands() -> Vec<Command> {
             &["ctrl-shift-p", "f1"],
             &["cmd-shift-p", "f1"],
         ),
+        command(
+            "den.quickOpen",
+            "Go to File…",
+            QuickOpen,
+            &["ctrl-p", "ctrl-e"],
+            &["cmd-p"],
+        ),
         // File
         command(
             "den.newFile",
@@ -754,83 +761,6 @@ fn den_commands() -> Vec<Command> {
         ]);
     }
     list
-}
-
-/// The command palette: every command, by name, with its keys.
-pub fn open_palette(window: &mut Window, cx: &mut App) {
-    use gpui_kit::component::{
-        ActiveTheme as _, WindowExt as _,
-        command::{Command as Palette, CommandItem, CommandState},
-        h_flex,
-    };
-    /// A command's title, keys and action.
-    type Entry = (SharedString, Option<String>, Box<dyn Action>);
-    let state = cx.new(|cx| CommandState::new(window, cx));
-    let entries: Rc<Vec<Entry>> = Rc::new(
-        commands(cx)
-            .iter()
-            .map(|c| {
-                (
-                    SharedString::from(c.title.clone()),
-                    c.shown.first().cloned(),
-                    c.action.boxed_clone(),
-                )
-            })
-            .collect(),
-    );
-    window.open_dialog(cx, {
-        let state = state.clone();
-        move |dialog, _, _| {
-            let items = entries.iter().map(|(title, keys, _)| {
-                let (title, keys) = (title.clone(), keys.clone());
-                CommandItem::new()
-                    .label(title.clone())
-                    .keywords(keys.clone())
-                    .child(move |_, cx| {
-                        h_flex()
-                            .w_full()
-                            .gap_4()
-                            .justify_between()
-                            .child(div().min_w_0().truncate().child(title.clone()))
-                            .children(keys.clone().map(|keys| {
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(keys)
-                            }))
-                    })
-            });
-            let entries = entries.clone();
-            dialog
-                .w(px(640.))
-                .margin_top(px(48.))
-                .close_button(false)
-                .child(
-                    Palette::new(&state)
-                        .items(items)
-                        .placeholder("Type the name of a command")
-                        .bordered(false)
-                        .on_confirm(move |ix, window, cx| {
-                            let Some((_, _, action)) = entries.get(ix.row) else {
-                                return;
-                            };
-                            let action = action.boxed_clone();
-                            window.close_dialog(cx);
-                            // Where the keys would have sent it, once the dialog is gone.
-                            window.defer(cx, move |window, cx| {
-                                if let Some(focus) = crate::workspace::action_target(window, cx) {
-                                    focus.dispatch_action(&*action, window, cx);
-                                }
-                            });
-                        })
-                        .on_cancel(|window, cx| window.close_dialog(cx)),
-                )
-        }
-    });
-    window.defer(cx, move |window, cx| {
-        state.update(cx, |state, cx| state.focus(window, cx))
-    });
 }
 
 #[cfg(test)]
