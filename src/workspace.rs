@@ -398,6 +398,9 @@ pub struct Workspace {
     hints_at: std::time::Instant,
     /// The numbers fading out, once their modifiers are let go.
     hints_gone: Option<Hints>,
+    /// The windows that drew a frame: before its first, a window has no
+    /// rendered tree to read the focused element's contexts from.
+    drawn: HashSet<AnyWindowHandle>,
     /// Counts the changes of the modifiers: the numbers come after a short
     /// hold, when the modifiers did not change meanwhile.
     hint_seq: u64,
@@ -574,6 +577,7 @@ impl Workspace {
             hints: None,
             hints_at: std::time::Instant::now(),
             hints_gone: None,
+            drawn: HashSet::new(),
             hint_seq: 0,
             flash: None,
             maximized: None,
@@ -2097,14 +2101,24 @@ impl Workspace {
         // A drag, a dialog or sheet, a popover or select, a menu (it holds
         // the keyboard while open), or the group numbers. Tooltips and toasts
         // stay under the page.
+        let menu_open = if self.drawn.contains(&window.window_handle()) {
+            window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("PopupMenu"))
+        } else {
+            let this = cx.weak_entity();
+            let handle = window.window_handle();
+            window.on_next_frame(move |_, cx| {
+                _ = this.update(cx, |this, _| this.drawn.insert(handle));
+            });
+            false
+        };
         let covered = cx.has_active_drag()
             || window.has_active_dialog(cx)
             || window.has_active_sheet(cx)
             || gpui_kit::base::GlobalState::is_in_deferred_context(cx)
-            || window
-                .context_stack()
-                .iter()
-                .any(|context| context.contains("PopupMenu"))
+            || menu_open
             || self.hints == Some(Hints::Groups);
         // Under a maximized group, the other groups' pages are out of sight;
         // in one maximized as tiles, every page is in sight.
