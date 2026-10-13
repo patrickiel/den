@@ -133,6 +133,11 @@ fn session_name(root: &std::path::Path, cx: &App) -> String {
         })
 }
 
+/// The OS window title for `root`, as the taskbar and window switcher show it.
+pub fn window_title(root: &std::path::Path, cx: &App) -> String {
+    format!("den - {}", session_name(root, cx))
+}
+
 /// The session switcher's menu, from the recent folders as they are now.
 fn recent_menu(
     this: WeakEntity<Workspace>,
@@ -3512,7 +3517,7 @@ fn open_float_window(
         focus: activate,
         ..TitleBar::window_options()
     };
-    let title = format!("den — {}", workspace.read(cx).root.display());
+    let title = window_title(&workspace.read(cx).root, cx);
     let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| FloatWindow::new(workspace, id, window, cx))
     })

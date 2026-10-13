@@ -167,7 +167,7 @@ fn workspace_opened(
     window: &mut Window,
     cx: &mut App,
 ) {
-    window.set_window_title(&format!("den — {}", root.display()));
+    window.set_window_title(&workspace::window_title(&root, cx));
     extensions::window_opened(root, workspace.downgrade(), window.window_handle(), cx);
 }
 
