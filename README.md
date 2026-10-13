@@ -21,7 +21,7 @@ In VS Code, terminals are squeezed into a bottom panel and a file opens wherever
 
 - **Terminals** for PowerShell, bash, zsh and WSL.
 - **Editor** with syntax highlighting, git changes in the gutter and Format Document using your project's own formatter.
-- **Browser tabs** next to your code, so `localhost` sits beside the files you're changing.
+- **Browser tabs** next to your code, so `localhost` sits beside the files you're changing. One button opens the project's dev server, its port read from the project itself (`vite.config`, `package.json`, `.env`, `launchSettings.json`, …).
 - **Explorer, search and source control** with diffs, a commit graph and commit messages written by a local AI model.
 - **Automatic updates** from signed releases.
 

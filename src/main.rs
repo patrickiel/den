@@ -65,6 +65,7 @@ actions!(
         SplitDown,
         NewTerminal,
         NewBrowser,
+        OpenDevServer,
         ReplaceInFiles,
         CloseTab,
         CloseGroup,
@@ -278,6 +279,7 @@ pub(crate) fn set_menus(cx: &mut App) {
             vec![
                 MenuItem::action("New Terminal", NewTerminal),
                 MenuItem::action("New Browser", NewBrowser),
+                MenuItem::action("Open Dev Server", OpenDevServer),
                 MenuItem::action("Claude Code", NewAgent),
             ],
         ),
@@ -362,6 +364,7 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<SplitDown>,
         forward::<NewTerminal>,
         forward::<NewBrowser>,
+        forward::<OpenDevServer>,
         forward::<ReplaceInFiles>,
         forward::<CloseTab>,
         forward::<CloseGroup>,

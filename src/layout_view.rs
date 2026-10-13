@@ -1267,6 +1267,32 @@ impl Workspace {
                     .into_any_element(),
             );
         }
+        // The project's dev server, found from the project: its port, as a
+        // browser preset shows.
+        if buttons.dev_server
+            && self.defaults.allows(group, Kind::Browsers)
+            && let Some(server) = self.dev_servers.first()
+        {
+            let look = crate::settings::Preset {
+                browser: true,
+                ..crate::settings::Preset::new(server.name.clone(), server.url())
+            };
+            openers.push(
+                Button::new(("group-dev-server", group))
+                    .small()
+                    .ghost()
+                    .child(preset_badge(&look, cx))
+                    .tooltip(crate::keymap::with_keys(
+                        &format!("Open Dev Server ({})", server.describe()),
+                        &crate::OpenDevServer,
+                        cx,
+                    ))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_dev_server(Some(group), window, cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
         openers.extend(
             Settings::get(cx)
                 .presets
@@ -1934,6 +1960,11 @@ fn group_buttons_menu(
                 "Browser".into(),
                 buttons.browser,
                 Rc::new(|s| s.group_buttons.browser = !s.group_buttons.browser),
+            ))
+            .item(toggle(
+                "Dev server".into(),
+                buttons.dev_server,
+                Rc::new(|s| s.group_buttons.dev_server = !s.group_buttons.dev_server),
             ))
         })
         .item(toggle(

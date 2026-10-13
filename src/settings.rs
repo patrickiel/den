@@ -31,6 +31,8 @@ pub enum ThemeChoice {
 pub struct GroupButtons {
     pub shell: bool,
     pub browser: bool,
+    /// The project's dev server (see `backend::dev_server`).
+    pub dev_server: bool,
     pub split: bool,
     pub maximize: bool,
     pub tiles: bool,
@@ -41,6 +43,7 @@ impl Default for GroupButtons {
         Self {
             shell: true,
             browser: true,
+            dev_server: true,
             split: true,
             maximize: true,
             tiles: true,

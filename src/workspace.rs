@@ -29,8 +29,8 @@ use crate::pane::AlertKind;
 use crate::{
     CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
     FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewBrowser, NewTerminal,
-    NextTab, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab, ReplaceInFiles,
-    ResetLayout, SaveLayout, SplitDown, SplitRight,
+    NextTab, OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
+    ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight,
     backend::watch,
     defaults::{Defaults, GroupDefault, Kind},
     diff::DiffPanel,
@@ -443,6 +443,10 @@ pub struct Workspace {
     scm: Entity<ScmView>,
     extensions: Entity<ExtensionsView>,
     repo: Entity<Repo>,
+    /// The project's dev servers, likeliest first (`backend::dev_server`);
+    /// the first is the tab strips' button.
+    pub(crate) dev_servers: Vec<crate::backend::dev_server::DevServer>,
+    _dev_server_task: Option<Task<()>>,
     _watcher: Option<watch::Watcher>,
     _watch_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
@@ -601,6 +605,8 @@ impl Workspace {
             scm,
             extensions,
             repo,
+            dev_servers: Vec::new(),
+            _dev_server_task: None,
             _watcher: None,
             _watch_task: None,
             _save_task: None,
@@ -610,6 +616,7 @@ impl Workspace {
             session_name,
         };
         this.start_watching(window, cx);
+        this.detect_dev_servers(cx);
         // Once per run, a little after start: is there a newer den?
         static UPDATE_CHECKED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
@@ -1853,6 +1860,11 @@ impl Workspace {
             .filter(|p| !watch::in_git_dir(p))
             .cloned()
             .collect();
+        if outside_git.iter().any(|p| {
+            crate::backend::dev_server::is_project_file(p.strip_prefix(&self.root).unwrap_or(p))
+        }) {
+            self.detect_dev_servers(cx);
+        }
         if !outside_git.is_empty() {
             self.explorer
                 .update(cx, |explorer, cx| explorer.paths_changed(&outside_git, cx));
@@ -2078,6 +2090,54 @@ impl Workspace {
     ) {
         let terminal = cx.new(|cx| TerminalPanel::new(launch, window, cx));
         self.add_pane(terminal, group, true, window, cx);
+    }
+
+    /// Find the project's dev servers again (at start, and when a file that
+    /// decides them changed).
+    fn detect_dev_servers(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        self._dev_server_task = Some(cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { crate::backend::dev_server::detect(&root) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.dev_servers != found {
+                    this.dev_servers = found;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Open Dev Server: the project's dev server in a browser tab, in
+    /// `group` or where browsers go. The one answering now when several were
+    /// found; a toast when none was.
+    pub(crate) fn open_dev_server(
+        &mut self,
+        group: Option<NodeId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let found = if self.dev_servers.is_empty() {
+            crate::backend::dev_server::detect(&self.root)
+        } else {
+            self.dev_servers.clone()
+        };
+        if found.is_empty() {
+            crate::toast::push(window, "No dev server found in this project.", cx);
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let url = cx
+                .background_executor()
+                .spawn(async move { crate::backend::dev_server::pick(&found) })
+                .await;
+            _ = this.update_in(cx, |this, window, cx| {
+                this.open_browser(group, url, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// A browser tab at `url` (the home page when none), in `group` or where
@@ -3181,6 +3241,11 @@ impl Workspace {
                     .item(item("New Browser", &NewBrowser, |this, window, cx| {
                         this.open_browser(None, None, window, cx)
                     }))
+                    .item(item(
+                        "Open Dev Server",
+                        &OpenDevServer,
+                        |this, window, cx| this.open_dev_server(None, window, cx),
+                    ))
                     .item(item("Claude Code", &NewAgent, Self::open_agent))
                     // The running extensions' commands, each by its extension.
                     .when(!commands.is_empty(), |mut menu| {
@@ -3310,6 +3375,9 @@ impl Workspace {
             }))
             .on_action(cx.listener(|this, _: &NewBrowser, window, cx| {
                 this.open_browser(None, None, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenDevServer, window, cx| {
+                this.open_dev_server(None, window, cx)
             }))
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| {

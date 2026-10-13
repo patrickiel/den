@@ -2534,11 +2534,12 @@ impl Render for SettingsPanel {
                         .child(toggle(if crate::ui::COMMAND_KEY { "Dock" } else { "Taskbar" }, if crate::ui::COMMAND_KEY { "Bounce the Dock icon while the window is in the background." } else { "Flash the taskbar button while the window is in the background." }, "notify-taskbar", settings.notify_taskbar, |s, v| s.notify_taskbar = v, cx))
                         .child(setting_row(
                             "Tab strip buttons",
-                            "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu.",
+                            "The built-in buttons on each tab strip; presets show by their pin. Also in each group's ⋮ menu. Dev server opens the project's own (a vite.config port, a package.json script, launchSettings.json, …).",
                             h_flex()
                                 .gap_1()
                                 .child(strip_toggle("strip-shell", "Shell", settings.group_buttons.shell, |b| b.shell = !b.shell))
                                 .child(strip_toggle("strip-browser", "Browser", settings.group_buttons.browser, |b| b.browser = !b.browser))
+                                .child(strip_toggle("strip-dev-server", "Dev server", settings.group_buttons.dev_server, |b| b.dev_server = !b.dev_server))
                                 .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split))
                                 .child(strip_toggle("strip-maximize", "Maximize", settings.group_buttons.maximize, |b| b.maximize = !b.maximize))
                                 .child(strip_toggle("strip-tiles", "Tiles", settings.group_buttons.tiles, |b| b.tiles = !b.tiles)),

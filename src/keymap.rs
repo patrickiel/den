@@ -724,6 +724,13 @@ fn den_commands() -> Vec<Command> {
             &["cmd-shift-b"],
         ),
         command(
+            "den.openDevServer",
+            "Browser: Open Dev Server",
+            OpenDevServer,
+            &[],
+            &[],
+        ),
+        command(
             "diff.openFile",
             "Diff: Open the File",
             crate::diff::OpenDiffedFile,
