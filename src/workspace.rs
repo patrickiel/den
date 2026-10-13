@@ -2091,14 +2091,21 @@ impl Workspace {
     }
 
     /// Show the browser pages in `window` (the main one, or float `float`'s)
-    /// whose tab is showing; hide the others, and all of them while a tab or
-    /// group is dragged or a dialog is open (a native page is drawn over
-    /// everything).
+    /// whose tab is showing; hide the others, and all of them while something
+    /// den draws may be over them (a native page is drawn over everything).
     fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
-        // A page stays live: only a drag or a dialog hides it (menus and
-        // toasts may be drawn under it).
-        let covered =
-            cx.has_active_drag() || window.has_active_dialog(cx) || window.has_active_sheet(cx);
+        // A drag, a dialog or sheet, a popover or select, a menu (it holds
+        // the keyboard while open), or the group numbers. Tooltips and toasts
+        // stay under the page.
+        let covered = cx.has_active_drag()
+            || window.has_active_dialog(cx)
+            || window.has_active_sheet(cx)
+            || gpui_kit::base::GlobalState::is_in_deferred_context(cx)
+            || window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("PopupMenu"))
+            || self.hints == Some(Hints::Groups);
         // Under a maximized group, the other groups' pages are out of sight;
         // in one maximized as tiles, every page is in sight.
         let maximized = self
@@ -3238,6 +3245,9 @@ impl Workspace {
     /// Alt for the split buttons, and the actions on groups and tabs.
     fn layout_actions(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root
+            // A click anywhere den draws takes the keyboard back from a
+            // browser page that had it.
+            .capture_any_mouse_down(|_, window, _| crate::browser::focus_window(window))
             // Files dropped from the system's file manager open kept; a
             // folder opens as the session.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {

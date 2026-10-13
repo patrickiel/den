@@ -6,8 +6,10 @@
 //!
 //! The page is a native child window painted over the app: it follows its
 //! pane's bounds every frame it is drawn, and the workspace hides it while
-//! its tab is not showing or a tab is being dragged. While the page has the
-//! keyboard, keys go to the page; a click on the toolbar takes them back.
+//! its tab is not showing, or while something den draws may be over it (a
+//! drag, a dialog, a menu or popover). While the page has the keyboard, keys
+//! go to the page; a click anywhere else in den, or hiding the page, takes
+//! them back.
 
 use std::{cell::Cell, path::PathBuf, rc::Rc};
 
@@ -132,6 +134,35 @@ pub(crate) fn hwnd(window: &Window) -> Option<isize> {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
         _ => None,
     }
+}
+
+/// Give native window `hwnd` the keyboard, unless it has it. A page's
+/// child window keeps the keyboard after a click outside it: the click
+/// reaches den, but the window is already active, so Windows moves nothing.
+#[cfg(windows)]
+fn focus_hwnd(hwnd: isize) {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::Input::KeyboardAndMouse::{GetFocus, SetFocus},
+    };
+    let hwnd = HWND(hwnd as _);
+    // SAFETY: plain calls on a window of this thread.
+    unsafe {
+        if GetFocus() != hwnd {
+            _ = SetFocus(Some(hwnd));
+        }
+    }
+}
+
+/// Take the keyboard back from any page of `window`: a click anywhere den
+/// draws is outside every page (a page takes its own clicks).
+pub(crate) fn focus_window(window: &Window) {
+    #[cfg(windows)]
+    if let Some(hwnd) = hwnd(window) {
+        focus_hwnd(hwnd);
+    }
+    #[cfg(not(windows))]
+    let _ = window;
 }
 
 /// den's browser profile: logins and cookies stay between sessions.
@@ -302,12 +333,37 @@ impl BrowserPanel {
         self.script("location.reload()");
     }
 
-    /// The workspace shows or hides the page (its tab showing, no drag).
+    /// The workspace shows or hides the page (its tab showing, nothing of
+    /// den's over it).
     pub fn set_shown(&self, shown: bool) {
         if self.shown.replace(shown) != shown
             && let Some(webview) = &self.webview
         {
+            // A hidden page keeps the keyboard: it goes back to den, for the
+            // tab or menu that took the page's place.
+            #[cfg(windows)]
+            if !shown {
+                self.release_focus(webview);
+            }
             _ = webview.set_visible(shown && self.bounds.get().is_some());
+        }
+    }
+
+    /// The page gives the keyboard to its window, if it has it.
+    #[cfg(windows)]
+    fn release_focus(&self, webview: &WebView) {
+        use windows::Win32::UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::IsChild};
+        let Some(parent) = self.parent.get() else {
+            return;
+        };
+        let page = wry::WebViewExtWindows::hwnd(webview);
+        // SAFETY: plain calls on windows of this thread.
+        let focused = unsafe {
+            let focus = GetFocus();
+            !focus.is_invalid() && (focus == page || IsChild(page, focus).as_bool())
+        };
+        if focused {
+            focus_hwnd(parent);
         }
     }
 
@@ -329,8 +385,11 @@ impl BrowserPanel {
         let _ = to;
     }
 
-    /// Take the keyboard back from the page.
+    /// Take the keyboard back from the page. On Windows any click in den
+    /// does (see `focus_window`); wry's own way would pick the window the
+    /// page was first a child of.
     fn take_focus(&self) {
+        #[cfg(not(windows))]
         if let Some(webview) = &self.webview {
             _ = webview.focus_parent();
         }
