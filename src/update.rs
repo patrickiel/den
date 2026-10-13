@@ -3,7 +3,9 @@
 //! signature, as Tauri's updater writes it). den checks it a little after
 //! start and from ☰ ▸ Check for Updates; a newer version is offered in a
 //! dialog, downloaded, checked against the public key built into den, and
-//! installed silently, after which den starts again.
+//! installed silently, after which den starts again. Other dens running
+//! from the same exe are asked to quit first (they save their sessions);
+//! the installer could not replace an exe they still run.
 //!
 //! The key is `packaging/updater.pub` (the public half of `~/.keys/den.key`,
 //! which scripts/release.ts signs with). While that file is empty, a build
@@ -153,6 +155,180 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Ask every other den running from this exe to quit, as its window's close
+/// button would (each saves its session on the way out), and wait for them.
+/// The installer cannot replace an exe another den still runs, and a den
+/// left open would go on with the old version. One that stays (asking about
+/// unsaved changes) is an error: the update is not staged then.
+fn close_other_instances() -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    const PATIENCE: Duration = Duration::from_secs(20);
+    let me = std::process::id();
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let left = |n: usize| {
+        Err(format!(
+            "{n} other den window{} still open (unsaved changes?): close it, then update again.",
+            if n == 1 { " is" } else { "s are" }
+        ))
+    };
+    #[cfg(windows)]
+    {
+        use windows::Win32::{
+            Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WAIT_OBJECT_0},
+            System::Threading::{
+                OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+            },
+            UI::WindowsAndMessaging::{
+                EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+            },
+        };
+        use windows::core::{BOOL, PWSTR};
+
+        unsafe extern "system" fn collect(hwnd: HWND, list: LPARAM) -> BOOL {
+            // SAFETY: `list` is the Vec below, which outlives the enumeration.
+            unsafe { &mut *(list.0 as *mut Vec<HWND>) }.push(hwnd);
+            BOOL(1)
+        }
+        /// The exe `pid` runs, as Windows spells it.
+        fn exe_of(process: HANDLE) -> Option<PathBuf> {
+            let mut buf = [0u16; 32768];
+            let mut len = buf.len() as u32;
+            // SAFETY: the buffer and its length go together.
+            unsafe {
+                QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(buf.as_mut_ptr()),
+                    &mut len,
+                )
+            }
+            .ok()?;
+            Some(PathBuf::from(String::from_utf16_lossy(
+                &buf[..len as usize],
+            )))
+        }
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a.to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy())
+        };
+
+        let mut windows: Vec<HWND> = Vec::new();
+        // SAFETY: the callback only pushes to the Vec it is handed.
+        unsafe { EnumWindows(Some(collect), LPARAM(&mut windows as *mut _ as isize)) }
+            .map_err(|e| e.to_string())?;
+        // Every other den running from this exe, by pid; `Some` keeps a
+        // handle to wait on, `None` marks a process that is not den.
+        let mut seen: Vec<(u32, Option<HANDLE>)> = Vec::new();
+        for hwnd in windows {
+            let mut pid = 0;
+            // SAFETY: plain queries on a window handle (a stale one fails them).
+            let mine = unsafe {
+                !IsWindowVisible(hwnd).as_bool()
+                    || GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0
+                    || pid == me
+            };
+            if mine {
+                continue;
+            }
+            let den = match seen.iter().find(|(p, _)| *p == pid) {
+                Some((_, process)) => process.is_some(),
+                None => {
+                    // SAFETY: a query on a pid; the handle is closed below.
+                    let process = unsafe {
+                        OpenProcess(
+                            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                            false,
+                            pid,
+                        )
+                    }
+                    .ok()
+                    .filter(|&process| {
+                        let den = exe_of(process).is_some_and(|path| same(&path, &exe));
+                        if !den {
+                            // SAFETY: a handle this opened and no longer needs.
+                            let _ = unsafe { CloseHandle(process) };
+                        }
+                        den
+                    });
+                    seen.push((pid, process));
+                    process.is_some()
+                }
+            };
+            if den {
+                // SAFETY: a message to a window that may be gone (then it fails).
+                let _ = unsafe {
+                    PostMessageW(Some(hwnd), WM_CLOSE, Default::default(), Default::default())
+                };
+            }
+        }
+        let deadline = Instant::now() + PATIENCE;
+        let mut open = 0;
+        for process in seen.into_iter().filter_map(|(_, process)| process) {
+            let wait = deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32;
+            // SAFETY: a handle opened above with PROCESS_SYNCHRONIZE, closed right after.
+            unsafe {
+                if WaitForSingleObject(process, wait) != WAIT_OBJECT_0 {
+                    open += 1;
+                }
+                let _ = CloseHandle(process);
+            }
+        }
+        if open > 0 {
+            return left(open);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        // The other dens running from this exe (`ps` spells it in full).
+        let others = || -> Vec<u32> {
+            let Ok(out) = Command::new("ps").args(["-axo", "pid=,comm="]).output() else {
+                return Vec::new();
+            };
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let (pid, comm) = line.trim().split_once(' ')?;
+                    let pid: u32 = pid.parse().ok()?;
+                    (pid != me && std::path::Path::new(comm.trim()) == exe).then_some(pid)
+                })
+                .collect()
+        };
+        let pids = others();
+        if pids.is_empty() {
+            return Ok(());
+        }
+        // Quit them as the Dock would: each saves its session on the way out.
+        let quit: String = pids
+            .iter()
+            .map(|pid| format!("$.NSRunningApplication.runningApplicationWithProcessIdentifier({pid}).terminate();"))
+            .collect();
+        Command::new("osascript")
+            .args([
+                "-l",
+                "JavaScript",
+                "-e",
+                &format!("ObjC.import('AppKit');{quit}"),
+            ])
+            .output()
+            .map_err(|e| format!("Cannot close the other den windows: {e}"))?;
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let open = others().len();
+            if open == 0 {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return left(open);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
 }
 
 /// Start what brings the new version up once this den has quit: on Windows
@@ -327,7 +503,13 @@ fn install(release: Release, window: &mut Window, cx: &mut App) {
     let handle = window.window_handle();
     let version = release.version.clone();
     cx.spawn(async move |cx| {
-        let result = cx.background_spawn(async move { download(&release).and_then(|file| stage(&file)) }).await;
+        let result = cx
+            .background_spawn(async move {
+                let file = download(&release)?;
+                close_other_instances()?;
+                stage(&file)
+            })
+            .await;
         _ = handle.update(cx, |_, window, cx| match result {
             // Quitting saves every session; the restart waits for this process.
             Ok(None) => cx.quit(),

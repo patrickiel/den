@@ -47,16 +47,21 @@ VIAddVersionKey "LegalCopyright" "Patrick Demichiel"
 
 Section "Install"
   SetOutPath "$INSTDIR"
-  ; An update starts while the old den is closing: retry until its exe is free.
+  ; An update starts while the old den is closing (it closes its other windows
+  ; first): retry until its exe is free, half a minute at most. Giving up
+  ; must not look like success, or the old den would start again as "updated".
   StrCpy $0 0
   retry:
     ClearErrors
     File "/oname=${APP}.exe" "${EXE}"
     IfErrors 0 copied
     IntOp $0 $0 + 1
-    IntCmp $0 50 copied
+    IntCmp $0 150 locked
     Sleep 200
     Goto retry
+  locked:
+    MessageBox MB_OK|MB_ICONSTOP "den is still running. Close every den window and run the installer again." /SD IDOK
+    Abort "den is still running."
   copied:
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortcut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\${APP}.exe"
