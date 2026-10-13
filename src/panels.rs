@@ -2458,8 +2458,26 @@ impl Render for SettingsPanel {
                         .when(settings.ai_engine == Engine::Command, |list| {
                             list.child(setting_row(
                                 "Command",
-                                "Run in the repository with the prompt on its input; what it prints is the message. Edit the model, effort or program here; clear it for the default again.",
-                                div().w(px(360.)).child(Input::new(&self.ai_command).small()),
+                                "Run in the repository with the prompt on its input; what it prints is the message. Edit the model, effort or program here, or go back to den's default.",
+                                {
+                                    let input = self.ai_command.clone();
+                                    h_flex()
+                                        .gap_1()
+                                        .child(div().w(px(360.)).child(Input::new(&input).small()))
+                                        .child(
+                                            Button::new("ai-command-reset")
+                                                .small()
+                                                .ghost()
+                                                .label("Reset")
+                                                .disabled(settings.ai_config().command == crate::backend::ai::DEFAULT_COMMAND)
+                                                .on_click(move |_, window, cx| {
+                                                    input.update(cx, |input, cx| {
+                                                        input.set_value(crate::backend::ai::DEFAULT_COMMAND, window, cx)
+                                                    });
+                                                    Settings::update(cx, |s| s.ai_command = String::new());
+                                                }),
+                                        )
+                                },
                                 cx,
                             ))
                         })

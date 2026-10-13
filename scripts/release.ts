@@ -178,7 +178,7 @@ function askClaude(prompt: string): Proposal {
   console.log("Asking Claude for the bump and the release notes…");
   const raw = out("claude", [
     "-p", "--output-format", "json", "--json-schema", JSON.stringify(SCHEMA),
-    "--tools", "", "--no-session-persistence",
+    "--tools", "", "--no-session-persistence", "--strict-mcp-config",
     "--system-prompt", "You decide semantic version bumps and write user-facing release notes for a desktop app.",
   ], prompt);
   const res = JSON.parse(raw);

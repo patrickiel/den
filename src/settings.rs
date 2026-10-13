@@ -249,7 +249,7 @@ impl Default for Settings {
             smart_commit: SmartCommit::Ask,
             group_buttons: GroupButtons::default(),
             ai_engine: Default::default(),
-            ai_command: crate::backend::ai::DEFAULT_COMMAND.into(),
+            ai_command: String::new(),
             ai_model: String::new(),
             ai_custom_models: Vec::new(),
             ai_context_size: 8192,

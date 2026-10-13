@@ -141,9 +141,9 @@ DIFF:
 {{diff}}";
 
 /// The command for the Command engine when Settings has none: Claude Code,
-/// prompt in and message out, with no tools and no saved session.
-pub const DEFAULT_COMMAND: &str =
-    "claude -p --model sonnet --effort low --tools \"\" --no-session-persistence";
+/// prompt in and message out, with no tools, no MCP servers (starting them
+/// took most of a run) and no saved session.
+pub const DEFAULT_COMMAND: &str = "claude -p --model sonnet --effort low --tools \"\" --no-session-persistence --strict-mcp-config";
 /// The context a command's model is taken to have; real ones have more, but
 /// a bigger diff mostly makes it slower.
 pub const COMMAND_CONTEXT: u32 = 65_536;
@@ -711,7 +711,10 @@ fn run_command(
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Claude Code skips its update check and telemetry (over a second a
+        // run); other programs ignore it.
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
     process::no_window(&mut cmd);
     let mut child = cmd
         .spawn()
