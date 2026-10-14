@@ -38,6 +38,17 @@ type Menus = std::collections::BTreeMap<String, Vec<MenuItem>>;
 const ROW_HEIGHT: Pixels = px(24.);
 /// A graph column is at least this wide, for its title.
 const GRAPH_MIN: f32 = 56.;
+/// A column the user narrows stops at this width.
+const COLUMN_MIN: f32 = 24.;
+
+/// A column's edge being dragged in the header.
+struct ColumnResize;
+
+impl Render for ColumnResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 pub struct ExtensionView {
     id: String,
@@ -52,6 +63,11 @@ pub struct ExtensionView {
     /// What a right-click on a span or a line asked for (its menu and data),
     /// set before the row's menu is built; the row's own menu otherwise.
     menu_target: Rc<RefCell<Option<(String, String)>>>,
+    /// The widths the user dragged columns to, by column; kept with the tab.
+    pub(crate) widths: Vec<Option<f32>>,
+    /// The column being resized: its index, which way it grows with the
+    /// mouse, and the mouse's x and the column's width when the drag began.
+    resizing: Option<(usize, f32, Pixels, Pixels)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -83,6 +99,8 @@ impl ExtensionView {
             searches: Vec::new(),
             scrolled_to: None,
             menu_target: Rc::default(),
+            widths: Vec::new(),
+            resizing: None,
             _subscriptions: vec![
                 cx.observe_global::<Extensions>(|_, cx| cx.notify()),
                 cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()),
@@ -310,8 +328,33 @@ impl ExtensionView {
         bar
     }
 
-    /// Each column's width: fixed, a graph column's widest graph, or `None` to share the rest.
+    /// Each column's width: the user's, fixed, a graph column's widest
+    /// graph, or `None` to share the rest.
     fn column_widths(&self, cx: &App) -> Vec<Option<Pixels>> {
+        self.default_widths(cx)
+            .into_iter()
+            .enumerate()
+            .map(|(ix, width)| {
+                width
+                    .and(self.widths.get(ix).copied().flatten().map(px))
+                    .or(width)
+            })
+            .collect()
+    }
+
+    /// The column an edge between columns `ix` and `ix + 1` resizes, and
+    /// which way it grows with the mouse: the one on the side away from the
+    /// column that shares the rest, so the edge follows the mouse.
+    fn resized_by(widths: &[Option<Pixels>], ix: usize) -> Option<(usize, f32)> {
+        let (column, sign) = if widths[..=ix].iter().any(Option::is_none) {
+            (ix + 1, -1.)
+        } else {
+            (ix, 1.)
+        };
+        widths.get(column)?.map(|_| (column, sign))
+    }
+
+    fn default_widths(&self, cx: &App) -> Vec<Option<Pixels>> {
         let Some(content) = self.content(cx) else {
             return Vec::new();
         };
@@ -744,7 +787,7 @@ impl Pane for ExtensionView {
     }
 
     fn dump(&self, _: &App) -> Value {
-        json!({ "id": self.id, "view": self.view, "root": self.root })
+        json!({ "id": self.id, "view": self.view, "root": self.root, "widths": self.widths })
     }
 }
 
@@ -804,11 +847,41 @@ impl Render for ExtensionView {
                 .border_b_1()
                 .border_color(theme.border)
                 .children(columns.iter().enumerate().map(|(ix, column)| {
-                    let slot = div().px_2().truncate().child(column.title.clone());
-                    match widths.get(ix).copied().flatten() {
+                    let slot = div()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .relative()
+                        .child(div().px_2().truncate().child(column.title.clone()));
+                    let slot = match widths.get(ix).copied().flatten() {
                         Some(width) => slot.flex_none().w(width),
                         None => slot.flex_1().min_w_0(),
-                    }
+                    };
+                    let resized = (ix + 1 < columns.len())
+                        .then(|| Self::resized_by(&widths, ix))
+                        .flatten();
+                    slot.when_some(resized, |this, (column, sign)| {
+                        let start = widths[column].unwrap_or_default();
+                        this.child(
+                            div()
+                                .id(("column-resize", ix))
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .right(px(-3.))
+                                .w(px(6.))
+                                .cursor_col_resize()
+                                .hover(|this| this.bg(theme.primary.opacity(0.5)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                                        this.resizing =
+                                            Some((column, sign, event.position.x, start));
+                                    }),
+                                )
+                                .on_drag(ColumnResize, |_, _, _, cx| cx.new(|_| ColumnResize)),
+                        )
+                    })
                 }))
         });
         let list = if count == 0 {
@@ -838,6 +911,19 @@ impl Render for ExtensionView {
             .id("extension-view-list")
             .size_full()
             .on_key_down(cx.listener(Self::on_key))
+            .on_drag_move::<ColumnResize>(cx.listener(
+                |this, event: &DragMoveEvent<ColumnResize>, _, cx| {
+                    let Some((column, sign, x, start)) = this.resizing else {
+                        return;
+                    };
+                    let width = (start + (event.event.position.x - x) * sign).max(px(COLUMN_MIN));
+                    if this.widths.len() <= column {
+                        this.widths.resize(column + 1, None);
+                    }
+                    this.widths[column] = Some(width.as_f32());
+                    cx.notify();
+                },
+            ))
             .children(header)
             .child(div().flex_1().min_h_0().child(list));
 

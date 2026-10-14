@@ -69,7 +69,12 @@ pub fn init(cx: &mut App) {
     pane::register(cx, crate::extension_view::EXTENSION_VIEW, |data, _, cx| {
         let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
         let (id, view, root) = (text("id"), text("view"), PathBuf::from(text("root")));
-        Rc::new(cx.new(|cx| crate::extension_view::ExtensionView::new(id, view, root, cx)))
+        let widths = serde_json::from_value(data["widths"].clone()).unwrap_or_default();
+        Rc::new(cx.new(|cx| {
+            let mut view = crate::extension_view::ExtensionView::new(id, view, root, cx);
+            view.widths = widths;
+            view
+        }))
     });
 }
 
