@@ -21,12 +21,13 @@ This guide covers writing, testing, publishing and listing an extension for den.
 8. [Commands and keybindings](#commands-and-keybindings)
 9. [Title-bar buttons](#title-bar-buttons)
 10. [Views, prompts and diffs](#views-prompts-and-diffs)
-11. [Threads, state and shutdown](#threads-state-and-shutdown)
-12. [Testing and debugging](#testing-and-debugging)
-13. [Publishing](#publishing)
-14. [Getting listed](#getting-listed)
-15. [Compatibility](#compatibility)
-16. [What extensions can't do yet](#what-extensions-cant-do-yet)
+11. [File views](#file-views)
+12. [Threads, state and shutdown](#threads-state-and-shutdown)
+13. [Testing and debugging](#testing-and-debugging)
+14. [Publishing](#publishing)
+15. [Getting listed](#getting-listed)
+16. [Compatibility](#compatibility)
+17. [What extensions can't do yet](#what-extensions-cant-do-yet)
 
 ## How extensions work
 
@@ -141,7 +142,7 @@ Copy `extension.json` and `target\release\my_extension.dll` (`target/release/lib
 | `icon` | no | A path inside the extension's folder (`icon.svg`, `images/icon.png`). It should be square, PNG or SVG, 128 px or more. Without one, den shows the name's initial on a colour. |
 | `settings` | no | See [Settings](#settings). |
 | `commands` | no | See [Commands and keybindings](#commands-and-keybindings). |
-| `views` | no | Tabs of its own: `[{ "id", "title", "icon" }]`. See [Views, prompts and diffs](#views-prompts-and-diffs). |
+| `views` | no | Tabs of its own: `[{ "id", "title", "icon", "location"? }]`, `location` being `"tab"` (the default) or `"sidebar"`. See [Views, prompts and diffs](#views-prompts-and-diffs). |
 | `sha256` | no | The SHA-256 of the Windows release zip. `release.yml` adds it to the released copy, and den checks it on install. Leave it out of your source copy. |
 | `platforms` | no | The other platforms' zips' SHA-256s by platform name: `{ "macos-aarch64": "…" }`. `release.yml` adds them too. |
 
@@ -187,6 +188,9 @@ All three methods run on the extension's own thread, one at a time. While `event
 | `prompt(root, &Prompt)` | Asks the user in a dialog (text boxes, checkboxes, choices); the answer comes as `prompt_answered` |
 | `open_diff(root, &Diff)` | Shows a commit's change to a file, or its uncommitted change, side by side |
 | `copy(text)` | Puts `text` on the clipboard |
+| `set_file_views(root, &[FileView])` | Offers ways of showing files beside Source and Preview, for the windows on `root`; see [File views](#file-views) |
+| `load_file_view(root, path, view, url)` | Loads `url` in the page of file view `view` of `path`'s tab (made now if it has none); logged when the file has no tab open |
+| `file_view_script(root, path, view, script)` | Runs JavaScript in that page; logged when there is none yet |
 | `call(method, args)` | Calls any host method by name with JSON arguments, such as `info` (no arguments), which returns `{ id, den_version, data_dir, api }` |
 
 Every method takes a **`root`**: the folder of a den window, exactly as den named it in `workspace_opened` (or in any event's `root`). Pass the string back unchanged; den finds the window by it. If no window is open on that root, the call does nothing (it's logged).
@@ -209,6 +213,7 @@ The typed methods return `Result<(), String>`. `log` and `toast` ignore errors.
 | `VIEW_CLOSED` | `view_closed` | `{ root, view }` | That tab closed |
 | `VIEW_ACTION` | `view_action` | `{ root, view, action, row, data, value }` | Something was clicked, picked or typed in a view |
 | `PROMPT_ANSWERED` | `prompt_answered` | `{ root, id, values }` | A prompt was answered; `values` is null when cancelled |
+| `FILE_VIEW_SHOWN` | `file_view_shown` | `{ root, path, view, line, url }` | A file's tab switched to one of its file views, or came back showing one after a restart; `line` is the file's cursor (from 1), `url` the page's address, null before `load_file_view` |
 | `SETTINGS_CHANGED` | `settings_changed` | `{ settings }` | The user changed one of its settings; `settings` holds every value, like `Context::settings` |
 
 ## Settings
@@ -331,9 +336,34 @@ host.set_view(&root, "my-view", &content)?;
 
 What happens comes back as `view_action`: a toolbar item's, menu item's, span's or line's id as `action`, or den's own `:select` (a row clicked or reached with the arrow keys; `row` null when the details were closed), `:open` (double-click or Enter) and `:more`. Each `set_view` only needs the parts that changed: send `selected` and `detail` alone when a row is picked, not the rows again.
 
+A view with `"location": "sidebar"` in the manifest shows in the window's **sidebar** instead, beside the Explorer, Search and Source Control. It has a button of its own in the title bar, after den's, while the extension runs; the button, or `open_view`, shows it there. den opens it (sending `view_opened`) the first time it shows, and keeps it with the folder's session, opening it again at start like a restored tab. It stays open while the window does, so `view_closed` comes when the window closes. A tab of the view left from before it moved to the sidebar moves there on the next `open_view`.
+
 A view can sit beside a **browser tab** the extension drives: `open_browser` with a `tab` name keeps one tab for it (a preview, say), and `browser_script` runs JavaScript in that page, to move it along without reloading it. Together with `cursor_moved`, that is a preview that follows the editor; [`slidev`](https://github.com/patrickiel/slidev) works this way.
 
 `prompt` asks with a dialog of `Field`s (`text`, `checkbox`, `choice`); OK sends `values` by field id, and a `required` text box keeps OK from closing while it is empty. `open_diff` shows a commit's change (`hash`, `parent`, `old_path`) or the uncommitted one (`staged`) in den's diff tab. `git-graph` uses all of these.
+
+## File views
+
+A file view is a way of showing a file beside den's own Source and Preview, as a button in the switch above the files it matches. Picked, the editor gives way to a page the extension loads: the slide under the cursor, a rendered diagram, a running app.
+
+```rust
+use den_extension::FileView;
+
+host.set_file_views(&root, &[FileView {
+    id: "slide".into(),
+    label: "Slide".into(),
+    tooltip: "The slide the cursor is on".into(),
+    file_pattern: r"(?i)[\\/]slides\.md$".into(),
+}])?;
+
+// In event, on events::FILE_VIEW_SHOWN:
+let (path, line) = (data["path"].as_str().unwrap_or_default(), data["line"].as_u64().unwrap_or(1));
+host.load_file_view(&root, path, "slide", &format!("http://localhost:3030/{}", slide_at(line)))?;
+```
+
+- Like title-bar buttons, file views belong to a **folder**, and each call replaces the extension's views for that root; an empty list removes them. A view shows above the files under `root` whose path its `file_pattern` matches; one that doesn't compile matches none.
+- Picking it sends `file_view_shown` with where the file's cursor is. Answer with `load_file_view`; until then the tab says it's waiting for the extension. den remembers the choice per tab, and sends `file_view_shown` again after a restart, once the extension has set its views.
+- The page lives as long as the tab: switching to Source and back keeps it, and `url` in `file_view_shown` says where it is, so it can be moved along with `file_view_script` rather than loaded again.
 
 ## Threads, state and shutdown
 
@@ -435,7 +465,6 @@ Being listed isn't a security audit. Keep your source public, and have it build 
 ## What extensions can't do yet
 
 These are planned, but not available today:
-- add a sidebar view (a tab of its own is a [view](#views-prompts-and-diffs));
 - a quick pick (a [prompt](#views-prompts-and-diffs) asks with a dialog);
 - add items to the Explorer's right-click menu;
 - decorate the editor (gutter marks, inline text);

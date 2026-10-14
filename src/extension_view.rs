@@ -65,6 +65,8 @@ pub struct ExtensionView {
     menu_target: Rc<RefCell<Option<(String, String)>>>,
     /// The widths the user dragged columns to, by column; kept with the tab.
     pub(crate) widths: Vec<Option<f32>>,
+    /// In the sidebar rather than a tab, so drawn in the sidebar's colours.
+    pub(crate) in_sidebar: bool,
     /// The column being resized: its index, which way it grows with the
     /// mouse, and the mouse's x and the column's width when the drag began.
     resizing: Option<(usize, f32, Pixels, Pixels)>,
@@ -100,12 +102,21 @@ impl ExtensionView {
             scrolled_to: None,
             menu_target: Rc::default(),
             widths: Vec::new(),
+            in_sidebar: false,
             resizing: None,
             _subscriptions: vec![
                 cx.observe_global::<Extensions>(|_, cx| cx.notify()),
                 cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()),
             ],
         }
+    }
+
+    /// One as `dump` left it: a tab restored with the layout, or the sidebar's.
+    pub fn restore(data: &Value, cx: &mut Context<Self>) -> Self {
+        let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
+        let mut view = Self::new(text("id"), text("view"), PathBuf::from(text("root")), cx);
+        view.widths = serde_json::from_value(data["widths"].clone()).unwrap_or_default();
+        view
     }
 
     /// Whether it is extension `id`'s view `view`.
@@ -796,7 +807,11 @@ impl Render for ExtensionView {
         let theme = cx.theme().clone();
         let base = v_flex()
             .size_full()
-            .bg(theme.background)
+            .bg(if self.in_sidebar {
+                theme.sidebar
+            } else {
+                theme.background
+            })
             .track_focus(&self.focus_handle)
             .key_context("ExtensionView");
         if Extensions::get(cx)

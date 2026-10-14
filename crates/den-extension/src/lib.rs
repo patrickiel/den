@@ -98,6 +98,13 @@ pub mod events {
     /// `{ "root", "id", "values" }`, `values` holding each field's value by
     /// its id, or null when the user cancelled.
     pub const PROMPT_ANSWERED: &str = "prompt_answered";
+    /// A file's tab switched to one of the extension's
+    /// [`FileView`](crate::FileView)s, or came back showing it after a
+    /// restart: `{ "root", "path", "view", "line", "url" }`. `line` is where
+    /// the file's cursor is (from 1), `url` the address of the view's page,
+    /// null until [`Host::load_file_view`](crate::Host::load_file_view)
+    /// loaded one.
+    pub const FILE_VIEW_SHOWN: &str = "file_view_shown";
 }
 
 /// `extension.json`.
@@ -151,6 +158,27 @@ pub struct View {
     /// A [Lucide](https://lucide.dev/icons) icon's name, for the tab.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub icon: String,
+    /// Where it shows: a tab of its own, or the window's sidebar.
+    #[serde(default, skip_serializing_if = "ViewLocation::is_tab")]
+    pub location: ViewLocation,
+}
+
+/// Where a [`View`] shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewLocation {
+    /// A tab, where files go.
+    #[default]
+    Tab,
+    /// The window's sidebar, beside the Explorer, Search and Source Control,
+    /// with a title-bar button of its own while the extension runs.
+    Sidebar,
+}
+
+impl ViewLocation {
+    fn is_tab(&self) -> bool {
+        *self == ViewLocation::Tab
+    }
 }
 
 /// A command an extension declares in its manifest. den lists it in its menu
@@ -369,6 +397,23 @@ pub struct Button {
     pub file_pattern: String,
 }
 
+/// A way of showing a file beside den's Source and Preview, which an
+/// extension adds with [`Host::set_file_views`]: a button in the switch above
+/// the files its `file_pattern` matches. Picked, the file's editor gives way
+/// to a page the extension loads with [`Host::load_file_view`], after
+/// [`events::FILE_VIEW_SHOWN`] says so.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileView {
+    /// The extension's own name for it, sent back when it shows.
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tooltip: String,
+    /// A regular expression matched against the file's path; one that
+    /// doesn't compile matches nothing.
+    pub file_pattern: String,
+}
+
 /// The C boundary. Extensions don't use it directly: [`register!`] and
 /// [`Host`] wrap it.
 pub mod abi {
@@ -429,11 +474,13 @@ impl Host {
     /// (`{"root", "command", "cwd"?}`) and `open_file`
     /// (`{"root", "path", "line"?, "column"?}`), `open_browser`
     /// (`{"root", "url", "tab"?}`) and `browser_script`
-    /// (`{"root", "tab", "script"}`), and for views `open_view`
+    /// (`{"root", "tab", "script"}`), for views `open_view`
     /// (`{"root", "view"}`), `set_view` (`{"root", "view", "content"}`),
     /// `prompt` (`{"root", "prompt"}`), `open_diff` (`{"root", "diff"}`) and
-    /// `copy` (`{"text"}`). A den older than a method answers with an error
-    /// naming it.
+    /// `copy` (`{"text"}`), and for file views `set_file_views`
+    /// (`{"root", "views"}`), `load_file_view` (`{"root", "path", "view",
+    /// "url"}`) and `file_view_script` (`{"root", "path", "view", "script"}`).
+    /// A den older than a method answers with an error naming it.
     pub fn call(&self, method: &str, args: Value) -> Result<Value, String> {
         let method = CString::new(method).map_err(|e| e.to_string())?;
         let args = CString::new(args.to_string()).map_err(|e| e.to_string())?;
@@ -571,6 +618,50 @@ impl Host {
     pub fn copy(&self, text: &str) -> Result<(), String> {
         self.call("copy", serde_json::json!({ "text": text }))
             .map(drop)
+    }
+
+    /// Offer `views` beside Source and Preview above the files they match,
+    /// in the windows on `root`, in place of the ones this extension set
+    /// there before; none removes them.
+    pub fn set_file_views(&self, root: &str, views: &[FileView]) -> Result<(), String> {
+        self.call(
+            "set_file_views",
+            serde_json::json!({ "root": root, "views": views }),
+        )
+        .map(drop)
+    }
+
+    /// Load `url` in the page of file view `view` of the tab of `path` (a
+    /// relative path counts from `root`), whether it shows now or not.
+    /// Logged when that file has no tab open.
+    pub fn load_file_view(
+        &self,
+        root: &str,
+        path: &str,
+        view: &str,
+        url: &str,
+    ) -> Result<(), String> {
+        self.call(
+            "load_file_view",
+            serde_json::json!({ "root": root, "path": path, "view": view, "url": url }),
+        )
+        .map(drop)
+    }
+
+    /// Run JavaScript `script` in the page of file view `view` of the tab
+    /// of `path`. Logged when there is no such page yet.
+    pub fn file_view_script(
+        &self,
+        root: &str,
+        path: &str,
+        view: &str,
+        script: &str,
+    ) -> Result<(), String> {
+        self.call(
+            "file_view_script",
+            serde_json::json!({ "root": root, "path": path, "view": view, "script": script }),
+        )
+        .map(drop)
     }
 }
 
@@ -922,6 +1013,9 @@ mod tests {
     fn reads_views() {
         let m = Manifest::parse(r#"{"id":"x","name":"x","version":"1.0.0","api":1,"views":[{"id":"graph","title":"Git Graph","icon":"git-fork"}]}"#).unwrap();
         assert_eq!(m.views[0].icon, "git-fork");
+        assert_eq!(m.views[0].location, ViewLocation::Tab);
+        let m = Manifest::parse(r#"{"id":"x","name":"x","version":"1.0.0","api":1,"views":[{"id":"s","title":"S","location":"sidebar"}]}"#).unwrap();
+        assert_eq!(m.views[0].location, ViewLocation::Sidebar);
         let bad = |views: &str| {
             Manifest::parse(&format!(
                 r#"{{"id":"x","name":"x","version":"1.0.0","api":1,"views":{views}}}"#

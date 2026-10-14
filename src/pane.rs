@@ -35,6 +35,15 @@ pub enum PaneEvent {
     Saved(std::path::PathBuf),
     /// The cursor in this file moved to another line (from 1).
     Cursor { path: std::path::PathBuf, line: u32 },
+    /// This file's tab switched to extension `id`'s file view `view`; the
+    /// cursor is on `line` (from 1), the view's page at `url` if it has one.
+    FileView {
+        id: String,
+        view: String,
+        path: std::path::PathBuf,
+        line: u32,
+        url: Option<String>,
+    },
 }
 
 /// Why a terminal wants the user.
@@ -150,6 +159,21 @@ impl<T: Pane> PaneHandle for Entity<T> {
                 PaneEvent::Cursor { path, line } => crate::extensions::broadcast(
                     den_extension::events::CURSOR_MOVED,
                     serde_json::json!({ "root": this.root, "path": path, "line": line }),
+                    cx,
+                ),
+                PaneEvent::FileView {
+                    id,
+                    view,
+                    path,
+                    line,
+                    url,
+                } => crate::extensions::file_view_shown(
+                    id,
+                    &this.root,
+                    path,
+                    view,
+                    *line,
+                    url.as_deref(),
                     cx,
                 ),
             },

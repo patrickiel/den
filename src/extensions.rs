@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use den_extension::{Button, Command, Manifest};
+use den_extension::{Button, Command, FileView, Manifest};
 use futures::StreamExt as _;
 use gpui_kit::*;
 use serde_json::Value;
@@ -154,6 +154,8 @@ pub struct Extensions {
     buttons: Vec<Buttons>,
     /// What each extension's views show, by extension, folder and view.
     views: Vec<ViewData>,
+    /// The ways each extension offers to show files, by its id and the folder.
+    file_views: Vec<FileViews>,
     /// The open windows by their folder, for `run_in_terminal`.
     windows: Vec<(
         PathBuf,
@@ -166,6 +168,12 @@ pub struct Buttons {
     pub id: String,
     pub root: PathBuf,
     pub buttons: Vec<Button>,
+}
+
+pub struct FileViews {
+    pub id: String,
+    pub root: PathBuf,
+    pub views: Vec<FileView>,
 }
 
 /// What an extension's view on a folder shows; kept while den runs, so a
@@ -236,6 +244,25 @@ impl Extensions {
         &mut self.views[ix].content
     }
 
+    /// The file views offered for the file at `path`, by extension id: those
+    /// of the folders it is in whose pattern matches it, each once.
+    pub fn file_views_for(&self, path: &Path) -> Vec<(String, FileView)> {
+        let text = path.to_string_lossy();
+        let mut found: Vec<(String, FileView)> = Vec::new();
+        for entry in self.file_views.iter().filter(|f| path.starts_with(&f.root)) {
+            for view in &entry.views {
+                if pattern_matches(&view.file_pattern, &text)
+                    && !found
+                        .iter()
+                        .any(|(id, v)| *id == entry.id && v.id == view.id)
+                {
+                    found.push((entry.id.clone(), view.clone()));
+                }
+            }
+        }
+        found
+    }
+
     /// The manifest's declaration of extension `id`'s view `view`.
     pub fn view_kind(&self, id: &str, view: &str) -> Option<&den_extension::View> {
         self.entry(id)?
@@ -244,6 +271,21 @@ impl Extensions {
             .views
             .iter()
             .find(|v| v.id == view)
+    }
+
+    /// The sidebar views of the extensions running now, by extension id:
+    /// each has a title-bar button.
+    pub fn sidebar_views(&self) -> impl Iterator<Item = (&str, &den_extension::View)> {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.status, Status::Loading | Status::Loaded))
+            .filter_map(|e| Some((e.id.as_str(), e.manifest.as_ref()?)))
+            .flat_map(|(id, m)| {
+                m.views
+                    .iter()
+                    .filter(|v| v.location == den_extension::ViewLocation::Sidebar)
+                    .map(move |v| (id, v))
+            })
     }
 }
 
@@ -349,11 +391,19 @@ fn on_report(report: Report, cx: &mut App) {
             tab,
             script,
         } => {
-            return in_window(Path::new(&root), "browser_script", cx, |workspace, _, cx| {
-                if !workspace.extension_browser_script(&id, &tab, &script, cx) {
-                    backend::log(&id, &format!("browser_script: no browser tab \"{tab}\" is open"));
-                }
-            });
+            return in_window(
+                Path::new(&root),
+                "browser_script",
+                cx,
+                |workspace, _, cx| {
+                    if !workspace.extension_browser_script(&id, &tab, &script, cx) {
+                        backend::log(
+                            &id,
+                            &format!("browser_script: no browser tab \"{tab}\" is open"),
+                        );
+                    }
+                },
+            );
         }
         Report::OpenView { id, root, view } => {
             return in_window(
@@ -388,6 +438,64 @@ fn on_report(report: Report, cx: &mut App) {
             );
         }
         Report::Copy(text) => return cx.write_to_clipboard(ClipboardItem::new_string(text)),
+        Report::FileViews { id, root, views } => {
+            let extensions = cx.global_mut::<Extensions>();
+            let root = PathBuf::from(root);
+            extensions
+                .file_views
+                .retain(|f| !(f.id == id && f.root == root));
+            if !views.is_empty() {
+                extensions.file_views.push(FileViews { id, root, views });
+            }
+            return;
+        }
+        Report::LoadFileView {
+            id,
+            root,
+            path,
+            view,
+            url,
+        } => {
+            let path = Path::new(&root).join(path);
+            return in_window(
+                Path::new(&root),
+                "load_file_view",
+                cx,
+                |workspace, window, cx| {
+                    if !workspace.load_file_view(&path, &id, &view, &url, window, cx) {
+                        backend::log(
+                            &id,
+                            &format!("load_file_view: {} has no tab open", path.display()),
+                        );
+                    }
+                },
+            );
+        }
+        Report::FileViewScript {
+            id,
+            root,
+            path,
+            view,
+            script,
+        } => {
+            let path = Path::new(&root).join(path);
+            return in_window(
+                Path::new(&root),
+                "file_view_script",
+                cx,
+                |workspace, _, cx| {
+                    if !workspace.file_view_script(&path, &id, &view, &script, cx) {
+                        backend::log(
+                            &id,
+                            &format!(
+                                "file_view_script: {} has no page of \"{view}\" open",
+                                path.display()
+                            ),
+                        );
+                    }
+                },
+            );
+        }
     };
     let extensions = cx.global_mut::<Extensions>();
     let Some(entry) = extensions.entry_mut(&id) else {
@@ -570,6 +678,25 @@ pub fn button_clicked(id: &str, root: &Path, button: &str, cx: &App) {
         id,
         den_extension::events::BUTTON_CLICKED,
         serde_json::json!({ "root": root, "id": button }),
+        cx,
+    );
+}
+
+/// A file's tab in the window on `root` switched to extension `id`'s file
+/// view `view` (`den_extension::events::FILE_VIEW_SHOWN`).
+pub fn file_view_shown(
+    id: &str,
+    root: &Path,
+    path: &Path,
+    view: &str,
+    line: u32,
+    url: Option<&str>,
+    cx: &App,
+) {
+    send(
+        id,
+        den_extension::events::FILE_VIEW_SHOWN,
+        serde_json::json!({ "root": root, "path": path, "view": view, "line": line, "url": url }),
         cx,
     );
 }

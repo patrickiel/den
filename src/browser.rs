@@ -115,6 +115,8 @@ pub struct BrowserPanel {
     /// The extension and its name for this tab, when an extension opened it
     /// (`open_browser` with a tab); kept across restarts.
     owner: Option<(String, String)>,
+    /// Just the page, without the toolbar: a file view's, inside a file tab.
+    bare: bool,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -273,6 +275,7 @@ impl BrowserPanel {
             shown: Rc::new(Cell::new(false)),
             parent: Rc::new(Cell::new(hwnd(window))),
             owner: None,
+            bare: false,
             _events,
             _subscriptions,
         }
@@ -330,6 +333,12 @@ impl BrowserPanel {
 
     pub fn owner(&self) -> Option<&(String, String)> {
         self.owner.as_ref()
+    }
+
+    /// Without the toolbar.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
     }
 
     /// Load `url`, leaving the keyboard where it is. The same address loads
@@ -488,52 +497,53 @@ impl Render for BrowserPanel {
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap_1()
-                    .px_1()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| this.take_focus()),
-                    )
-                    .child(
-                        tool("back", IconName::ArrowLeft, "Back")
-                            .on_click(cx.listener(|this, _, _, _| this.script("history.back()"))),
-                    )
-                    .child(
-                        tool("forward", IconName::ArrowRight, "Forward").on_click(
-                            cx.listener(|this, _, _, _| this.script("history.forward()")),
-                        ),
-                    )
-                    .child(
-                        tool(
-                            "reload",
-                            if self.loading {
-                                IconName::X
-                            } else {
-                                IconName::RotateCw
-                            },
-                            if self.loading { "Stop" } else { "Reload" },
+            .when(!self.bare, |this| {
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .gap_1()
+                        .px_1()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.take_focus()),
                         )
-                        .on_click(cx.listener(|this, _, _, _| {
-                            this.script(if this.loading {
-                                "window.stop()"
-                            } else {
-                                "location.reload()"
-                            })
-                        })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.url_input).small()),
-                    ),
-            )
+                        .child(
+                            tool("back", IconName::ArrowLeft, "Back").on_click(
+                                cx.listener(|this, _, _, _| this.script("history.back()")),
+                            ),
+                        )
+                        .child(tool("forward", IconName::ArrowRight, "Forward").on_click(
+                            cx.listener(|this, _, _, _| this.script("history.forward()")),
+                        ))
+                        .child(
+                            tool(
+                                "reload",
+                                if self.loading {
+                                    IconName::X
+                                } else {
+                                    IconName::RotateCw
+                                },
+                                if self.loading { "Stop" } else { "Reload" },
+                            )
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this.script(if this.loading {
+                                    "window.stop()"
+                                } else {
+                                    "location.reload()"
+                                })
+                            })),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.url_input).small()),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex_1()

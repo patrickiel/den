@@ -36,6 +36,7 @@ use crate::{
     diff::DiffPanel,
     explorer::{Explorer, ExplorerEvent},
     extension_panel::ExtensionPanel,
+    extension_view::ExtensionView,
     extensions_view::{ExtensionsEvent, ExtensionsView},
     float::FloatWindow,
     history::{Entry, History},
@@ -442,6 +443,10 @@ pub struct Workspace {
     search: Entity<SearchView>,
     scm: Entity<ScmView>,
     extensions: Entity<ExtensionsView>,
+    /// The extension views opened in the sidebar (each made the first time
+    /// it shows), and which of them the sidebar shows: extension and view id.
+    sidebar_views: Vec<Entity<ExtensionView>>,
+    sidebar_shown: Option<(String, String)>,
     repo: Entity<Repo>,
     /// The project's dev servers, likeliest first (`backend::dev_server`);
     /// the first is the tab strips' button.
@@ -484,6 +489,19 @@ impl Workspace {
         let search = cx.new(|cx| SearchView::new(root.clone(), is_dirty, window, cx));
         let scm = cx.new(|cx| ScmView::new(repo.clone(), window, cx));
         let extensions = cx.new(|cx| ExtensionsView::new(window, cx));
+        let sidebar_views = session
+            .sidebar_views
+            .iter()
+            .map(|data| {
+                let mut data = data.clone();
+                data["root"] = serde_json::json!(root);
+                cx.new(|cx| {
+                    let mut view = ExtensionView::restore(&data, cx);
+                    view.in_sidebar = true;
+                    view
+                })
+            })
+            .collect();
         if !session.commit_message.is_empty() {
             let draft = session.commit_message.clone();
             scm.update(cx, |scm, cx| scm.set_draft(draft, window, cx));
@@ -604,6 +622,8 @@ impl Workspace {
             search,
             scm,
             extensions,
+            sidebar_views,
+            sidebar_shown: session.sidebar_shown.clone(),
             repo,
             dev_servers: Vec::new(),
             _dev_server_task: None,
@@ -1257,8 +1277,9 @@ impl Workspace {
     /// window their tab is in now (a page dies with its parent window).
     pub(crate) fn rehome_browsers(&self, from: isize, cx: &mut App) {
         let moves: Vec<(Entity<crate::browser::BrowserPanel>, AnyWindowHandle)> = self
-            .panes_of::<crate::browser::BrowserPanel>()
-            .map(|(id, browser)| {
+            .browser_pages(cx)
+            .into_iter()
+            .map(|(id, browser, _)| {
                 let float = self
                     .tree
                     .group_of(id)
@@ -2198,12 +2219,60 @@ impl Workspace {
         script: &str,
         cx: &App,
     ) -> bool {
-        let browser = self.panes_of::<crate::browser::BrowserPanel>().find(|(_, b)| {
-            b.read(cx)
-                .owner()
-                .is_some_and(|(owner, name)| owner == id && name == tab)
-        });
+        let browser = self
+            .panes_of::<crate::browser::BrowserPanel>()
+            .find(|(_, b)| {
+                b.read(cx)
+                    .owner()
+                    .is_some_and(|(owner, name)| owner == id && name == tab)
+            });
         browser.map(|(_, b)| b.read(cx).script(script)).is_some()
+    }
+
+    /// An extension's `load_file_view`: load `url` in the page of extension
+    /// `id`'s file view `view` of `path`'s tab; false when it has none.
+    pub(crate) fn load_file_view(
+        &self,
+        path: &std::path::Path,
+        id: &str,
+        view: &str,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(file) = self.file_pane(path, cx) else {
+            return false;
+        };
+        file.update(cx, |file, cx| file.load_view(id, view, url, window, cx));
+        true
+    }
+
+    /// An extension's `file_view_script`: run `script` in the page of
+    /// extension `id`'s file view `view` of `path`'s tab; false when there
+    /// is no such page.
+    pub(crate) fn file_view_script(
+        &self,
+        path: &std::path::Path,
+        id: &str,
+        view: &str,
+        script: &str,
+        cx: &App,
+    ) -> bool {
+        self.file_pane(path, cx)
+            .is_some_and(|file| file.read(cx).view_script(id, view, script, cx))
+    }
+
+    /// The browser pages of the window: the browser tabs', and the file
+    /// views' in file tabs, each with its tab and whether it shows in it.
+    fn browser_pages(&self, cx: &App) -> Vec<(PaneId, Entity<crate::browser::BrowserPanel>, bool)> {
+        let tabs = self
+            .panes_of::<crate::browser::BrowserPanel>()
+            .map(|(id, browser)| (id, browser, true));
+        let files = self.panes_of::<FilePanel>().filter_map(|(id, file)| {
+            let (browser, showing) = file.read(cx).page(cx)?;
+            Some((id, browser, showing))
+        });
+        tabs.chain(files).collect()
     }
 
     /// Show the browser pages in `window` (the main one, or float `float`'s)
@@ -2238,7 +2307,7 @@ impl Workspace {
             .maximized
             .as_ref()
             .filter(|m| self.tree.float_of(m.group) == float);
-        for (id, browser) in self.panes_of::<crate::browser::BrowserPanel>() {
+        for (id, browser, in_tab) in self.browser_pages(cx) {
             let Some(group) = self.tree.group_of(id) else {
                 continue;
             };
@@ -2250,7 +2319,7 @@ impl Workspace {
                 Some(m) if m.tiles => true,
                 _ => self.tree.active_tab(group) == Some(id),
             };
-            browser.read(cx).set_shown(showing && !covered);
+            browser.read(cx).set_shown(showing && in_tab && !covered);
         }
     }
 
@@ -2271,7 +2340,8 @@ impl Workspace {
         self.show_or_add(existing, Kind::Files, true, make, window, cx);
     }
 
-    /// Extension `id`'s view `view`: its tab if open, else a new one where files go.
+    /// Extension `id`'s view `view`: its tab if open, else a new one where
+    /// files go; or the sidebar, for a view the manifest puts there.
     pub(crate) fn open_extension_view(
         &mut self,
         id: String,
@@ -2279,7 +2349,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::extension_view::ExtensionView;
+        let location = crate::extensions::Extensions::get(cx)
+            .view_kind(&id, &view)
+            .map(|kind| kind.location);
+        if location == Some(den_extension::ViewLocation::Sidebar) {
+            self.show_sidebar_view(id, view, window, cx);
+            return;
+        }
         let existing = self.find_pane::<ExtensionView>(|v| v.is(&id, &view), cx);
         let root = self.root.clone();
         self.show_or_add(
@@ -2290,6 +2366,92 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    /// Whether extension `id` runs and puts its view `view` in the sidebar.
+    fn is_sidebar_view(id: &str, view: &str, cx: &App) -> bool {
+        crate::extensions::Extensions::get(cx)
+            .sidebar_views()
+            .any(|(i, v)| i == id && v.id == view)
+    }
+
+    /// The extension view the sidebar shows, when it shows one.
+    fn shown_sidebar_view(&self, cx: &App) -> Option<Entity<ExtensionView>> {
+        let (id, view) = self.sidebar_shown.as_ref()?;
+        if !Self::is_sidebar_view(id, view, cx) {
+            return None;
+        }
+        self.sidebar_views
+            .iter()
+            .find(|v| v.read(cx).is(id, view))
+            .cloned()
+    }
+
+    /// What the sidebar shows here: the Explorer in place of an extension
+    /// view this window doesn't have.
+    fn sidebar_view(&self, cx: &App) -> SidebarView {
+        match AppState::get(cx).sidebar.view {
+            SidebarView::Extension if self.shown_sidebar_view(cx).is_none() => {
+                SidebarView::Explorer
+            }
+            view => view,
+        }
+    }
+
+    /// Show extension `id`'s view `view` in the sidebar, with the keyboard in
+    /// it; opened now if it wasn't.
+    fn show_sidebar_view(
+        &mut self,
+        id: String,
+        view: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.sidebar_views.iter().any(|v| v.read(cx).is(&id, &view)) {
+            // A tab of it from before it moved to the sidebar moves there,
+            // so the extension doesn't see it close.
+            let existing = self.find_pane::<ExtensionView>(|v| v.is(&id, &view), cx);
+            let tab = existing.and_then(|pane| {
+                let entity = self.pane_as::<ExtensionView>(pane);
+                self.close_pane(pane, cx);
+                entity
+            });
+            let root = self.root.clone();
+            let (id, view) = (id.clone(), view.clone());
+            let entity = tab.unwrap_or_else(|| cx.new(|cx| ExtensionView::new(id, view, root, cx)));
+            entity.update(cx, |view, _| view.in_sidebar = true);
+            self.sidebar_views.push(entity);
+        }
+        self.sidebar_shown = Some((id, view));
+        self.schedule_save(cx);
+        AppState::update(cx, |state| {
+            state.sidebar.visible = true;
+            state.sidebar.view = SidebarView::Extension;
+        });
+        if let Some(view) = self.shown_sidebar_view(cx) {
+            view.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Its title-bar button: show extension `id`'s view `view`, or hide the
+    /// sidebar when it already shows.
+    fn toggle_sidebar_view(
+        &mut self,
+        id: String,
+        view: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let showing = AppState::get(cx).sidebar.visible
+            && self.sidebar_view(cx) == SidebarView::Extension
+            && self.sidebar_shown.as_ref() == Some(&(id.clone(), view.clone()));
+        if showing {
+            AppState::update(cx, |state| state.sidebar.visible = false);
+            cx.notify();
+        } else {
+            self.show_sidebar_view(id, view, window, cx);
+        }
     }
 
     /// An extension's `open_diff`: a commit's change to a file, or its
@@ -2868,12 +3030,20 @@ impl Workspace {
         }
         let expanded = self.explorer.read(cx).expanded();
         let draft = self.scm.read(cx).draft(cx);
+        let sidebar_views = self
+            .sidebar_views
+            .iter()
+            .map(|view| view.read(cx).dump(cx))
+            .collect();
+        let sidebar_shown = self.sidebar_shown.clone();
         let root = self.root.clone();
         AppState::update(cx, |state| {
             let session = state.session_mut(&root);
             session.layout = layout;
             session.expanded = expanded;
             session.commit_message = draft;
+            session.sidebar_views = sidebar_views;
+            session.sidebar_shown = sidebar_shown;
         });
     }
 
@@ -2882,9 +3052,10 @@ impl Workspace {
     /// The title-bar buttons: show a view, or hide the sidebar when that view
     /// is already showing.
     fn toggle_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        let shown = self.sidebar_view(cx);
         AppState::update(cx, |state| {
             let sidebar = &mut state.sidebar;
-            if sidebar.visible && sidebar.view == view {
+            if sidebar.visible && shown == view {
                 sidebar.visible = false;
             } else {
                 sidebar.visible = true;
@@ -2913,7 +3084,7 @@ impl Workspace {
     fn focus_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         let sidebar = AppState::get(cx).sidebar.clone();
         let focused = sidebar.visible
-            && sidebar.view == view
+            && self.sidebar_view(cx) == view
             && view == SidebarView::Explorer
             && self.explorer.focus_handle(cx).contains_focused(window, cx);
         if focused {
@@ -2928,6 +3099,10 @@ impl Workspace {
                 SidebarView::Search => SearchView::focus(&self.search, window, cx),
                 SidebarView::Scm => ScmView::focus(&self.scm, window, cx),
                 SidebarView::Extensions => ExtensionsView::focus(&self.extensions, window, cx),
+                SidebarView::Extension => match self.shown_sidebar_view(cx) {
+                    Some(view) => view.focus_handle(cx).focus(window, cx),
+                    None => self.explorer.focus_handle(cx).focus(window, cx),
+                },
             }
         }
         cx.notify();
@@ -2935,8 +3110,42 @@ impl Workspace {
 
     // -- Render --------------------------------------------------------------
 
+    /// A title-bar button for each sidebar view of the extensions running,
+    /// after den's own.
+    fn sidebar_view_buttons(&self, cx: &mut Context<Self>) -> Vec<Button> {
+        let shown = (AppState::get(cx).sidebar.visible
+            && self.sidebar_view(cx) == SidebarView::Extension)
+            .then(|| self.sidebar_shown.clone())
+            .flatten();
+        let views: Vec<(String, den_extension::View)> = crate::extensions::Extensions::get(cx)
+            .sidebar_views()
+            .map(|(id, view)| (id.to_string(), view.clone()))
+            .collect();
+        views
+            .into_iter()
+            .enumerate()
+            .map(|(ix, (id, view))| {
+                let icon = crate::ui::lucide_icon(&view.icon, cx)
+                    .unwrap_or_else(|| Icon::new(IconName::Blocks));
+                let key = (id, view.id);
+                let active = shown.as_ref() == Some(&key);
+                Button::new(("view-extension", ix))
+                    .small()
+                    .icon(icon)
+                    .tooltip(view.title)
+                    .ghost()
+                    .selected(active)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let (id, view) = key.clone();
+                        this.toggle_sidebar_view(id, view, window, cx)
+                    }))
+            })
+            .collect()
+    }
+
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = AppState::get(cx).sidebar.clone();
+        let shown = self.sidebar_view(cx);
         let root_node = self.tree.root.id();
         let root_is_split = !self.tree.root.is_group();
         let this = cx.weak_entity();
@@ -2947,7 +3156,7 @@ impl Workspace {
                            keys: &dyn Action,
                            view: SidebarView,
                            cx: &mut Context<Self>| {
-            let active = sidebar.visible && sidebar.view == view;
+            let active = sidebar.visible && shown == view;
             Button::new(id)
                 .small()
                 .icon(Icon::new(icon))
@@ -3063,7 +3272,8 @@ impl Workspace {
                                 &FocusExtensions,
                                 SidebarView::Extensions,
                                 cx,
-                            )),
+                            ))
+                            .children(self.sidebar_view_buttons(cx)),
                     ),
             )
             .child(
@@ -3355,12 +3565,16 @@ impl Workspace {
             .dropdown_menu(move |menu, _, cx| recent_menu(this.clone(), root.clone(), menu, cx))
     }
 
-    fn render_sidebar(&self, view: SidebarView, cx: &App) -> AnyElement {
-        let content: AnyView = match view {
+    fn render_sidebar(&self, cx: &App) -> AnyElement {
+        let content: AnyView = match self.sidebar_view(cx) {
             SidebarView::Explorer => self.explorer.clone().into(),
             SidebarView::Search => self.search.clone().into(),
             SidebarView::Scm => self.scm.clone().into(),
             SidebarView::Extensions => self.extensions.clone().into(),
+            SidebarView::Extension => match self.shown_sidebar_view(cx) {
+                Some(view) => view.into(),
+                None => self.explorer.clone().into(),
+            },
         };
         div()
             .size_full()
@@ -3689,7 +3903,7 @@ impl Render for Workspace {
                 .size(px(sidebar.width))
                 .size_range(px(160.)..px(640.))
                 .flex_none()
-                .child(self.render_sidebar(sidebar.view, cx));
+                .child(self.render_sidebar(cx));
             let left = side == SidebarSide::Left;
             let width_ix = if left { 0 } else { 1 };
             let group = h_resizable(if left { "body-left" } else { "body-right" }).on_resize(

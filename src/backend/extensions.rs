@@ -17,7 +17,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, mpsc};
 
-use den_extension::{API_VERSION, Button, Context, MANIFEST, Manifest, abi, valid_id, view};
+use den_extension::{
+    API_VERSION, Button, Context, FileView, MANIFEST, Manifest, abi, valid_id, view,
+};
 use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
@@ -191,6 +193,28 @@ pub enum Report {
         diff: view::Diff,
     },
     Copy(String),
+    /// Its file views for the windows on a folder.
+    FileViews {
+        id: String,
+        root: String,
+        views: Vec<FileView>,
+    },
+    /// A URL to load in the page of its file view `view` of `path`'s tab.
+    LoadFileView {
+        id: String,
+        root: String,
+        path: String,
+        view: String,
+        url: String,
+    },
+    /// JavaScript to run in the page of its file view `view` of `path`'s tab.
+    FileViewScript {
+        id: String,
+        root: String,
+        path: String,
+        view: String,
+        script: String,
+    },
 }
 
 /// Start `manifest`'s extension from `dir` on a thread of its own: load the
@@ -448,6 +472,46 @@ impl HostCtx {
                 self.report(Report::OpenDiff { root, diff })
             }
             "copy" => self.report(Report::Copy(string(args, "text", method)?)),
+            "set_file_views" => {
+                let root = string(args, "root", method)?;
+                let views: Vec<FileView> = serde_json::from_value(args["views"].clone())
+                    .map_err(|e| format!("set_file_views: bad \"views\": {e}"))?;
+                self.report(Report::FileViews {
+                    id: self.id.clone(),
+                    root,
+                    views,
+                })
+            }
+            "load_file_view" => {
+                let (root, path, view, url) = (
+                    string(args, "root", method)?,
+                    string(args, "path", method)?,
+                    string(args, "view", method)?,
+                    string(args, "url", method)?,
+                );
+                self.report(Report::LoadFileView {
+                    id: self.id.clone(),
+                    root,
+                    path,
+                    view,
+                    url,
+                })
+            }
+            "file_view_script" => {
+                let (root, path, view, script) = (
+                    string(args, "root", method)?,
+                    string(args, "path", method)?,
+                    string(args, "view", method)?,
+                    string(args, "script", method)?,
+                );
+                self.report(Report::FileViewScript {
+                    id: self.id.clone(),
+                    root,
+                    path,
+                    view,
+                    script,
+                })
+            }
             _ => Err(format!(
                 "den has no method \"{method}\" (extension API {API_VERSION})"
             )),
@@ -1111,7 +1175,49 @@ mod tests {
             matches!(rx.try_recv().unwrap(), Report::BrowserScript { tab, script, .. } if tab == "preview" && script == "1")
         );
         assert!(
-            ctx.call("browser_script", &json!({ "root": "C:/p", "tab": "preview" }))
+            ctx.call(
+                "browser_script",
+                &json!({ "root": "C:/p", "tab": "preview" })
+            )
+            .unwrap_err()
+            .contains("\"script\"")
+        );
+        let views = json!([{ "id": "slide", "label": "Slide", "file_pattern": "slides\\.md$" }]);
+        ctx.call("set_file_views", &json!({ "root": "C:/p", "views": views }))
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::FileViews { views, .. } if views[0].label == "Slide" && views[0].file_pattern == "slides\\.md$")
+        );
+        assert!(
+            ctx.call(
+                "set_file_views",
+                &json!({ "root": "C:/p", "views": [{ "id": "slide", "label": "Slide" }] })
+            )
+            .unwrap_err()
+            .contains("file_pattern")
+        );
+        let page = json!({ "root": "C:/p", "path": "slides.md", "view": "slide" });
+        let with = |key: &str, value: &str| {
+            let mut args = page.clone();
+            args[key] = json!(value);
+            args
+        };
+        ctx.call("load_file_view", &with("url", "http://localhost:3030/2"))
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::LoadFileView { path, view, url, .. } if path == "slides.md" && view == "slide" && url == "http://localhost:3030/2")
+        );
+        assert!(
+            ctx.call("load_file_view", &page)
+                .unwrap_err()
+                .contains("\"url\"")
+        );
+        ctx.call("file_view_script", &with("script", "1")).unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::FileViewScript { script, .. } if script == "1")
+        );
+        assert!(
+            ctx.call("file_view_script", &page)
                 .unwrap_err()
                 .contains("\"script\"")
         );

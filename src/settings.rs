@@ -331,6 +331,9 @@ pub enum SidebarView {
     Search,
     Scm,
     Extensions,
+    /// One of the extension views the window keeps in its sidebar; the
+    /// Explorer in a window without them.
+    Extension,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -360,6 +363,10 @@ pub struct Session {
     pub expanded: Vec<PathBuf>,
     /// The commit message being written, kept with the session.
     pub commit_message: String,
+    /// The extension views opened in the sidebar, as `ExtensionView` dumps
+    /// them, and which of them it shows (extension id and view id).
+    pub sidebar_views: Vec<serde_json::Value>,
+    pub sidebar_shown: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -380,6 +387,10 @@ pub struct AppState {
     /// The view last picked for Markdown and SVG files: preview, not source.
     pub preview_markdown: bool,
     pub preview_svg: bool,
+    /// The extension's file view last picked, by the extension's id and the
+    /// view's: files it is offered for open showing it, until Source or
+    /// Preview is picked on one of them.
+    pub file_view: Option<(String, String)>,
 }
 
 impl Global for AppState {}
