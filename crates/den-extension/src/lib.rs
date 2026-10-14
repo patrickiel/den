@@ -76,6 +76,9 @@ pub mod events {
     pub const ACTIVE_FILE_CHANGED: &str = "active_file_changed";
     /// A file was saved in the window on a folder: `{ "root": "<path>", "path": "<file>" }`.
     pub const FILE_SAVED: &str = "file_saved";
+    /// The cursor of a file's editor moved to another line, in the window on
+    /// a folder: `{ "root": "<path>", "path": "<file>", "line": <from 1> }`.
+    pub const CURSOR_MOVED: &str = "cursor_moved";
     /// A tab of one of the extension's [`View`](crate::View)s opened in the
     /// window on a folder, by [`Host::open_view`](crate::Host::open_view) or
     /// as den restored the window: `{ "root", "view" }`. Send its content
@@ -424,7 +427,9 @@ impl Host {
     /// (`{"message"}`), `toast` (`{"message"}`), `info` (no args),
     /// `set_buttons` (`{"root", "buttons"}`), `run_in_terminal`
     /// (`{"root", "command", "cwd"?}`) and `open_file`
-    /// (`{"root", "path", "line"?, "column"?}`), and for views `open_view`
+    /// (`{"root", "path", "line"?, "column"?}`), `open_browser`
+    /// (`{"root", "url", "tab"?}`) and `browser_script`
+    /// (`{"root", "tab", "script"}`), and for views `open_view`
     /// (`{"root", "view"}`), `set_view` (`{"root", "view", "content"}`),
     /// `prompt` (`{"root", "prompt"}`), `open_diff` (`{"root", "diff"}`) and
     /// `copy` (`{"text"}`). A den older than a method answers with an error
@@ -494,6 +499,29 @@ impl Host {
         self.call(
             "open_file",
             serde_json::json!({ "root": root, "path": path, "line": line }),
+        )
+        .map(drop)
+    }
+
+    /// Open `url` in a browser tab of the window on `root`, where browsers
+    /// go. With a `tab` name, the extension's browser tab of that name is
+    /// reused (loaded at `url`, again if it is there) and shown,
+    /// without taking the keyboard; it is found again after a restart.
+    pub fn open_browser(&self, root: &str, url: &str, tab: Option<&str>) -> Result<(), String> {
+        self.call(
+            "open_browser",
+            serde_json::json!({ "root": root, "url": url, "tab": tab }),
+        )
+        .map(drop)
+    }
+
+    /// Run JavaScript `script` in the page of the extension's browser tab
+    /// `tab` (see [`Host::open_browser`]) in the window on `root`. Nothing
+    /// happens when no such tab is open (it's logged).
+    pub fn browser_script(&self, root: &str, tab: &str, script: &str) -> Result<(), String> {
+        self.call(
+            "browser_script",
+            serde_json::json!({ "root": root, "tab": tab, "script": script }),
         )
         .map(drop)
     }

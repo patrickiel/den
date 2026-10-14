@@ -152,6 +152,20 @@ pub enum Report {
         line: Option<u32>,
         column: Option<u32>,
     },
+    /// A browser tab at `url` in the window on `root`; its tab `tab` if named.
+    OpenBrowser {
+        id: String,
+        root: String,
+        url: String,
+        tab: Option<String>,
+    },
+    /// JavaScript to run in its browser tab `tab` of the window on `root`.
+    BrowserScript {
+        id: String,
+        root: String,
+        tab: String,
+        script: String,
+    },
     /// A tab of its view `view` in the window on `root`.
     OpenView {
         id: String,
@@ -374,6 +388,28 @@ impl HostCtx {
                     path,
                     line: number("line"),
                     column: number("column"),
+                })
+            }
+            "open_browser" => {
+                let (root, url) = (string(args, "root", method)?, string(args, "url", method)?);
+                self.report(Report::OpenBrowser {
+                    id: self.id.clone(),
+                    root,
+                    url,
+                    tab: args["tab"].as_str().map(str::to_string),
+                })
+            }
+            "browser_script" => {
+                let (root, tab, script) = (
+                    string(args, "root", method)?,
+                    string(args, "tab", method)?,
+                    string(args, "script", method)?,
+                );
+                self.report(Report::BrowserScript {
+                    id: self.id.clone(),
+                    root,
+                    tab,
+                    script,
                 })
             }
             "open_view" => {
@@ -1043,6 +1079,41 @@ mod tests {
             ctx.call("open_file", &json!({ "root": "C:/p" }))
                 .unwrap_err()
                 .contains("\"path\"")
+        );
+        ctx.call(
+            "open_browser",
+            &json!({ "root": "C:/p", "url": "http://localhost:3030", "tab": "preview" }),
+        )
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::OpenBrowser { url, tab: Some(tab), .. } if url == "http://localhost:3030" && tab == "preview")
+        );
+        ctx.call(
+            "open_browser",
+            &json!({ "root": "C:/p", "url": "http://localhost:3030" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Report::OpenBrowser { tab: None, .. }
+        ));
+        assert!(
+            ctx.call("open_browser", &json!({ "root": "C:/p" }))
+                .unwrap_err()
+                .contains("\"url\"")
+        );
+        ctx.call(
+            "browser_script",
+            &json!({ "root": "C:/p", "tab": "preview", "script": "1" }),
+        )
+        .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), Report::BrowserScript { tab, script, .. } if tab == "preview" && script == "1")
+        );
+        assert!(
+            ctx.call("browser_script", &json!({ "root": "C:/p", "tab": "preview" }))
+                .unwrap_err()
+                .contains("\"script\"")
         );
     }
 

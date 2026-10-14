@@ -180,6 +180,8 @@ All three methods run on the extension's own thread, one at a time. While `event
 | `set_buttons(root, &[Button])` | Sets the extension's title-bar buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
 | `run_in_terminal(root, command, cwd)` | Opens a terminal tab in the window on `root` and runs `command` in its shell (PowerShell by default), in `cwd` or else the root |
 | `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given. A relative path counts from `root`. |
+| `open_browser(root, url, tab)` | Opens `url` in a browser tab of the window on `root`, where browsers go. With a `tab` name, the extension's tab of that name is reused (loaded at `url`, again if it is there) and shown, without taking the keyboard; den remembers it across restarts |
+| `browser_script(root, tab, script)` | Runs JavaScript in the page of the extension's browser tab `tab`; logged when that tab isn't open |
 | `open_view(root, view)` | Opens a tab of the manifest's view `view` in the window on `root`, or shows the open one |
 | `set_view(root, view, &Content)` | Sets what the view shows; the parts the `Content` sets replace what was there |
 | `prompt(root, &Prompt)` | Asks the user in a dialog (text boxes, checkboxes, choices); the answer comes as `prompt_answered` |
@@ -200,6 +202,7 @@ The typed methods return `Result<(), String>`. `log` and `toast` ignore errors.
 | `WORKSPACE_OPENED` | `workspace_opened` | `{ root }` | A window opened on a folder, including the ones restored at start |
 | `ACTIVE_FILE_CHANGED` | `active_file_changed` | `{ root, path }` | The active tab of a window changed; `path` is `null` when it isn't a file tab |
 | `FILE_SAVED` | `file_saved` | `{ root, path }` | A file was saved in a window |
+| `CURSOR_MOVED` | `cursor_moved` | `{ root, path, line }` | The cursor of a file's editor moved to another line (`line` from 1) |
 | `COMMAND` | `command` | `{ root, id }` | One of the extension's commands ran, from den's menu or its keybinding, in the window on `root` |
 | `BUTTON_CLICKED` | `button_clicked` | `{ root, id }` | One of its title-bar buttons was clicked |
 | `VIEW_OPENED` | `view_opened` | `{ root, view }` | A tab of one of its views opened, by `open_view` or restored with the window |
@@ -327,6 +330,8 @@ host.set_view(&root, "my-view", &content)?;
 | `message`, `more` | Text in place of an empty list; a "Load more" row at the end |
 
 What happens comes back as `view_action`: a toolbar item's, menu item's, span's or line's id as `action`, or den's own `:select` (a row clicked or reached with the arrow keys; `row` null when the details were closed), `:open` (double-click or Enter) and `:more`. Each `set_view` only needs the parts that changed: send `selected` and `detail` alone when a row is picked, not the rows again.
+
+A view can sit beside a **browser tab** the extension drives: `open_browser` with a `tab` name keeps one tab for it (a preview, say), and `browser_script` runs JavaScript in that page, to move it along without reloading it. Together with `cursor_moved`, that is a preview that follows the editor; [`slidev`](https://github.com/patrickiel/slidev) works this way.
 
 `prompt` asks with a dialog of `Field`s (`text`, `checkbox`, `choice`); OK sends `values` by field id, and a `required` text box keeps OK from closing while it is empty. `open_diff` shows a commit's change (`hash`, `parent`, `old_path`) or the uncommitted one (`staged`) in den's diff tab. `git-graph` uses all of these.
 

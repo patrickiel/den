@@ -45,7 +45,14 @@ pub fn init(cx: &mut App) {
     });
     pane::register(cx, crate::browser::BROWSER, |data, window, cx| {
         let url = data["url"].as_str().map(str::to_string);
-        Rc::new(cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx)))
+        let owner = data["owner"][0].as_str().zip(data["owner"][1].as_str());
+        Rc::new(cx.new(|cx| {
+            let browser = crate::browser::BrowserPanel::new(url, window, cx);
+            match owner {
+                Some((id, tab)) => browser.owned_by((id.to_string(), tab.to_string())),
+                None => browser,
+            }
+        }))
     });
     pane::register(cx, SETTINGS, |_, window, cx| {
         Rc::new(cx.new(|cx| SettingsPanel::new(window, cx)))
@@ -135,6 +142,8 @@ pub struct FilePanel {
     saved: SharedString,
     dirty: bool,
     error: Option<SharedString>,
+    /// The cursor's line (from 0) the extensions were last told of.
+    cursor_line: Option<u32>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -223,7 +232,18 @@ impl FilePanel {
                     }
                 }
             }),
-            cx.observe(&editor, |_, _, cx| cx.notify()),
+            cx.observe(&editor, |this, editor, cx| {
+                // The extensions hear of the cursor when it is on another line.
+                let line = editor.read(cx).cursor_position().line;
+                if this.cursor_line != Some(line) && !this.untitled {
+                    this.cursor_line = Some(line);
+                    cx.emit(PaneEvent::Cursor {
+                        path: this.path.clone(),
+                        line: line + 1,
+                    });
+                }
+                cx.notify()
+            }),
             cx.observe_global_in::<Settings>(window, |this, window, cx| {
                 let settings = Settings::get(cx).clone();
                 this.editor.update(cx, |editor, cx| {
@@ -251,6 +271,7 @@ impl FilePanel {
             saved: text.into(),
             dirty: false,
             error,
+            cursor_line: None,
             _subscriptions,
         }
     }

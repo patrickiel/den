@@ -112,6 +112,9 @@ pub struct BrowserPanel {
     /// The native window the page is a child of: the one its tab is drawn
     /// in, which changes when the tab moves to a floating window.
     parent: Rc<Cell<Option<isize>>>,
+    /// The extension and its name for this tab, when an extension opened it
+    /// (`open_browser` with a tab); kept across restarts.
+    owner: Option<(String, String)>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -269,6 +272,7 @@ impl BrowserPanel {
             bounds: Rc::default(),
             shown: Rc::new(Cell::new(false)),
             parent: Rc::new(Cell::new(hwnd(window))),
+            owner: None,
             _events,
             _subscriptions,
         }
@@ -318,7 +322,31 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    fn script(&self, js: &str) {
+    /// Owned by extension `owner.0` as its tab `owner.1`.
+    pub fn owned_by(mut self, owner: (String, String)) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    pub fn owner(&self) -> Option<&(String, String)> {
+        self.owner.as_ref()
+    }
+
+    /// Load `url`, leaving the keyboard where it is. The same address loads
+    /// again: the server behind it may have restarted since.
+    pub fn load(&mut self, url: &str, cx: &mut Context<Self>) {
+        let url = normalize_url(url);
+        if url.is_empty() {
+            return;
+        }
+        if let Some(webview) = &self.webview {
+            _ = webview.load_url(&url);
+        }
+        self.url = url;
+        cx.notify();
+    }
+
+    pub(crate) fn script(&self, js: &str) {
         if let Some(webview) = &self.webview {
             _ = webview.evaluate_script(js);
         }
@@ -434,7 +462,10 @@ impl Pane for BrowserPanel {
     }
 
     fn dump(&self, _: &App) -> Value {
-        json!({ "url": self.url })
+        match &self.owner {
+            Some((id, tab)) => json!({ "url": self.url, "owner": [id, tab] }),
+            None => json!({ "url": self.url }),
+        }
     }
 }
 

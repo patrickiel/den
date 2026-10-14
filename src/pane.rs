@@ -33,6 +33,8 @@ pub enum PaneEvent {
     },
     /// It saved this file.
     Saved(std::path::PathBuf),
+    /// The cursor in this file moved to another line (from 1).
+    Cursor { path: std::path::PathBuf, line: u32 },
 }
 
 /// Why a terminal wants the user.
@@ -143,6 +145,11 @@ impl<T: Pane> PaneHandle for Entity<T> {
                 PaneEvent::Saved(path) => crate::extensions::broadcast(
                     den_extension::events::FILE_SAVED,
                     serde_json::json!({ "root": this.root, "path": path }),
+                    cx,
+                ),
+                PaneEvent::Cursor { path, line } => crate::extensions::broadcast(
+                    den_extension::events::CURSOR_MOVED,
+                    serde_json::json!({ "root": this.root, "path": path, "line": line }),
                     cx,
                 ),
             },

@@ -335,6 +335,26 @@ fn on_report(report: Report, cx: &mut App) {
             line,
             column,
         } => return open_file(Path::new(&root), PathBuf::from(path), line, column, cx),
+        Report::OpenBrowser { id, root, url, tab } => {
+            return in_window(
+                Path::new(&root),
+                "open_browser",
+                cx,
+                |workspace, window, cx| workspace.open_extension_browser(id, url, tab, window, cx),
+            );
+        }
+        Report::BrowserScript {
+            id,
+            root,
+            tab,
+            script,
+        } => {
+            return in_window(Path::new(&root), "browser_script", cx, |workspace, _, cx| {
+                if !workspace.extension_browser_script(&id, &tab, &script, cx) {
+                    backend::log(&id, &format!("browser_script: no browser tab \"{tab}\" is open"));
+                }
+            });
+        }
         Report::OpenView { id, root, view } => {
             return in_window(
                 Path::new(&root),

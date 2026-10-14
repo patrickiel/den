@@ -2154,6 +2154,58 @@ impl Workspace {
         self.add_pane(browser, group, true, window, cx);
     }
 
+    /// An extension's `open_browser`: a browser tab at `url` where browsers
+    /// go, or, for a named `tab`, extension `id`'s tab of that name, loaded
+    /// at `url` (again, when it is there). Either way it shows without
+    /// taking the keyboard or the active group, so the editor the extension
+    /// follows stays in charge.
+    pub(crate) fn open_extension_browser(
+        &mut self,
+        id: String,
+        url: String,
+        tab: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = tab else {
+            return self.open_browser(None, Some(url), window, cx);
+        };
+        let owner = (id, tab);
+        if let Some(pane) =
+            self.find_pane::<crate::browser::BrowserPanel>(|b| b.owner() == Some(&owner), cx)
+        {
+            if let Some(browser) = self.pane_as::<crate::browser::BrowserPanel>(pane) {
+                browser.update(cx, |browser, cx| browser.load(&url, cx));
+            }
+            self.tree.activate(pane);
+            return self.changed(cx);
+        }
+        let browser =
+            cx.new(|cx| crate::browser::BrowserPanel::new(Some(url), window, cx).owned_by(owner));
+        let group = self.target_group(Kind::Browsers);
+        let id = self.tree.mint();
+        self.track(id, std::rc::Rc::new(browser), window, cx);
+        self.tree.add_tab(group, id, None, true);
+        self.changed(cx);
+    }
+
+    /// An extension's `browser_script`: run `script` in extension `id`'s
+    /// browser tab `tab`; false when it has none open.
+    pub(crate) fn extension_browser_script(
+        &self,
+        id: &str,
+        tab: &str,
+        script: &str,
+        cx: &App,
+    ) -> bool {
+        let browser = self.panes_of::<crate::browser::BrowserPanel>().find(|(_, b)| {
+            b.read(cx)
+                .owner()
+                .is_some_and(|(owner, name)| owner == id && name == tab)
+        });
+        browser.map(|(_, b)| b.read(cx).script(script)).is_some()
+    }
+
     /// Show the browser pages in `window` (the main one, or float `float`'s)
     /// whose tab is showing; hide the others, and all of them while something
     /// den draws may be over them (a native page is drawn over everything).
