@@ -498,7 +498,12 @@ fn main() {
     let root = match std::env::args_os().nth(1) {
         // The jump list's New Window task (see `workspace::sync_jump_list`).
         Some(arg) if arg == "--dock-action" => settings::last_folder().unwrap_or_else(start_folder),
-        Some(arg) => PathBuf::from(arg),
+        // Explorer's "Open with den" on a drive passes "C:\", whose trailing
+        // backslash escapes the closing quote: the folder arrives as C:".
+        Some(arg) => match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
+            Some(drive) => PathBuf::from(format!("{drive}\\")),
+            None => PathBuf::from(arg),
+        },
         None => start_folder(),
     };
     let root = std::fs::canonicalize(&root).unwrap_or(root);

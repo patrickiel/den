@@ -22,6 +22,13 @@ Unicode true
 !define APP "den"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
 
+; Explorer's "Open with den" on a folder, a folder's background and a drive.
+!macro OPEN_WITH KEY ARG
+  WriteRegStr HKCU "Software\Classes\${KEY}\shell\${APP}" "" "Open with ${APP}"
+  WriteRegStr HKCU "Software\Classes\${KEY}\shell\${APP}" "Icon" "$INSTDIR\${APP}.exe"
+  WriteRegStr HKCU "Software\Classes\${KEY}\shell\${APP}\command" "" '"$INSTDIR\${APP}.exe" "${ARG}"'
+!macroend
+
 Name "${APP}"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\Programs\${APP}"
@@ -65,6 +72,9 @@ Section "Install"
   copied:
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateShortcut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\${APP}.exe"
+  !insertmacro OPEN_WITH "Directory" "%1"
+  !insertmacro OPEN_WITH "Directory\Background" "%V"
+  !insertmacro OPEN_WITH "Drive" "%1"
   WriteRegStr HKCU "Software\${APP}" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -93,6 +103,9 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP}.lnk"
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\${APP}"
+  DeleteRegKey HKCU "Software\Classes\Directory\Background\shell\${APP}"
+  DeleteRegKey HKCU "Software\Classes\Drive\shell\${APP}"
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   DeleteRegKey HKCU "Software\${APP}"
   ; Settings and sessions in %APPDATA%\den stay.
