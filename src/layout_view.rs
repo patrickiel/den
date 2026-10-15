@@ -844,7 +844,6 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let is_active = id == self.active_group;
         let shown = tabs
             .get(active)
             .and_then(|pane| self.panes.get(pane))
@@ -922,8 +921,7 @@ impl Workspace {
             })
             .when_some(hint, |this, drop| this.child(drop_overlay(drop, cx)));
 
-        // No frame of its own: the lines between groups are the handles. The
-        // active group is the one whose strip is not dimmed, as in VS Code.
+        // No frame of its own: the lines between groups are the handles.
         v_flex()
             .id(("group", id))
             .relative()
@@ -938,13 +936,8 @@ impl Workspace {
                 div()
                     .flex_none()
                     .w_full()
-                    // Under the strip, so dimming fades its tabs and not its colour.
                     .bg(tab_bar)
-                    .child(
-                        div()
-                            .when(!is_active, |this| this.opacity(0.6))
-                            .child(self.render_tab_strip(id, tabs, active, tiled, window, cx)),
-                    ),
+                    .child(self.render_tab_strip(id, tabs, active, tiled, window, cx)),
             )
             .child(content)
             // The keys came here: a border round the whole group, strip and

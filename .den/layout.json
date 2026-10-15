@@ -14,17 +14,9 @@
             "id": 1,
             "tabs": [
               43,
-              44,
-              45,
-              46,
-              47,
-              48,
-              49,
-              50,
-              51,
-              52
+              44
             ],
-            "active": 9
+            "active": 1
           },
           {
             "type": "group",
@@ -55,31 +47,16 @@
     ]
   },
   "panes": {
-    "47": {
-      "kind": "Diff",
+    "42": {
+      "kind": "Terminal",
       "data": {
-        "path": "assets/presets/LICENSES.md",
-        "top": ".",
-        "rel": "assets/presets/LICENSES.md",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
+        "cwd": ".",
+        "program": "claude --model opus --effort high",
+        "agent": true,
+        "resume": "claude --model opus --effort high"
       }
     },
-    "45": {
-      "kind": "Diff",
-      "data": {
-        "path": "src/assets.rs",
-        "top": ".",
-        "rel": "src/assets.rs",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "52": {
+    "44": {
       "kind": "Diff",
       "data": {
         "path": ".den/layout.json",
@@ -91,39 +68,6 @@
         "old_rel": null
       }
     },
-    "50": {
-      "kind": "Diff",
-      "data": {
-        "path": "src/saved_layout.rs",
-        "top": ".",
-        "rel": "src/saved_layout.rs",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "51": {
-      "kind": "Diff",
-      "data": {
-        "path": "src/workspace.rs",
-        "top": ".",
-        "rel": "src/workspace.rs",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "42": {
-      "kind": "Terminal",
-      "data": {
-        "cwd": ".",
-        "program": "claude --model opus --effort high",
-        "agent": true,
-        "resume": "claude --model opus --effort high"
-      }
-    },
     "25": {
       "kind": "Terminal",
       "data": {
@@ -133,60 +77,12 @@
         "resume": null
       }
     },
-    "49": {
-      "kind": "Diff",
-      "data": {
-        "path": "src/main.rs",
-        "top": ".",
-        "rel": "src/main.rs",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "48": {
-      "kind": "Diff",
-      "data": {
-        "path": ".gitignore",
-        "top": ".",
-        "rel": ".gitignore",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "44": {
-      "kind": "Diff",
-      "data": {
-        "path": "assets/presets/logos/gemini.svg",
-        "top": ".",
-        "rel": "assets/presets/logos/gemini.svg",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
     "43": {
       "kind": "Diff",
       "data": {
         "path": "assets/presets/logos/gemini-color.svg",
         "top": ".",
         "rel": "assets/presets/logos/gemini-color.svg",
-        "staged": false,
-        "hash": null,
-        "parent": null,
-        "old_rel": null
-      }
-    },
-    "46": {
-      "kind": "Diff",
-      "data": {
-        "path": "src/preset_icon.rs",
-        "top": ".",
-        "rel": "src/preset_icon.rs",
         "staged": false,
         "hash": null,
         "parent": null,
@@ -208,5 +104,5 @@
       "node": 9
     }
   ],
-  "active": 6
+  "active": 1
 }
