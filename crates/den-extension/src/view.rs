@@ -93,6 +93,12 @@ pub struct Column {
     /// columns. A column of graphs without one is as wide as its widest graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<f32>,
+    /// As wide as its widest cell and its title, in place of `width`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit: bool,
+    /// Not resizable by the user.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

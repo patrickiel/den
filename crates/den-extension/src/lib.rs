@@ -375,8 +375,8 @@ pub struct Context {
 }
 
 /// A button an extension puts in the title bar of the windows on a folder,
-/// with [`Host::set_buttons`]. A click comes back as
-/// [`events::BUTTON_CLICKED`].
+/// or in their Source Control panel, with [`Host::set_buttons`]. A click
+/// comes back as [`events::BUTTON_CLICKED`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Button {
     /// The extension's own name for it, sent back on a click.
@@ -395,6 +395,27 @@ pub struct Button {
     /// path it matches. One that doesn't compile hides the button.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file_pattern: String,
+    /// Where it shows: the title bar, or the Source Control panel's header.
+    #[serde(default, skip_serializing_if = "ButtonLocation::is_title_bar")]
+    pub location: ButtonLocation,
+}
+
+/// Where a [`Button`] shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonLocation {
+    /// The title bar, with its icon and label.
+    #[default]
+    TitleBar,
+    /// The Source Control panel's header, beside Fetch, Pull and Push: its
+    /// icon alone, its label as the tooltip when it has none.
+    SourceControl,
+}
+
+impl ButtonLocation {
+    fn is_title_bar(&self) -> bool {
+        *self == ButtonLocation::TitleBar
+    }
 }
 
 /// A way of showing a file beside den's Source and Preview, which an

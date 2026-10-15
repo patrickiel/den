@@ -137,6 +137,11 @@ impl Repo {
         this
     }
 
+    /// The folder the window is on (the repository's top may be above it).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn top(&self) -> Option<&Path> {
         match &self.state {
             RepoState::Ready { top, .. } => Some(top),

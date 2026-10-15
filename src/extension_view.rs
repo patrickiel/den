@@ -5,11 +5,12 @@
 //!
 //! Also the dialogs extensions ask with `prompt`.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
 
 use den_extension::events;
 use den_extension::view::{
-    Content, FieldKind, Graph, Line, MenuItem, Prompt, Row, Span, ToolbarItem, ToolbarKind, actions,
+    Column, Content, FieldKind, Graph, Line, MenuItem, Prompt, Row, Span, ToolbarItem, ToolbarKind,
+    actions,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -21,6 +22,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     radio::Radio,
     resizable::{resizable_panel, v_resizable},
+    scroll::Scrollbar,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -40,6 +42,9 @@ const ROW_HEIGHT: Pixels = px(24.);
 const GRAPH_MIN: f32 = 56.;
 /// A column the user narrows stops at this width.
 const COLUMN_MIN: f32 = 24.;
+/// A column that shares the space left is at least this wide; the table
+/// scrolls sideways past that.
+const SHARE_MIN: f32 = 160.;
 
 /// A column's edge being dragged in the header.
 struct ColumnResize;
@@ -70,6 +75,12 @@ pub struct ExtensionView {
     /// The column being resized: its index, which way it grows with the
     /// mouse, and the mouse's x and the column's width when the drag began.
     resizing: Option<(usize, f32, Pixels, Pixels)>,
+    /// Sideways, when the columns are wider than the tab.
+    h_scroll: ScrollHandle,
+    /// The `fit` columns' widths, by column, and what they were measured
+    /// for: the views' revision, the rem size and the fonts.
+    fits: Vec<Option<Pixels>>,
+    fits_for: Option<(u64, Pixels, SharedString, SharedString)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -104,6 +115,9 @@ impl ExtensionView {
             widths: Vec::new(),
             in_sidebar: false,
             resizing: None,
+            h_scroll: ScrollHandle::new(),
+            fits: Vec::new(),
+            fits_for: None,
             _subscriptions: vec![
                 cx.observe_global::<Extensions>(|_, cx| cx.notify()),
                 cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()),
@@ -339,16 +353,21 @@ impl ExtensionView {
         bar
     }
 
-    /// Each column's width: the user's, fixed, a graph column's widest
-    /// graph, or `None` to share the rest.
-    fn column_widths(&self, cx: &App) -> Vec<Option<Pixels>> {
-        self.default_widths(cx)
-            .into_iter()
+    /// Each column's width: the user's, its widest cell's (`fit`), fixed,
+    /// a graph column's widest graph, or `None` to share the rest.
+    fn column_widths(&self, columns: &[Column], cx: &App) -> Vec<Option<Pixels>> {
+        let rows = self.rows(cx);
+        columns
+            .iter()
             .enumerate()
-            .map(|(ix, width)| {
-                width
-                    .and(self.widths.get(ix).copied().flatten().map(px))
-                    .or(width)
+            .map(|(ix, column)| {
+                let width = if column.fit {
+                    self.fits.get(ix).copied().flatten()
+                } else {
+                    column.width.map(px).or_else(|| graph_width(rows, ix))
+                };
+                let dragged = self.widths.get(ix).copied().flatten().map(px);
+                width.and(dragged.filter(|_| !column.fixed)).or(width)
             })
             .collect()
     }
@@ -356,37 +375,118 @@ impl ExtensionView {
     /// The column an edge between columns `ix` and `ix + 1` resizes, and
     /// which way it grows with the mouse: the one on the side away from the
     /// column that shares the rest, so the edge follows the mouse.
-    fn resized_by(widths: &[Option<Pixels>], ix: usize) -> Option<(usize, f32)> {
+    fn resized_by(
+        columns: &[Column],
+        widths: &[Option<Pixels>],
+        ix: usize,
+    ) -> Option<(usize, f32)> {
         let (column, sign) = if widths[..=ix].iter().any(Option::is_none) {
             (ix + 1, -1.)
         } else {
             (ix, 1.)
         };
+        if columns.get(column)?.fixed {
+            return None;
+        }
         widths.get(column)?.map(|_| (column, sign))
     }
 
-    fn default_widths(&self, cx: &App) -> Vec<Option<Pixels>> {
+    /// Measure the `fit` columns again if their rows or the fonts changed.
+    fn update_fits(&mut self, columns: &[Column], window: &Window, cx: &App) {
+        let key = (
+            Extensions::get(cx).view_revision(),
+            window.rem_size(),
+            cx.theme().font_family.clone(),
+            crate::settings::mono_font(cx),
+        );
+        if self.fits_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.fits = (0..columns.len())
+            .map(|ix| columns[ix].fit.then(|| self.measure(ix, window, cx)))
+            .collect();
+        self.fits_for = Some(key);
+    }
+
+    /// As wide as column `ix`'s widest cell or its title, as `render_rows`
+    /// and the header draw them.
+    fn measure(&self, ix: usize, window: &Window, cx: &App) -> Pixels {
         let Some(content) = self.content(cx) else {
-            return Vec::new();
+            return px(COLUMN_MIN);
         };
         let rows = content.rows.as_deref().unwrap_or_default();
-        content
-            .columns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(ix, column)| {
-                column.width.map(px).or_else(|| {
-                    let lanes = rows
-                        .iter()
-                        .filter_map(|r| r.cells.get(ix)?.graph.as_ref())
-                        .map(Graph::lanes)
-                        .fold(0., f32::max);
-                    (lanes > 0.).then(|| px((GRAPH_PAD * 2. + lanes * LANE).max(GRAPH_MIN)))
-                })
-            })
-            .collect()
+        if let Some(width) = graph_width(rows, ix) {
+            return width;
+        }
+        let rem = window.rem_size();
+        let (pad, gap, icon) = (rem * 0.5, rem * 0.25, rem * 0.75);
+        let text_system = window.text_system();
+        let ui = cx.theme().font_family.clone();
+        let mono = crate::settings::mono_font(cx);
+        let font_of = |span: &Span, bold: bool| {
+            let mut f = font(if span.mono { mono.clone() } else { ui.clone() });
+            if bold || span.bold {
+                f.weight = FontWeight::SEMIBOLD;
+            }
+            if span.italic {
+                f.style = FontStyle::Italic;
+            }
+            f
+        };
+        // Each text once: a column of dates or names repeats a few. Text in
+        // the editor's font is as wide as its characters.
+        let mut seen = HashMap::new();
+        let mut measure_text = |text, f: Font, size: Pixels, mono: bool| {
+            text_width(text_system, &mut seen, text, f, size, mono)
+        };
+        let mut widest =
+            content
+                .columns
+                .as_ref()
+                .and_then(|c| c.get(ix))
+                .map_or(px(0.), |column| {
+                    let mut header = font(ui.clone());
+                    header.weight = FontWeight::SEMIBOLD;
+                    measure_text(&column.title, header, rem * 0.75, false)
+                });
+        for row in rows {
+            let Some(cell) = row.cells.get(ix) else {
+                continue;
+            };
+            let mut width = gap * cell.spans.len().saturating_sub(1) as f32;
+            for span in &cell.spans {
+                let badge = !span.background.is_empty();
+                let size = rem * if badge { 0.75 } else { 0.875 };
+                width += measure_text(&span.text, font_of(span, row.bold), size, span.mono);
+                if !span.icon.is_empty() {
+                    width += icon + if span.text.is_empty() { px(0.) } else { gap };
+                }
+                if badge {
+                    width += rem * 0.375 * 2.;
+                }
+            }
+            widest = widest.max(width);
+        }
+        // A pixel to spare, so rounding never cuts the text short.
+        (widest + pad * 2.).ceil() + px(1.)
+    }
+
+    /// Fit column `ix` to its cells: back to following them for a `fit` or
+    /// graph column, else the width they need now.
+    fn fit_column(&mut self, ix: usize, window: &Window, cx: &mut Context<Self>) {
+        let Some(column) = self
+            .content(cx)
+            .and_then(|c| c.columns.as_ref()?.get(ix).cloned())
+        else {
+            return;
+        };
+        let width =
+            (!column.fit && column.width.is_some()).then(|| self.measure(ix, window, cx).as_f32());
+        if self.widths.len() <= ix {
+            self.widths.resize(ix + 1, None);
+        }
+        self.widths[ix] = width;
+        cx.notify();
     }
 
     fn render_rows(
@@ -711,6 +811,50 @@ impl ExtensionView {
     }
 }
 
+/// How wide `text` is drawn, measured once per text, font and size in `seen`.
+fn text_width<'a>(
+    text_system: &WindowTextSystem,
+    seen: &mut HashMap<(&'a str, Font, Pixels), Pixels>,
+    text: &'a str,
+    font: Font,
+    size: Pixels,
+    mono: bool,
+) -> Pixels {
+    if text.is_empty() {
+        return px(0.);
+    }
+    if mono {
+        let id = text_system.resolve_font(&font);
+        let advance = text_system
+            .advance(id, size, 'm')
+            .map_or(size * 0.6, |a| a.width);
+        return advance * text.chars().count() as f32;
+    }
+    *seen.entry((text, font.clone(), size)).or_insert_with(|| {
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        text_system
+            .shape_line(text.to_string().into(), size, &[run], None)
+            .width
+    })
+}
+
+/// A column of graphs is as wide as its widest graph; `None` for one without.
+fn graph_width(rows: &[Row], ix: usize) -> Option<Pixels> {
+    let lanes = rows
+        .iter()
+        .filter_map(|r| r.cells.get(ix)?.graph.as_ref())
+        .map(Graph::lanes)
+        .fold(0., f32::max);
+    (lanes > 0.).then(|| px((GRAPH_PAD * 2. + lanes * LANE).max(GRAPH_MIN)))
+}
+
 /// `items` in `popup`; a pick sends the item's id with `row` and `data`.
 fn build_menu(
     mut popup: PopupMenu,
@@ -851,7 +995,8 @@ impl Render for ExtensionView {
             self.scrolled_to = selected;
         }
 
-        let widths = self.column_widths(cx);
+        self.update_fits(&columns, window, cx);
+        let widths = self.column_widths(&columns, cx);
         let header = columns.iter().any(|c| !c.title.is_empty()).then(|| {
             h_flex()
                 .flex_none()
@@ -873,7 +1018,7 @@ impl Render for ExtensionView {
                         None => slot.flex_1().min_w_0(),
                     };
                     let resized = (ix + 1 < columns.len())
-                        .then(|| Self::resized_by(&widths, ix))
+                        .then(|| Self::resized_by(&columns, &widths, ix))
                         .flatten();
                     slot.when_some(resized, |this, (column, sign)| {
                         let start = widths[column].unwrap_or_default();
@@ -889,9 +1034,14 @@ impl Render for ExtensionView {
                                 .hover(|this| this.bg(theme.primary.opacity(0.5)))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, _| {
-                                        this.resizing =
-                                            Some((column, sign, event.position.x, start));
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                        if event.click_count >= 2 {
+                                            this.resizing = None;
+                                            this.fit_column(column, window, cx);
+                                        } else {
+                                            this.resizing =
+                                                Some((column, sign, event.position.x, start));
+                                        }
                                     }),
                                 )
                                 .on_drag(ColumnResize, |_, _, _, cx| cx.new(|_| ColumnResize)),
@@ -910,8 +1060,8 @@ impl Render for ExtensionView {
                 .child(message)
                 .into_any_element()
         } else {
-            let widths = Rc::new(widths);
-            uniform_list(
+            let widths = Rc::new(widths.clone());
+            let mut list = uniform_list(
                 "extension-view-rows",
                 count,
                 cx.processor(move |this, range, window, cx| {
@@ -919,11 +1069,15 @@ impl Render for ExtensionView {
                 }),
             )
             .track_scroll(&self.scroll)
-            .size_full()
-            .into_any_element()
+            .size_full();
+            // A sideways swipe scrolls the table, not the rows.
+            list.style().restrict_scroll_to_axis = Some(true);
+            list.into_any_element()
         };
-        let list = v_flex()
+        let table_width: Pixels = widths.iter().map(|w| w.unwrap_or(px(SHARE_MIN))).sum();
+        let list = div()
             .id("extension-view-list")
+            .relative()
             .size_full()
             .on_key_down(cx.listener(Self::on_key))
             .on_drag_move::<ColumnResize>(cx.listener(
@@ -939,8 +1093,23 @@ impl Render for ExtensionView {
                     cx.notify();
                 },
             ))
-            .children(header)
-            .child(div().flex_1().min_h_0().child(list));
+            .child(
+                div()
+                    .id("extension-view-table")
+                    .size_full()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.h_scroll)
+                    .child(
+                        v_flex()
+                            .h_full()
+                            .w_full()
+                            .min_w(table_width)
+                            .children(header)
+                            .child(div().flex_1().min_h_0().child(list)),
+                    ),
+            )
+            .child(Scrollbar::horizontal(&self.h_scroll).id("extension-view-scrollbar"));
 
         let body = if detail.is_empty() {
             list.into_any_element()

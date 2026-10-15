@@ -178,7 +178,7 @@ All three methods run on the extension's own thread, one at a time. While `event
 | --- | --- |
 | `log(message)` | Writes a line to `extensions.log`, under the extension's id |
 | `toast(message)` | Shows a notification in den's window, titled with the extension's name |
-| `set_buttons(root, &[Button])` | Sets the extension's title-bar buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
+| `set_buttons(root, &[Button])` | Sets the extension's title-bar and Source Control buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
 | `run_in_terminal(root, command, cwd)` | Opens a terminal tab in the window on `root` and runs `command` in its shell (PowerShell by default), in `cwd` or else the root |
 | `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given, scrolled to the top. A relative path counts from `root`. |
 | `open_browser(root, url, tab)` | Opens `url` in a browser tab of the window on `root`, where browsers go. With a `tab` name, the extension's tab of that name is reused (loaded at `url`, again if it is there) and shown, without taking the keyboard; den remembers it across restarts |
@@ -285,6 +285,7 @@ let result = host.set_buttons(&root, &[
         color: "#22C1D6".into(),
         tooltip: "Run the tests".into(),
         file_pattern: r"test_.*\.rs$".into(),
+        ..Default::default()
     },
 ]);
 ```
@@ -297,6 +298,7 @@ let result = host.set_buttons(&root, &[
 | `color` | `#rrggbb` for the label and icon |
 | `tooltip` | Shown on hover; defaults to the label |
 | `file_pattern` | A regular expression: the button shows only while the active file's path matches. One that doesn't compile hides the button. |
+| `location` | `TitleBar` (the default), or `SourceControl` for an icon in the Source Control panel's header, beside Fetch, Pull and Push, for what belongs with the repository; `git-graph` shows its graph from there |
 
 How they behave:
 - Buttons belong to a **folder**: set them per `root`, usually in response to `workspace_opened`. Every window on that folder shows them, to the left of den's layout button.
@@ -311,7 +313,7 @@ use den_extension::view::{Cell, Column, Content, Graph, Line, MenuItem, Row, Spa
 
 let content = Content {
     toolbar: Some(vec![ToolbarItem::search("find", "Find"), ToolbarItem::spacer(), ToolbarItem::button("refresh", "", "refresh-cw")]),
-    columns: Some(vec![Column { title: "Name".into(), width: None }, Column { title: "Size".into(), width: Some(80.) }]),
+    columns: Some(vec![Column { title: "Name".into(), ..Default::default() }, Column { title: "Size".into(), fit: true, ..Default::default() }]),
     rows: Some(vec![Row {
         id: "a".into(),
         cells: vec![vec![Span::text("main").background("#0085d9").menu("branch", "main"), Span::text("a file")].into(), "12 KB".into()],
@@ -328,6 +330,7 @@ host.set_view(&root, "my-view", &content)?;
 | --- | --- |
 | `toolbar` | Buttons (`active` draws one switched on), selects, search boxes, labels and spacers above the list |
 | `columns`, `rows` | A virtual list: thousands of rows are fine. Each cell is spans (text, or a badge when it has a `background`) or a `Graph` |
+| `Column` | A `width` in pixels, `fit` to its widest cell, or neither to share the space left; `fixed` keeps the user from resizing it. The user drags a column's edge to resize it and double-clicks it to fit it; columns wider than the tab scroll sideways |
 | `Graph` | Lines and dots in lanes, drawn across a row: a lane change is a curve, `dashed` and `hollow` are there for "not committed yet" |
 | `menus` | Right-click menus by name, for rows (`Row::menu`), spans (`Span::menu`, sent with its `data`) and detail lines |
 | `selected`, `highlighted` | The selected row (den scrolls to it) and rows marked as found |

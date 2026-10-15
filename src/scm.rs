@@ -210,7 +210,11 @@ impl ScmView {
                 .auto_grow(1, 10)
                 .placeholder(message_placeholder())
         });
-        let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
+        let _subscriptions = vec![
+            cx.observe(&repo, |_, _, cx| cx.notify()),
+            // For the extensions' buttons.
+            cx.observe_global::<crate::extensions::Extensions>(|_, cx| cx.notify()),
+        ];
         Self {
             repo,
             message,
@@ -747,6 +751,7 @@ impl ScmView {
                     )
                     .child(
                         h_flex()
+                            .children(self.extension_buttons(cx))
                             .child(action(
                                 "fetch",
                                 IconName::RefreshCcw,
@@ -814,6 +819,45 @@ impl ScmView {
                         )
                     }),
             )
+    }
+
+    /// The extensions' buttons for this panel, as icons like den's own.
+    fn extension_buttons(&self, cx: &App) -> Vec<AnyElement> {
+        let Some(extensions) = cx.try_global::<crate::extensions::Extensions>() else {
+            return Vec::new();
+        };
+        let root = self.repo.read(cx).root().to_path_buf();
+        let mut elements = Vec::new();
+        for set in extensions.buttons_for(&root) {
+            for button in &set.buttons {
+                if button.location != den_extension::ButtonLocation::SourceControl {
+                    continue;
+                }
+                let tooltip = if button.tooltip.is_empty() {
+                    button.label.clone()
+                } else {
+                    button.tooltip.clone()
+                };
+                let mut element =
+                    Button::new(SharedString::from(format!("ext-{}-{}", set.id, button.id)))
+                        .ghost()
+                        .xsmall()
+                        .tooltip(tooltip);
+                element = match crate::ui::lucide_icon(&button.icon, cx) {
+                    Some(icon) => element.icon(icon),
+                    None => element.label(button.label.clone()),
+                };
+                let (id, root, name) = (set.id.clone(), root.clone(), button.id.clone());
+                elements.push(
+                    element
+                        .on_click(move |_, _, cx| {
+                            crate::extensions::button_clicked(&id, &root, &name, cx)
+                        })
+                        .into_any_element(),
+                );
+            }
+        }
+        elements
     }
 
     fn render_group(

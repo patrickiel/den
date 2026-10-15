@@ -156,6 +156,9 @@ pub struct Extensions {
     buttons: Vec<Buttons>,
     /// What each extension's views show, by extension, folder and view.
     views: Vec<ViewData>,
+    /// Counts the columns and rows sent to any view, so a tab measures its
+    /// columns again only when they change.
+    view_revision: u64,
     /// The ways each extension offers to show files, by its id and the folder.
     file_views: Vec<FileViews>,
     /// The open windows by their folder, for `run_in_terminal`.
@@ -218,6 +221,11 @@ impl Extensions {
             .iter()
             .find(|v| v.id == id && v.root == root && v.view == view)
             .map(|v| &v.content)
+    }
+
+    /// Changes whenever a view's columns or rows are sent.
+    pub fn view_revision(&self) -> u64 {
+        self.view_revision
     }
 
     /// The same, to change it here (a click's selection, before the extension answers).
@@ -421,7 +429,11 @@ fn on_report(report: Report, cx: &mut App) {
             view,
             content,
         } => {
-            cx.global_mut::<Extensions>()
+            let extensions = cx.global_mut::<Extensions>();
+            if content.columns.is_some() || content.rows.is_some() {
+                extensions.view_revision += 1;
+            }
+            extensions
                 .view_mut(&id, Path::new(&root), &view)
                 .merge(*content);
             return;

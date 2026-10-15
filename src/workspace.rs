@@ -3348,6 +3348,9 @@ impl Workspace {
         let mut elements = Vec::new();
         for set in extensions.buttons_for(&self.root) {
             for button in &set.buttons {
+                if button.location != den_extension::ButtonLocation::TitleBar {
+                    continue;
+                }
                 if !button.file_pattern.is_empty()
                     && !active_file.as_deref().is_some_and(|path| {
                         crate::extensions::pattern_matches(&button.file_pattern, path)
