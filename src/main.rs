@@ -486,6 +486,71 @@ fn inherit_login_path() {
     }
 }
 
+/// Quit and start again on the folders open now, as updated extensions need.
+/// The new den waits for this one to be gone, sessions saved and extensions
+/// unloaded, before it applies the updates.
+pub fn restart(cx: &mut App) {
+    let started = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .arg("--wait-for")
+            .arg(std::process::id().to_string())
+            .args(extensions::open_folders(cx))
+            .spawn()
+    });
+    match started {
+        Ok(_) => cx.quit(),
+        Err(err) => {
+            if let Some(window) = cx.active_window() {
+                _ = window.update(cx, |_, window, cx| {
+                    toast::push(window, format!("Could not restart den: {err}"), cx)
+                });
+            }
+        }
+    }
+}
+
+/// Wait a while for process `pid` to end; false when it still runs (its quit
+/// was called off).
+fn wait_for_exit(pid: u32) -> bool {
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        // SAFETY: a wait on a pid's process; the handle is closed right after.
+        unsafe {
+            // It cannot be opened when it is gone already.
+            let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else {
+                return true;
+            };
+            let gone = WaitForSingleObject(process, PATIENCE.as_millis() as u32) != WAIT_TIMEOUT;
+            let _ = CloseHandle(process);
+            gone
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let running = || {
+            std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        while running() {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        true
+    }
+}
+
 fn main() {
     #[cfg(target_os = "macos")]
     inherit_login_path();
@@ -495,19 +560,37 @@ fn main() {
     // when the platform starts, so set it before anything else.
     // SAFETY: nothing else runs yet, so no thread reads the environment.
     unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
-    let root = match std::env::args_os().nth(1) {
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    // A restart (see `restart`): once the den before has quit.
+    if args.len() >= 2 && args[0] == "--wait-for" {
+        let pid = args[1].to_str().and_then(|pid| pid.parse().ok());
+        if pid.is_some_and(|pid| !wait_for_exit(pid)) {
+            return;
+        }
+        args.drain(..2);
+    }
+    let roots: Vec<PathBuf> = match args.first() {
         // The jump list's New Window task (see `workspace::sync_jump_list`).
-        Some(arg) if arg == "--dock-action" => settings::last_folder().unwrap_or_else(start_folder),
-        // Explorer's "Open with den" on a drive passes "C:\", whose trailing
-        // backslash escapes the closing quote: the folder arrives as C:".
-        Some(arg) => match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
-            Some(drive) => PathBuf::from(format!("{drive}\\")),
-            None => PathBuf::from(arg),
-        },
-        None => start_folder(),
+        Some(arg) if arg == "--dock-action" => {
+            vec![settings::last_folder().unwrap_or_else(start_folder)]
+        }
+        Some(_) => args
+            .into_iter()
+            // Explorer's "Open with den" on a drive passes "C:\", whose trailing
+            // backslash escapes the closing quote: the folder arrives as C:".
+            .map(
+                |arg| match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
+                    Some(drive) => PathBuf::from(format!("{drive}\\")),
+                    None => PathBuf::from(arg),
+                },
+            )
+            .collect(),
+        None => vec![start_folder()],
     };
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
-    let root = settings::strip_verbatim(root);
+    let roots: Vec<PathBuf> = roots
+        .into_iter()
+        .map(|root| settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root)))
+        .collect();
 
     gpui_kit::application()
         .with_assets(assets::Assets)
@@ -529,7 +612,9 @@ fn main() {
                 on_window_actions(cx);
             }
 
-            open_workspace(root, None, cx);
+            for root in roots {
+                open_workspace(root, None, cx);
+            }
             cx.activate(true);
         });
 }

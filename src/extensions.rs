@@ -140,6 +140,8 @@ pub struct Extensions {
     pub index: IndexState,
     /// The index was fetched, or found fresh in the cache, in this session.
     index_current: bool,
+    /// Say which updates the index has once it is read ([`check_for_updates`]).
+    announce_updates: bool,
     /// Icons of listed extensions to fetch, as their cards are drawn.
     icon_queue: std::collections::VecDeque<Listing>,
     /// Icons already looked at this session, by [`icon_key`]: kept, queued,
@@ -528,8 +530,11 @@ fn show_toast(title: String, message: String, cx: &mut App) {
 /// absent or `force`d (the view's refresh button). Once per session otherwise.
 pub fn refresh_index(force: bool, cx: &mut App) {
     let extensions = cx.global_mut::<Extensions>();
-    if extensions.index == IndexState::Loading || (extensions.index_current && !force) {
+    if extensions.index == IndexState::Loading {
         return;
+    }
+    if extensions.index_current && !force {
+        return announce_updates(cx);
     }
     if extensions.available.is_empty()
         && let Some((listings, age)) = backend::cached_index()
@@ -537,7 +542,7 @@ pub fn refresh_index(force: bool, cx: &mut App) {
         extensions.available = listings;
         if age < INDEX_MAX_AGE && !force {
             extensions.index_current = true;
-            return;
+            return announce_updates(cx);
         }
     }
     extensions.index = IndexState::Loading;
@@ -558,9 +563,72 @@ pub fn refresh_index(force: bool, cx: &mut App) {
                 }
                 Err(err) => extensions.index = IndexState::Failed(err),
             }
+            announce_updates(cx);
         });
     })
     .detach();
+}
+
+/// Once a start: read the index and, when it has newer versions of
+/// installed extensions, offer to update them all.
+pub fn check_for_updates(cx: &mut App) {
+    cx.global_mut::<Extensions>().announce_updates = true;
+    // Deferred: called from a window's update, the announcement could not
+    // update that window again.
+    cx.defer(|cx| refresh_index(false, cx));
+}
+
+/// The newer versions in the index, for the entries that change nothing yet.
+fn updates(cx: &App) -> Vec<Listing> {
+    let extensions = Extensions::get(cx);
+    extensions
+        .entries
+        .iter()
+        .filter(|e| e.change.is_none())
+        .filter_map(|e| update_available(e, &extensions.available).cloned())
+        .collect()
+}
+
+/// After [`check_for_updates`], once the index is read.
+fn announce_updates(cx: &mut App) {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::notification::Notification;
+    if !std::mem::take(&mut cx.global_mut::<Extensions>().announce_updates) {
+        return;
+    }
+    let updates = updates(cx);
+    if updates.is_empty() {
+        return;
+    }
+    let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
+        return;
+    };
+    let list: Vec<String> = updates
+        .iter()
+        .map(|l| format!("{} {}", l.name, l.version))
+        .collect();
+    let note = Notification::new()
+        .title(if updates.len() == 1 {
+            "Extension Update"
+        } else {
+            "Extension Updates"
+        })
+        .message(format!(
+            "{} {} out.",
+            list.join(", "),
+            if list.len() == 1 { "is" } else { "are" }
+        ))
+        .action(move |_, _, cx| {
+            let updates = updates.clone();
+            Button::new("ext-update-all")
+                .primary()
+                .label("Update")
+                .on_click(cx.listener(move |note, _, window, cx| {
+                    note.dismiss(window, cx);
+                    crate::downloads::update_extensions(updates.clone(), window, cx);
+                }))
+        });
+    _ = window.update(cx, |_, window, cx| crate::toast::push(window, note, cx));
 }
 
 /// The listings not installed, in index order.
@@ -594,6 +662,17 @@ pub fn window_opened(
         .windows
         .retain(|(_, workspace, _)| workspace.upgrade().is_some());
     extensions.windows.push((root, workspace, window));
+}
+
+/// The folders of the open windows, each once.
+pub fn open_folders(cx: &App) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for (root, workspace, _) in &Extensions::get(cx).windows {
+        if workspace.upgrade().is_some() && !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    roots
 }
 
 /// Run `f` on the workspace of the window on `root`, logged when there is none.
@@ -803,8 +882,29 @@ pub fn is_enabled(id: &str, cx: &App) -> bool {
 pub fn uninstall(id: &str, cx: &mut App) -> Result<(), String> {
     backend::uninstall(id)?;
     Settings::update(cx, |s| s.disabled_extensions.retain(|d| d != id));
-    if let Some(entry) = cx.global_mut::<Extensions>().entry_mut(id) {
-        entry.change = Some(REMOVED.into());
+    let extensions = cx.global_mut::<Extensions>();
+    if let Some(entry) = extensions.entry_mut(id) {
+        if entry.status == Status::Installed {
+            // Only downloaded in this session, and that is gone now: it is
+            // available again, to install once more.
+            extensions.entries.retain(|e| e.id != id);
+        } else {
+            entry.change = Some(REMOVED.into());
+        }
+    }
+    Ok(())
+}
+
+/// Undo [`uninstall`]: `id` stays, on or off as this start has it.
+pub fn keep(id: &str, cx: &mut App) -> Result<(), String> {
+    backend::keep(id)?;
+    let Some(entry) = cx.global_mut::<Extensions>().entry_mut(id) else {
+        return Ok(());
+    };
+    entry.change = None;
+    let enabled = entry.started();
+    if !enabled {
+        Settings::update(cx, |s| s.disabled_extensions.push(id.to_string()));
     }
     Ok(())
 }

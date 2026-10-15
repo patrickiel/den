@@ -168,20 +168,18 @@ pub(crate) fn listing_avatar(listing: &Listing, size: f32, cx: &App) -> AnyEleme
 }
 
 /// The dot and words for how `entry` runs, then what the next start changes.
-pub(crate) fn status(entry: &Entry, cx: &App) -> (Hsla, String) {
+pub(crate) fn status(entry: &Entry, cx: &App) -> Option<(Hsla, String)> {
     let theme = cx.theme();
+    // Running or off goes without saying: the switch shows it.
     let (color, text) = match &entry.status {
         Status::Loading => (theme.warning, "Starting…".to_string()),
-        Status::Loaded => (theme.success, "Running".to_string()),
-        Status::Disabled => (theme.muted_foreground, "Off".to_string()),
+        Status::Loaded => (theme.success, String::new()),
+        Status::Disabled | Status::Installed => (theme.muted_foreground, String::new()),
         Status::Failed(err) => (theme.danger, format!("Failed: {err}")),
-        Status::Installed => (theme.muted_foreground, String::new()),
     };
     let text = [text, entry.change.clone().unwrap_or_default()].join(" · ");
-    (
-        color,
-        text.trim_matches(|c| c == ' ' || c == '·').to_string(),
-    )
+    let text = text.trim_matches(|c| c == ' ' || c == '·');
+    (!text.is_empty()).then(|| (color, text.to_string()))
 }
 
 /// What both kinds of card show above their bottom row.
@@ -258,9 +256,10 @@ fn card_frame(
         )
 }
 
-/// An installed extension's controls: Update when the index has a newer
-/// version (else Check for Update), Uninstall, and its on/off switch. Small
-/// icon buttons for a card (`compact`), labelled ones for the page.
+/// An installed extension's controls: Restart when a change waits for the
+/// next start, else Update when the index has a newer version (else Check
+/// for Update); Uninstall (Undo once uninstalled), and its on/off switch.
+/// Small icon buttons for a card (`compact`), labelled ones for the page.
 pub(crate) fn entry_actions(
     entry: &Entry,
     update: Option<&Listing>,
@@ -277,18 +276,21 @@ pub(crate) fn entry_actions(
     let check = manifest
         .filter(|m| !m.repository.is_empty())
         .map(|m| (m.repository.clone(), m.version.clone()));
-    let newer = update.zip(manifest).map(|(listing, m)| {
-        (
-            listing.repo.clone(),
-            m.version.clone(),
-            listing.version.clone(),
-        )
-    });
+    let newer = update.cloned();
     let enabled = extensions::is_enabled(&id, cx);
     let (remove_id, switch_id) = (id.clone(), id.clone());
     let button = |action: &str| {
         Button::new(SharedString::from(format!("ext-{scope}-{action}-{id}")))
             .map(|b| if compact { b.xsmall() } else { b.small() })
+    };
+
+    // What waits for the next start can have it now.
+    let restart = || {
+        button("restart")
+            .primary()
+            .label("Restart")
+            .tooltip("Restart den")
+            .on_click(|_, _, cx| crate::restart(cx))
     };
 
     let actions = h_flex().items_center().flex_none().map(|this| {
@@ -299,7 +301,25 @@ pub(crate) fn entry_actions(
         }
     });
     if removed {
-        return actions;
+        let keep_id = id.clone();
+        return actions.child(restart()).child(
+            button("keep")
+                .map(|b| {
+                    if compact {
+                        b.ghost()
+                    } else {
+                        b.outline().label("Undo Uninstall")
+                    }
+                })
+                .icon(Icon::new(IconName::Undo2))
+                .tooltip("Keep It Installed")
+                .on_click(move |_, window, cx| {
+                    if let Err(err) = extensions::keep(&keep_id, cx) {
+                        crate::toast::push(window, format!("Could not undo: {err}"), cx);
+                    }
+                    window.refresh();
+                }),
+        );
     }
     if let Some(progress) = progress {
         return actions.child(
@@ -317,19 +337,15 @@ pub(crate) fn entry_actions(
     }
     actions
         .map(|this| match (newer, check) {
+            _ if entry.change.is_some() => this.child(restart()),
             // The index knows of a newer version: say so.
-            (Some((repo, installed, newer)), _) => this.child(
+            (Some(listing), _) => this.child(
                 button("update")
                     .primary()
                     .label("Update")
-                    .tooltip(format!("Version {newer} is out"))
+                    .tooltip(format!("Version {} is out", listing.version))
                     .on_click(move |_, window, cx| {
-                        crate::downloads::get_extension(
-                            repo.clone(),
-                            Some(installed.clone()),
-                            window,
-                            cx,
-                        )
+                        crate::downloads::update_extensions(vec![listing.clone()], window, cx)
                     }),
             ),
             (None, Some((repo, version))) => this.child(
@@ -405,24 +421,25 @@ fn card(
 ) -> impl IntoElement {
     let theme = cx.theme();
     let manifest = entry.manifest.as_ref();
-    let (dot, status) = status(entry, cx);
     let bottom = h_flex()
         .gap_2()
         .items_center()
         .justify_between()
         .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .min_w_0()
-                .child(div().size(px(7.)).rounded_full().flex_none().bg(dot))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(status),
-                ),
+            // Empty, it still keeps the actions on the right.
+            h_flex().gap_1p5().items_center().min_w_0().when_some(
+                status(entry, cx),
+                |this, (dot, status)| {
+                    this.child(div().size(px(7.)).rounded_full().flex_none().bg(dot))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(status),
+                        )
+                },
+            ),
         )
         .child(entry_actions(entry, update.as_ref(), true, cx));
     let face = Face {

@@ -637,7 +637,8 @@ impl Workspace {
         };
         this.start_watching(window, cx);
         this.detect_dev_servers(cx);
-        // Once per run, a little after start: is there a newer den?
+        // Once per run, a little after start: is there a newer den, or a
+        // newer version of an installed extension?
         static UPDATE_CHECKED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         if !UPDATE_CHECKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -645,7 +646,10 @@ impl Workspace {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(10))
                     .await;
-                _ = cx.update(|window, cx| crate::update::check_in_window(false, window, cx));
+                _ = cx.update(|window, cx| {
+                    crate::update::check_in_window(false, window, cx);
+                    crate::extensions::check_for_updates(cx);
+                });
             })
             .detach();
         }

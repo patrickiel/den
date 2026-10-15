@@ -286,11 +286,11 @@ impl ExtensionPanel {
     fn render_header(&self, entry: &Entry, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let manifest = entry.manifest.as_ref();
-        let (dot, status) = status(entry, cx);
         let repository = manifest
             .map(|m| m.repository.clone())
             .filter(|r| !r.is_empty());
-        let actions = entry_actions(entry, None, false, cx);
+        let update = extensions::update_available(entry, &Extensions::get(cx).available).cloned();
+        let actions = entry_actions(entry, update.as_ref(), false, cx);
 
         h_flex()
             .px_8()
@@ -345,18 +345,20 @@ impl ExtensionPanel {
                     .when_some(manifest.filter(|m| !m.description.is_empty()), |this, m| {
                         this.child(div().text_base().child(m.description.clone()))
                     })
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .items_center()
-                            .child(div().size(px(8.)).rounded_full().flex_none().bg(dot))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(status),
-                            ),
-                    )
+                    .when_some(status(entry, cx), |this, (dot, status)| {
+                        this.child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                .child(div().size(px(8.)).rounded_full().flex_none().bg(dot))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(status),
+                                ),
+                        )
+                    })
                     .child(actions),
             )
     }

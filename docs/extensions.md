@@ -433,7 +433,7 @@ Publish each extension from its **own public GitHub repository**, with `extensio
    - `<id>-windows-x86_64.zip` and `<id>-macos-aarch64.zip`: `extension.json`, the library, and `README.md` and the icon if present;
    - `extension.json` with the zips' `sha256` and `platforms` added. den reads this first.
 
-Anyone can then install the extension by typing `owner/repo` in the Extensions view. Users who installed it get the new release from its update button.
+Anyone can then install the extension by typing `owner/repo` in the Extensions view. Users who installed it get the new release from its update button; for a listed extension, den also offers it a little after it starts.
 
 ## Getting listed
 

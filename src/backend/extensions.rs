@@ -880,6 +880,14 @@ pub fn uninstall(id: &str) -> Result<(), String> {
     std::fs::write(dir.join(format!("{id}{REMOVE}")), "").map_err(|e| e.to_string())
 }
 
+/// Call off `uninstall` before the next start.
+pub fn keep(id: &str) -> Result<(), String> {
+    match std::fs::remove_file(dir().join(format!("{id}{REMOVE}"))) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.to_string()),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

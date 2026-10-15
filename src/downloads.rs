@@ -44,28 +44,26 @@ pub(crate) fn start_download(
     + Send
     + 'static,
 ) {
-    start_download_then(key, what, window, cx, job, |_, _| {});
+    start_download_then(key, what, window, cx, job, |_, _, _| {});
 }
 
-/// [`start_download`], then `done` once it succeeded.
-pub(crate) fn start_download_then(
+/// [`start_download`], then `done` with what `job` made, or `None` once it
+/// failed (after the toast). Nothing happens while `key` is downloading.
+pub(crate) fn start_download_then<T: Send + 'static>(
     key: String,
     what: impl Into<String>,
     window: &mut Window,
     cx: &mut App,
-    job: impl FnOnce(
-        &crate::backend::http::Cancel,
-        crate::backend::http::Progress,
-    ) -> Result<(), String>
+    job: impl FnOnce(&crate::backend::http::Cancel, crate::backend::http::Progress) -> Result<T, String>
     + Send
     + 'static,
-    done: impl FnOnce(&mut Window, &mut App) + 'static,
+    done: impl FnOnce(Option<T>, &mut Window, &mut App) + 'static,
 ) {
     if download_progress(&key).is_some() {
         return;
     }
     set_download_progress(&key, Some("Starting…".into()));
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Result<(), String>>>();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Option<Result<T, String>>>();
     std::thread::spawn(move || {
         let result = job(
             &crate::backend::http::Cancel::default(),
@@ -89,16 +87,19 @@ pub(crate) fn start_download_then(
         use futures::StreamExt as _;
         while let Some(update) = rx.next().await {
             _ = handle.update(cx, |_, window, cx| {
-                match update {
-                    Some(Err(err)) => {
-                        crate::toast::push(window, format!("Could not download {what}: {err}"), cx)
+                if let Some(result) = update {
+                    let made = result
+                        .map_err(|err| {
+                            crate::toast::push(
+                                window,
+                                format!("Could not download {what}: {err}"),
+                                cx,
+                            )
+                        })
+                        .ok();
+                    if let Some(done) = done.take() {
+                        done(made, window, cx);
                     }
-                    Some(Ok(())) => {
-                        if let Some(done) = done.take() {
-                            done(window, cx);
-                        }
-                    }
-                    None => {}
                 }
                 window.refresh();
             });
@@ -147,7 +148,11 @@ pub(crate) fn get_extension(
                         window,
                         cx,
                         move |cancel, progress| crate::backend::extensions::install(&job, cancel, progress),
-                        move |_, cx| crate::extensions::installed(done, cx),
+                        move |made, _, cx| {
+                            if made.is_some() {
+                                crate::extensions::installed(done, cx)
+                            }
+                        },
                     );
                     true
                 })
@@ -155,4 +160,64 @@ pub(crate) fn get_extension(
         });
     })
     .detach();
+}
+
+/// Download the newer versions in `updates` for the next start, together,
+/// each with its progress on its card; once all are done, offer to restart.
+/// The user chose these already, so there is no dialog for each.
+pub(crate) fn update_extensions(
+    mut updates: Vec<crate::backend::extensions::Listing>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use std::{cell::Cell, rc::Rc};
+    // One downloading already would never report back here.
+    updates.retain(|l| download_progress(&install_progress_key(&l.id)).is_none());
+    let left = Rc::new(Cell::new(updates.len()));
+    let updated = Rc::new(Cell::new(0));
+    for listing in updates {
+        let (left, updated) = (left.clone(), updated.clone());
+        start_download_then(
+            install_progress_key(&listing.id),
+            listing.name.clone(),
+            window,
+            cx,
+            move |cancel, progress| {
+                let manifest = crate::backend::extensions::fetch_manifest(&listing.repo)?;
+                crate::backend::extensions::install(&manifest, cancel, progress)?;
+                Ok(manifest)
+            },
+            move |made, window, cx| {
+                if let Some(manifest) = made {
+                    updated.set(updated.get() + 1);
+                    crate::extensions::installed(manifest, cx);
+                }
+                left.set(left.get() - 1);
+                if left.get() == 0 && updated.get() > 0 {
+                    offer_restart(updated.get(), window, cx);
+                }
+            },
+        );
+    }
+}
+
+/// Updated extensions load at the next start: offer it now.
+fn offer_restart(updated: usize, window: &mut Window, cx: &mut App) {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::notification::Notification;
+    let what = if updated == 1 {
+        "The update loads".to_string()
+    } else {
+        format!("The {updated} updates load")
+    };
+    let note = Notification::new()
+        .title("Extensions Updated")
+        .message(format!("{what} when den restarts."))
+        .action(|_, _, _| {
+            Button::new("ext-restart")
+                .primary()
+                .label("Restart")
+                .on_click(|_, _, cx| crate::restart(cx))
+        });
+    crate::toast::push(window, note, cx);
 }
