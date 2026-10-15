@@ -180,7 +180,7 @@ All three methods run on the extension's own thread, one at a time. While `event
 | `toast(message)` | Shows a notification in den's window, titled with the extension's name |
 | `set_buttons(root, &[Button])` | Sets the extension's title-bar buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
 | `run_in_terminal(root, command, cwd)` | Opens a terminal tab in the window on `root` and runs `command` in its shell (PowerShell by default), in `cwd` or else the root |
-| `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given. A relative path counts from `root`. |
+| `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given, scrolled to the top. A relative path counts from `root`. |
 | `open_browser(root, url, tab)` | Opens `url` in a browser tab of the window on `root`, where browsers go. With a `tab` name, the extension's tab of that name is reused (loaded at `url`, again if it is there) and shown, without taking the keyboard; den remembers it across restarts |
 | `browser_script(root, tab, script)` | Runs JavaScript in the page of the extension's browser tab `tab`; logged when that tab isn't open |
 | `open_view(root, view)` | Opens a tab of the manifest's view `view` in the window on `root`, or shows the open one |

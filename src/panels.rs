@@ -376,6 +376,38 @@ impl FilePanel {
         });
     }
 
+    /// Scroll so `line` (from 1) is the top row. A tab not laid out yet (just
+    /// opened) gets it after its first frame. Not with soft wrap, where rows
+    /// are not lines.
+    pub fn scroll_to_top(&mut self, line: u32, window: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_to_top_or_retry(line, true, window, cx);
+    }
+
+    fn scroll_to_top_or_retry(
+        &mut self,
+        line: u32,
+        retry: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if Settings::get(cx).soft_wrap {
+            return;
+        }
+        let Some(line_height) = self.editor.read(cx).line_height() else {
+            if retry {
+                cx.on_next_frame(window, move |this, window, cx| {
+                    this.scroll_to_top_or_retry(line, false, window, cx)
+                });
+            }
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            let x = editor.scroll_offset().x;
+            let y = -line_height * line.saturating_sub(1) as f32;
+            editor.set_scroll_offset(point(x, y), cx);
+        });
+    }
+
     /// Take what is on disk now (an agent edited the file, `git checkout`),
     /// keeping the cursor. A tab with unsaved changes keeps them.
     pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {

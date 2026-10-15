@@ -1800,7 +1800,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Open a file and put the cursor at `line` and `column` (both from 1).
+    /// Open a file and put the cursor at `line` and `column` (both from 1),
+    /// that line at the top.
     pub(crate) fn open_file_at(
         &mut self,
         path: PathBuf,
@@ -1812,6 +1813,9 @@ impl Workspace {
         self.open_file(path.clone(), false, window, cx);
         if let Some(line) = line {
             self.go_to(&path, line, column.unwrap_or(1), true, window, cx);
+            if let Some(file) = self.file_pane(&path, cx) {
+                file.update(cx, |file, cx| file.scroll_to_top(line, window, cx));
+            }
         }
     }
 
