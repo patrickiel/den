@@ -692,6 +692,78 @@ fn split_command(line: &str) -> Vec<String> {
     words
 }
 
+/// Claude Code prints its answer only once it is done, unless asked for
+/// `stream-json`: ask for it, unless the command picks an output format of
+/// its own. Whether the output is then `stream-json`.
+fn stream_json(program: &str, args: &mut Vec<String>) -> bool {
+    if super::agent::program_of(program) != "claude" {
+        return false;
+    }
+    if !args.iter().any(|a| a.starts_with("--output-format")) {
+        args.extend(
+            [
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+            ]
+            .map(String::from),
+        );
+    }
+    args.iter()
+        .any(|a| a == "stream-json" || a == "--output-format=stream-json")
+}
+
+/// Claude Code's `stream-json` output, read line by line: the answer's text
+/// as it streams in, and the error its result line reports.
+#[derive(Default)]
+struct JsonLines {
+    line: String,
+    streamed: bool,
+    error: Option<String>,
+}
+
+impl JsonLines {
+    /// The answer's text in the lines `piece` completes.
+    fn feed(&mut self, piece: &str) -> String {
+        self.line.push_str(piece);
+        let mut text = String::new();
+        while let Some(end) = self.line.find('\n') {
+            let line: String = self.line.drain(..=end).collect();
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match event["type"].as_str() {
+                Some("stream_event") if event["event"]["delta"]["type"] == "text_delta" => {
+                    if let Some(piece) = event["event"]["delta"]["text"].as_str() {
+                        text.push_str(piece);
+                        self.streamed = true;
+                    }
+                }
+                // The whole answer: kept only when no pieces came (a command
+                // without `--include-partial-messages`).
+                Some("result") => {
+                    let result = event["result"].as_str().unwrap_or_default();
+                    if event["is_error"].as_bool() == Some(true) {
+                        self.error = Some(if result.trim().is_empty() {
+                            format!(
+                                "claude failed ({})",
+                                event["subtype"].as_str().unwrap_or("error")
+                            )
+                        } else {
+                            result.trim().to_string()
+                        });
+                    } else if !self.streamed {
+                        text.push_str(result);
+                    }
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+}
+
 /// Run `line` in `dir` with `prompt` on its input; what it prints is the
 /// answer, streamed to `on_token`. Stopping kills it.
 fn run_command(
@@ -705,9 +777,11 @@ fn run_command(
     let (program, args) = words
         .split_first()
         .ok_or("Set the AI command in Settings.")?;
+    let mut args = args.to_vec();
+    let mut json = stream_json(program, &mut args).then(JsonLines::default);
     let exe = super::format::on_path(program).unwrap_or_else(|| PathBuf::from(program));
     let mut cmd = Command::new(exe);
-    cmd.args(args)
+    cmd.args(&args)
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -756,8 +830,11 @@ fn run_command(
                     Ok(text) => text.len(),
                     Err(err) => err.valid_up_to(),
                 };
-                let piece = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                let mut piece = String::from_utf8_lossy(&pending[..valid]).into_owned();
                 pending.drain(..valid);
+                if let Some(lines) = &mut json {
+                    piece = lines.feed(&piece);
+                }
                 if !piece.is_empty() {
                     out.push_str(&piece);
                     on_token(&piece);
@@ -767,8 +844,22 @@ fn run_command(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    out.push_str(&String::from_utf8_lossy(&pending));
+    let rest = String::from_utf8_lossy(&pending).into_owned();
+    match &mut json {
+        // The last line may have no line break.
+        Some(lines) => {
+            let piece = lines.feed(&format!("{rest}\n"));
+            if !piece.is_empty() {
+                out.push_str(&piece);
+                on_token(&piece);
+            }
+        }
+        None => out.push_str(&rest),
+    }
     let status = child.wait().map_err(|e| e.to_string())?;
+    if let Some(error) = json.and_then(|lines| lines.error) {
+        return Err(error);
+    }
     if !status.success() {
         let errors = stderr.join().unwrap_or_default();
         let text = if errors.trim().is_empty() {
@@ -955,6 +1046,43 @@ mod tests {
             ]
         );
         assert!(super::split_command("  ").is_empty());
+    }
+
+    #[test]
+    fn claude_streams_json() {
+        let mut args = vec!["-p".to_string()];
+        assert!(super::stream_json(r"C:\bin\claude.exe", &mut args));
+        assert_eq!(args[1..3], ["--output-format", "stream-json"]);
+        let mut args = vec!["--output-format".to_string(), "text".to_string()];
+        assert!(!super::stream_json("claude", &mut args));
+        assert_eq!(args.len(), 2);
+        let mut args = Vec::new();
+        assert!(!super::stream_json("llm", &mut args));
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn reads_json_lines() {
+        let delta = |text: &str| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}}}"#
+            ) + "\n"
+        };
+        let mut lines = super::JsonLines::default();
+        let first = delta("feat: ");
+        let (head, tail) = first.split_at(20);
+        assert_eq!(lines.feed(head), "");
+        assert_eq!(lines.feed(tail), "feat: ");
+        assert_eq!(lines.feed(&(delta("add x") + "not json\n")), "add x");
+        let result = r#"{"type":"result","is_error":false,"result":"feat: add x"}"#;
+        assert_eq!(lines.feed(&format!("{result}\n")), "");
+        assert!(lines.error.is_none());
+
+        let mut lines = super::JsonLines::default();
+        assert_eq!(lines.feed(&format!("{result}\n")), "feat: add x");
+        let failed = r#"{"type":"result","is_error":true,"result":"Not logged in"}"#;
+        lines.feed(&format!("{failed}\n"));
+        assert_eq!(lines.error.as_deref(), Some("Not logged in"));
     }
 
     #[test]

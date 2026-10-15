@@ -649,10 +649,7 @@ impl Workspace {
             })
             .detach();
         }
-        // The session file's layout, else what an older build left in the
-        // folder (removed either way).
-        let legacy = crate::saved_layout::take_legacy(&this.root);
-        let loaded = session.layout.or(legacy).map_or(Ok(()), |layout| {
+        let loaded = session.layout.map_or(Ok(()), |layout| {
             this.load_state(crate::saved_layout::restore(layout, &this.root), window, cx)
         });
         if let Err(err) = loaded {

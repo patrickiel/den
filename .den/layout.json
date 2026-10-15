@@ -14,9 +14,15 @@
             "id": 1,
             "tabs": [
               43,
-              44
+              44,
+              45,
+              47,
+              48,
+              50,
+              51,
+              52
             ],
-            "active": 1
+            "active": 7
           },
           {
             "type": "group",
@@ -36,24 +42,26 @@
         "type": "group",
         "id": 6,
         "tabs": [
-          42
+          42,
+          46,
+          49
         ],
         "active": 0
       }
     ],
     "sizes": [
-      0.4214693009853363,
-      0.5785306692123413
+      0.3023751676082611,
+      0.6976248025894165
     ]
   },
   "panes": {
-    "42": {
+    "25": {
       "kind": "Terminal",
       "data": {
         "cwd": ".",
-        "program": "claude --model opus --effort high",
-        "agent": true,
-        "resume": "claude --model opus --effort high"
+        "program": null,
+        "agent": false,
+        "resume": null
       }
     },
     "44": {
@@ -68,15 +76,6 @@
         "old_rel": null
       }
     },
-    "25": {
-      "kind": "Terminal",
-      "data": {
-        "cwd": ".",
-        "program": null,
-        "agent": false,
-        "resume": null
-      }
-    },
     "43": {
       "kind": "Diff",
       "data": {
@@ -87,6 +86,92 @@
         "hash": null,
         "parent": null,
         "old_rel": null
+      }
+    },
+    "50": {
+      "kind": "Diff",
+      "data": {
+        "path": "src/workspace.rs",
+        "top": ".",
+        "rel": "src/workspace.rs",
+        "staged": false,
+        "hash": null,
+        "parent": null,
+        "old_rel": null
+      }
+    },
+    "48": {
+      "kind": "Diff",
+      "data": {
+        "path": "src/saved_layout.rs",
+        "top": ".",
+        "rel": "src/saved_layout.rs",
+        "staged": false,
+        "hash": null,
+        "parent": null,
+        "old_rel": null
+      }
+    },
+    "51": {
+      "kind": "Extension",
+      "data": {
+        "id": "slidev"
+      }
+    },
+    "46": {
+      "kind": "Terminal",
+      "data": {
+        "cwd": ".",
+        "program": "claude --model opus --effort high",
+        "agent": true,
+        "resume": "claude --model opus --effort high"
+      }
+    },
+    "49": {
+      "kind": "Terminal",
+      "data": {
+        "cwd": ".",
+        "program": "claude --model opus --effort high",
+        "agent": true,
+        "resume": "claude --model opus --effort high"
+      }
+    },
+    "52": {
+      "kind": "Extension",
+      "data": {
+        "id": "git-graph"
+      }
+    },
+    "47": {
+      "kind": "Diff",
+      "data": {
+        "path": "docs/extensions.md",
+        "top": ".",
+        "rel": "docs/extensions.md",
+        "staged": false,
+        "hash": null,
+        "parent": null,
+        "old_rel": null
+      }
+    },
+    "45": {
+      "kind": "ExtensionView",
+      "data": {
+        "id": "git-graph",
+        "view": "graph",
+        "root": "C:\\Users\\patri\\AppData\\Local\\repos\\patrickiel\\den",
+        "widths": [
+          null
+        ]
+      }
+    },
+    "42": {
+      "kind": "Terminal",
+      "data": {
+        "cwd": ".",
+        "program": "claude --model opus --effort high",
+        "agent": true,
+        "resume": "claude --model opus --effort high"
       }
     }
   },
@@ -104,5 +189,5 @@
       "node": 9
     }
   ],
-  "active": 1
+  "active": 6
 }

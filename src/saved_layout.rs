@@ -1,7 +1,6 @@
 //! The arrangement as den keeps it: groups, splits, sizes, default groups and
 //! tabs live in den's session file, one per folder, nothing in the folder
-//! itself. Older builds wrote `.den/layout.json` into the folder; it is read
-//! once when the session file has no layout, and removed.
+//! itself.
 //!
 //! A layout preset is shareable across projects: paths inside the folder are
 //! stored relative to it, and it keeps no machine state (a terminal's
@@ -15,9 +14,6 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-
-/// Where older builds kept the layout, inside the folder.
-const LEGACY_FILE: &str = ".den/layout.json";
 
 /// Keys of a pane's data that are this machine's, not the arrangement's.
 const MACHINE_KEYS: &[&str] = &["scrollback"];
@@ -127,7 +123,7 @@ pub fn restore(layout: Value, root: &Path) -> Value {
     layout
 }
 
-/// A layout preset, saved in another project or by an older build, made fit
+/// A layout preset, saved in another project, made fit
 /// for this one: no conversations or machine state, paths inside `root`.
 pub fn preset(layout: &Value, root: &Path) -> Value {
     restore(shareable(layout, root), root)
@@ -148,19 +144,6 @@ fn relative(path: &Path, root: &Path) -> Option<String> {
     let original = path.to_string_lossy().replace('\\', "/");
     full.strip_prefix(&format!("{base}/"))
         .map(|_| original[base.len() + 1..].to_string())
-}
-
-/// The layout an older build left in the folder, if any, removing the file
-/// (and `.den` when nothing else is in it).
-pub fn take_legacy(root: &Path) -> Option<Value> {
-    let path = root.join(LEGACY_FILE);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    if let Some(dir) = path.parent() {
-        // Fails, as wanted, when the folder holds anything else.
-        let _ = std::fs::remove_dir(dir);
-    }
-    serde_json::from_str(&text).ok()
 }
 
 #[cfg(test)]
