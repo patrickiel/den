@@ -455,9 +455,6 @@ pub struct Workspace {
     _watcher: Option<watch::Watcher>,
     _watch_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
-    /// `.den/layout.json` as last read or written, so an unchanged
-    /// arrangement is not written again.
-    layout_file_text: Option<String>,
     _subscriptions: Vec<Subscription>,
     /// The active file as last told to the extensions.
     active_file: Option<PathBuf>,
@@ -630,7 +627,6 @@ impl Workspace {
             _watcher: None,
             _watch_task: None,
             _save_task: None,
-            layout_file_text: None,
             _subscriptions,
             active_file: None,
             session_name,
@@ -653,23 +649,12 @@ impl Workspace {
             })
             .detach();
         }
-        // The folder's own file first; the session file's tab state merges in.
-        // When the folder's file does not load, the session file's layout is
-        // used.
-        let from_folder = crate::layout_file::read(&this.root);
-        this.layout_file_text = from_folder.as_ref().map(crate::layout_file::text);
-        let restored = from_folder
-            .map(|shared| crate::layout_file::restore(shared, &this.root, session.layout.as_ref()));
-        let loaded = match restored.map(|layout| this.load_state(layout, window, cx)) {
-            Some(Ok(())) => Ok(()),
-            _ => session.layout.map_or(Ok(()), |layout| {
-                this.load_state(
-                    crate::layout_file::restore(layout, &this.root, None),
-                    window,
-                    cx,
-                )
-            }),
-        };
+        // The session file's layout, else what an older build left in the
+        // folder (removed either way).
+        let legacy = crate::saved_layout::take_legacy(&this.root);
+        let loaded = session.layout.or(legacy).map_or(Ok(()), |layout| {
+            this.load_state(crate::saved_layout::restore(layout, &this.root), window, cx)
+        });
         if let Err(err) = loaded {
             eprintln!("den: the saved layout could not be read, starting fresh: {err}");
         }
@@ -2900,7 +2885,7 @@ impl Workspace {
             return;
         };
         if let Err(err) = self.load_state(
-            crate::layout_file::preset(&preset.layout, &self.root),
+            crate::saved_layout::preset(&preset.layout, &self.root),
             window,
             cx,
         ) {
@@ -2931,7 +2916,7 @@ impl Workspace {
         let Ok(layout) = serde_json::to_value(state) else {
             return;
         };
-        let layout = crate::layout_file::shareable(&layout, &self.root);
+        let layout = crate::saved_layout::shareable(&layout, &self.root);
         AppState::update(cx, |state| {
             match state.presets.iter_mut().find(|p| p.name == name) {
                 Some(preset) => preset.layout = layout,
@@ -3023,19 +3008,6 @@ impl Workspace {
 
     fn save_session(&mut self, cx: &mut Context<Self>) {
         let layout = serde_json::to_value(self.dump_state(cx)).ok();
-        if let Some(layout) = &layout {
-            let text = crate::layout_file::text(&crate::layout_file::shareable(layout, &self.root));
-            if self.layout_file_text.as_deref() != Some(text.as_str()) {
-                let path = crate::layout_file::path(&self.root);
-                let written = path
-                    .parent()
-                    .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
-                    && std::fs::write(&path, &text).is_ok();
-                if written {
-                    self.layout_file_text = Some(text);
-                }
-            }
-        }
         let expanded = self.explorer.read(cx).expanded();
         let draft = self.scm.read(cx).draft(cx);
         let sidebar_views = self

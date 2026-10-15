@@ -1,18 +1,12 @@
-//! The arrangement kept in the session folder itself, as den does: groups,
-//! splits, sizes, default groups and tabs go to `.den/layout.json`
-//! whenever they change, and come back from there first, so the layout goes
-//! with the folder. A file that does not load is replaced on the next
-//! change.
+//! The arrangement as den keeps it: groups, splits, sizes, default groups and
+//! tabs live in den's session file, one per folder, nothing in the folder
+//! itself. Older builds wrote `.den/layout.json` into the folder; it is read
+//! once when the session file has no layout, and removed.
 //!
-//! Paths inside the folder are stored relative to it. Each tab's machine
-//! state (a terminal's scrollback) stays in den's session file and is merged
-//! back by tab id, as does where each floating window sits on this machine's
-//! screens (by the float's id).
-//!
-//! A Claude Code tab's conversation is machine state too: the file keeps a
-//! plain `claude`, and the session file's `--resume <id>` is merged back, so
-//! reopening the folder here resumes each tab's own conversation. A layout
-//! preset has no session file behind it, so its Claude tabs start anew.
+//! A layout preset is shareable across projects: paths inside the folder are
+//! stored relative to it, and it keeps no machine state (a terminal's
+//! scrollback, where a floating window sits) and no Claude Code
+//! conversation, so its Claude tabs start anew.
 //!
 //! Every terminal, Claude Code's too, starts in the folder or a folder inside
 //! it: one saved elsewhere (a preset from another project) or whose folder
@@ -22,18 +16,15 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-pub const FILE: &str = ".den/layout.json";
+/// Where older builds kept the layout, inside the folder.
+const LEGACY_FILE: &str = ".den/layout.json";
 
 /// Keys of a pane's data that are this machine's, not the arrangement's.
 const MACHINE_KEYS: &[&str] = &["scrollback"];
 /// Keys of a pane's data that hold paths.
 const PATH_KEYS: &[&str] = &["path", "cwd", "top"];
 
-pub fn path(root: &Path) -> PathBuf {
-    root.join(FILE)
-}
-
-/// The layout as the folder keeps it: no machine state, paths relative.
+/// The layout as a preset keeps it: no machine state, paths relative.
 pub fn shareable(layout: &Value, root: &Path) -> Value {
     let mut layout = layout.clone();
     if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
@@ -106,13 +97,12 @@ fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
     }
 }
 
-/// `layout` from the folder's file with paths made absolute again and the
-/// machine state of the same tabs from `machine` (the session file's layout).
-/// Every terminal starts inside `root`.
-pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
+/// `layout` with relative paths made absolute in `root` and every terminal
+/// started inside `root`.
+pub fn restore(layout: Value, root: &Path) -> Value {
     let mut layout = layout;
     if let Some(panes) = layout.get_mut("panes").and_then(Value::as_object_mut) {
-        for (id, pane) in panes.iter_mut() {
+        for pane in panes.values_mut() {
             let kind = pane["kind"].clone();
             let Some(data) = pane.get_mut("data").and_then(Value::as_object_mut) else {
                 continue;
@@ -129,32 +119,8 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
                     }
                 }
             }
-            let saved = machine
-                .and_then(|m| m["panes"].get(id))
-                .filter(|saved| saved["kind"] == kind);
-            if let Some(saved) = saved {
-                for key in MACHINE_KEYS {
-                    if let Some(value) = saved["data"].get(*key) {
-                        data.insert((*key).into(), value.clone());
-                    }
-                }
-                if let Some(resume) = saved["data"].get("resume").filter(|r| r.is_string()) {
-                    data.insert("resume".into(), resume.clone());
-                }
-            }
             if kind == crate::terminal::TERMINAL {
                 keep_inside(data, root);
-            }
-        }
-    }
-    if let Some(floats) = layout.get_mut("floats").and_then(Value::as_array_mut) {
-        let saved = machine.and_then(|m| m["floats"].as_array());
-        for float in floats.iter_mut().filter_map(Value::as_object_mut) {
-            let bounds = saved
-                .and_then(|saved| saved.iter().find(|s| s["id"] == float["id"]))
-                .and_then(|s| s.get("bounds"));
-            if let Some(bounds) = bounds {
-                float.insert("bounds".into(), bounds.clone());
             }
         }
     }
@@ -164,7 +130,7 @@ pub fn restore(layout: Value, root: &Path, machine: Option<&Value>) -> Value {
 /// A layout preset, saved in another project or by an older build, made fit
 /// for this one: no conversations or machine state, paths inside `root`.
 pub fn preset(layout: &Value, root: &Path) -> Value {
-    restore(shareable(layout, root), root, None)
+    restore(shareable(layout, root), root)
 }
 
 /// `path` relative to `root` with forward slashes, when it is inside it.
@@ -184,14 +150,17 @@ fn relative(path: &Path, root: &Path) -> Option<String> {
         .map(|_| original[base.len() + 1..].to_string())
 }
 
-/// Read the folder's file.
-pub fn read(root: &Path) -> Option<Value> {
-    serde_json::from_str(&std::fs::read_to_string(path(root)).ok()?).ok()
-}
-
-/// The file's text: indented, so a change reads as a small diff.
-pub fn text(layout: &Value) -> String {
-    serde_json::to_string_pretty(layout).unwrap_or_default() + "\n"
+/// The layout an older build left in the folder, if any, removing the file
+/// (and `.den` when nothing else is in it).
+pub fn take_legacy(root: &Path) -> Option<Value> {
+    let path = root.join(LEGACY_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    if let Some(dir) = path.parent() {
+        // Fails, as wanted, when the folder holds anything else.
+        let _ = std::fs::remove_dir(dir);
+    }
+    serde_json::from_str(&text).ok()
 }
 
 #[cfg(test)]
@@ -220,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_keeps_machine_state_apart() {
+    fn presets_keep_no_machine_state() {
         let root = crate_root();
         let src = root.join("src").to_string_lossy().into_owned();
         let full = json!({
@@ -228,14 +197,15 @@ mod tests {
             "panes": {
                 "1": { "kind": "Terminal", "data": { "cwd": src, "scrollback": "old output" } },
                 "2": { "kind": "File", "data": { "path": r"D:\elsewhere\a.txt" } }
-            }
+            },
+            "floats": [{ "id": 9, "root": {}, "bounds": [10.0, 20.0, 800.0, 600.0] }]
         });
         let shared = shareable(&full, root);
         assert_eq!(shared["panes"]["1"]["data"], json!({ "cwd": "src" }));
         assert_eq!(shared["panes"]["2"]["data"]["path"], r"D:\elsewhere\a.txt");
-        let back = restore(shared, root, Some(&full));
+        assert!(shared["floats"][0].get("bounds").is_none());
+        let back = restore(shared, root);
         assert_eq!(back["panes"]["1"]["data"]["cwd"], src);
-        assert_eq!(back["panes"]["1"]["data"]["scrollback"], "old output");
     }
 
     #[test]
@@ -251,10 +221,7 @@ mod tests {
                 "3": { "kind": "Terminal", "data": { "cwd": root.join("gone").to_string_lossy(), "program": null } }
             }
         });
-        for back in [
-            restore(layout.clone(), root, Some(&layout)),
-            preset(&layout, root),
-        ] {
+        for back in [restore(layout.clone(), root), preset(&layout, root)] {
             for id in ["1", "2", "3"] {
                 assert_eq!(back["panes"][id]["data"]["cwd"], here);
             }
@@ -265,32 +232,24 @@ mod tests {
     }
 
     #[test]
-    fn claude_conversations_are_not_kept() {
-        let root = Path::new(r"C:\repos\den");
+    fn restored_tabs_resume_their_conversation() {
+        let root = crate_root();
+        let here = root.to_string_lossy().into_owned();
         let full = json!({
             "root": {},
             "panes": {
-                "1": { "kind": "Terminal", "data": { "program": "claude --resume abc-123", "resume": "claude --resume abc-123" } },
-                "2": { "kind": "Terminal", "data": { "program": null, "resume": null } }
+                "1": { "kind": "Terminal", "data": { "cwd": here, "program": "claude --resume abc-123", "resume": "claude --resume abc-123" } }
             }
         });
-        let shared = shareable(&full, root);
         assert_eq!(
-            shared["panes"]["1"]["data"],
-            json!({ "program": "claude", "resume": "claude" })
-        );
-        assert_eq!(
-            shared["panes"]["2"]["data"],
-            json!({ "program": null, "resume": null })
-        );
-        // Reopened on this machine, each tab resumes its own conversation.
-        let back = restore(shared.clone(), root, Some(&full));
-        assert_eq!(
-            back["panes"]["1"]["data"]["resume"],
+            restore(full.clone(), root)["panes"]["1"]["data"]["resume"],
             "claude --resume abc-123"
         );
-        assert_eq!(back["panes"]["2"]["data"]["resume"], json!(null));
-        // As a preset, with no session behind it, it starts anew.
+        // A preset has no conversation behind it: it starts anew.
+        assert_eq!(
+            shareable(&full, root)["panes"]["1"]["data"],
+            json!({ "cwd": ".", "program": "claude", "resume": "claude" })
+        );
         assert_eq!(
             preset(&full, root)["panes"]["1"]["data"]["resume"],
             "claude"
@@ -301,22 +260,5 @@ mod tests {
     fn missing_keys_stay_missing() {
         let old = json!({ "root": {}, "panes": { "1": { "kind": "Settings" } } });
         assert_eq!(preset(&old, Path::new("x")), old);
-    }
-
-    #[test]
-    fn floating_windows_keep_their_place_on_this_machine() {
-        let root = Path::new(r"C:\repos\den");
-        let full = json!({
-            "root": {},
-            "panes": {},
-            "floats": [{ "id": 9, "root": {}, "bounds": [10.0, 20.0, 800.0, 600.0] }]
-        });
-        let shared = shareable(&full, root);
-        assert!(shared["floats"][0].get("bounds").is_none());
-        let back = restore(shared, root, Some(&full));
-        assert_eq!(
-            back["floats"][0]["bounds"],
-            json!([10.0, 20.0, 800.0, 600.0])
-        );
     }
 }
