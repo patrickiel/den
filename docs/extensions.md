@@ -330,7 +330,7 @@ host.set_view(&root, "my-view", &content)?;
 | --- | --- |
 | `toolbar` | Buttons (`active` draws one switched on), selects, search boxes, labels and spacers above the list |
 | `columns`, `rows` | A virtual list: thousands of rows are fine. Each cell is spans (text, or a badge when it has a `background`) or a `Graph` |
-| `Column` | A `width` in pixels, `fit` to its widest cell, or neither to share the space left; `fixed` keeps the user from resizing it. The user drags a column's edge to resize it and double-clicks it to fit it; columns wider than the tab scroll sideways |
+| `Column` | A `width` in pixels, `fit` to its widest cell, or neither to share the space left; `fixed` keeps the user from resizing it. The user drags a column's edge to resize it and double-clicks it to fit it (a column sharing the space left, next to a `fixed` one, takes the width dragged to, and a double-click gives it back the share); columns wider than the tab scroll sideways, with a scrollbar |
 | `Graph` | Lines and dots in lanes, drawn across a row: a lane change is a curve, `dashed` and `hollow` are there for "not committed yet" |
 | `menus` | Right-click menus by name, for rows (`Row::menu`), spans (`Span::menu`, sent with its `data`) and detail lines |
 | `selected`, `highlighted` | The selected row (den scrolls to it) and rows marked as found |

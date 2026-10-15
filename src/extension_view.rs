@@ -22,7 +22,7 @@ use gpui_kit::component::{
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     radio::Radio,
     resizable::{resizable_panel, v_resizable},
-    scroll::Scrollbar,
+    scroll::{Scrollbar, ScrollbarMode},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -367,14 +367,16 @@ impl ExtensionView {
                     column.width.map(px).or_else(|| graph_width(rows, ix))
                 };
                 let dragged = self.widths.get(ix).copied().flatten().map(px);
-                width.and(dragged.filter(|_| !column.fixed)).or(width)
+                dragged.filter(|_| !column.fixed).or(width)
             })
             .collect()
     }
 
     /// The column an edge between columns `ix` and `ix + 1` resizes, and
     /// which way it grows with the mouse: the one on the side away from the
-    /// column that shares the rest, so the edge follows the mouse.
+    /// column that shares the rest, so the edge follows the mouse. A column
+    /// sharing the rest beside one that can't be resized is resized itself,
+    /// from the width it has now.
     fn resized_by(
         columns: &[Column],
         widths: &[Option<Pixels>],
@@ -385,10 +387,19 @@ impl ExtensionView {
         } else {
             (ix, 1.)
         };
-        if columns.get(column)?.fixed {
-            return None;
+        let resizable = |c: usize| columns.get(c).is_some_and(|c| !c.fixed);
+        if resizable(column) && widths.get(column).copied().flatten().is_some() {
+            return Some((column, sign));
         }
-        widths.get(column)?.map(|_| (column, sign))
+        (resizable(ix) && widths[ix].is_none()).then_some((ix, 1.))
+    }
+
+    /// How wide a column sharing the space left was drawn: the table is the
+    /// tab's width, or wider for every sharer's least.
+    fn shared_width(&self, widths: &[Option<Pixels>]) -> Pixels {
+        let sharers = widths.iter().filter(|w| w.is_none()).count().max(1);
+        let others: Pixels = widths.iter().flatten().copied().sum();
+        ((self.h_scroll.bounds().size.width - others) / sharers as f32).max(px(SHARE_MIN))
     }
 
     /// Measure the `fit` columns again if their rows or the fonts changed.
@@ -997,7 +1008,8 @@ impl Render for ExtensionView {
 
         self.update_fits(&columns, window, cx);
         let widths = self.column_widths(&columns, cx);
-        let header = columns.iter().any(|c| !c.title.is_empty()).then(|| {
+        let shared = self.shared_width(&widths);
+        let header =columns.iter().any(|c| !c.title.is_empty()).then(|| {
             h_flex()
                 .flex_none()
                 .h(px(26.))
@@ -1021,7 +1033,7 @@ impl Render for ExtensionView {
                         .then(|| Self::resized_by(&columns, &widths, ix))
                         .flatten();
                     slot.when_some(resized, |this, (column, sign)| {
-                        let start = widths[column].unwrap_or_default();
+                        let start = widths[column].unwrap_or(shared);
                         this.child(
                             div()
                                 .id(("column-resize", ix))
@@ -1109,7 +1121,12 @@ impl Render for ExtensionView {
                             .child(div().flex_1().min_h_0().child(list)),
                     ),
             )
-            .child(Scrollbar::horizontal(&self.h_scroll).id("extension-view-scrollbar"));
+            // Shown while columns are out of view; it hides when they all fit.
+            .child(
+                Scrollbar::horizontal(&self.h_scroll)
+                    .id("extension-view-scrollbar")
+                    .mode(ScrollbarMode::Always),
+            );
 
         let body = if detail.is_empty() {
             list.into_any_element()
