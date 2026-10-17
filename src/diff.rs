@@ -1,5 +1,6 @@
 //! Diff tabs, as in den: a change clicked in Source Control opens read-only,
-//! side by side (one column, inline, when the view is narrow). `name (Working Tree)` compares the file on disk with the
+//! side by side (one column, inline, when the view is narrow or a side is
+//! empty, as for an added or deleted file). `name (Working Tree)` compares the file on disk with the
 //! index, `name (Index)` the index with HEAD. The header's button (or
 //! Ctrl+Enter) opens the file itself.
 
@@ -263,6 +264,9 @@ pub struct DiffPanel {
     rows: Vec<Row>,
     /// The rows as one column, for the inline view.
     inline: Vec<(usize, usize)>,
+    /// One side has no lines (an added or deleted file): nothing to set
+    /// beside it, so it shows as one column whatever the Diff View.
+    one_sided: bool,
     /// Each side's syntax colours, by line number - 1.
     styles: [Vec<LineStyles>; 2],
     error: Option<SharedString>,
@@ -328,6 +332,7 @@ impl DiffPanel {
             commit,
             rows: Vec::new(),
             inline: Vec::new(),
+            one_sided: false,
             styles: Default::default(),
             error: None,
             focus_handle: cx.focus_handle(),
@@ -405,6 +410,8 @@ impl DiffPanel {
                     Ok((rows, styles, widest)) => {
                         this.error = None;
                         this.inline = inline_lines(&rows);
+                        this.one_sided = rows.iter().all(|r| r.left.is_none())
+                            || rows.iter().all(|r| r.right.is_none());
                         this.rows = rows;
                         this.styles = styles;
                         this.widest = widest;
@@ -413,6 +420,7 @@ impl DiffPanel {
                         this.error = Some(err.into());
                         this.rows = Vec::new();
                         this.inline = Vec::new();
+                        this.one_sided = false;
                         this.styles = Default::default();
                         this.widest = [0; 2];
                     }
@@ -429,8 +437,12 @@ impl DiffPanel {
     }
 
     /// Whether the sides show as one column, the removed lines above the
-    /// added ones: as set, or (automatic) when the view is narrow.
+    /// added ones: as set, or (automatic) when the view is narrow; always
+    /// when one side is empty.
     fn is_inline(&self) -> bool {
+        if self.one_sided {
+            return true;
+        }
         match self.layout {
             DiffLayout::Inline => true,
             DiffLayout::SideBySide => false,
