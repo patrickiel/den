@@ -13,6 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
     avatar::Avatar,
+    badge::Badge,
     button::{Button, ButtonVariants as _},
     h_flex,
     hover_card::HoverCard,
@@ -735,6 +736,8 @@ impl ScmView {
         } else {
             "Publish Branch"
         };
+        // What there is to pull or push, on those buttons; hidden at zero.
+        let count = |n: u32| Badge::new().count(n as usize).xsmall().color(theme.blue);
 
         v_flex()
             .child(
@@ -760,20 +763,20 @@ impl ScmView {
                                 |r, cx| r.fetch(cx),
                                 cx,
                             ))
-                            .child(action(
+                            .child(count(branch.behind).child(action(
                                 "pull",
                                 IconName::ArrowDown,
                                 "Pull",
                                 |r, cx| r.pull(cx),
                                 cx,
-                            ))
-                            .child(action(
+                            )))
+                            .child(count(branch.ahead).child(action(
                                 "push",
                                 IconName::ArrowUp,
                                 push_tooltip,
                                 |r, cx| r.push(cx),
                                 cx,
-                            ))
+                            )))
                             .child(action(
                                 "refresh",
                                 IconName::RotateCw,
@@ -802,14 +805,6 @@ impl ScmView {
                     .gap_1()
                     .text_sm()
                     .child(branch_button)
-                    .when(branch.upstream.is_some(), |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(format!("↓{} ↑{}", branch.behind, branch.ahead)),
-                        )
-                    })
                     .when_some(busy, |this, busy| {
                         this.child(
                             div()
