@@ -10,11 +10,15 @@ use std::{
 };
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::{RangeHighlight, RenderedText, TextView, TextViewState, input::SearchMatcher};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Editor, EditorState, Input, InputEvent, InputState, Position, RopeExt as _, TabSize},
+    input::{
+        Editor, EditorState, Escape, Input, InputEvent, InputState, Position, Rope, RopeExt as _,
+        Search, TabSize,
+    },
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     switch::Switch,
@@ -34,8 +38,16 @@ use crate::{
 
 pub const FILE: &str = "File";
 pub const SETTINGS: &str = "Settings";
+/// The key context of a Markdown preview, where Ctrl+F finds in it.
+const PREVIEW: &str = "MarkdownPreview";
 
 pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-f", Search, Some(PREVIEW)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-f", Search, Some(PREVIEW)),
+    ]);
     pane::register(cx, FILE, |data, window, cx| {
         let path = PathBuf::from(data["path"].as_str().unwrap_or_default());
         let view = data["view"][0].as_str().zip(data["view"][1].as_str());
@@ -121,6 +133,10 @@ pub struct FilePanel {
     look: Look,
     /// Markdown and SVG: the preview shows instead of the source.
     preview: bool,
+    /// A Markdown file's preview, kept to highlight what Find finds in it.
+    markdown: Option<Entity<TextViewState>>,
+    /// Find in the Markdown preview, once opened; its query stays after closing.
+    find: Option<PreviewFind>,
     /// An extension's file view picked in the switch, by the extension's id
     /// and the view's: it shows instead of both while the extension offers it.
     view: Option<(String, String)>,
@@ -161,6 +177,18 @@ struct Page {
     /// The extension's id and the view's.
     owner: (String, String),
     browser: Entity<crate::browser::BrowserPanel>,
+    _subscription: Subscription,
+}
+
+/// Find in a Markdown preview, as the editor's without Replace: it searches
+/// the text the preview shows, markup left out.
+struct PreviewFind {
+    open: bool,
+    query: Entity<InputState>,
+    match_case: bool,
+    matcher: SearchMatcher,
+    /// The preview's text the matches are in, to search again once it changes.
+    searched: Option<RenderedText>,
     _subscription: Subscription,
 }
 
@@ -237,7 +265,10 @@ impl FilePanel {
                 .default_value(text.clone())
         });
 
-        let _subscriptions = vec![
+        let markdown =
+            (look == Look::Markdown).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+
+        let mut _subscriptions = vec![
             cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = editor.read(cx).value();
@@ -277,6 +308,17 @@ impl FilePanel {
                 cx.notify();
             }),
         ];
+        if let Some(markdown) = &markdown {
+            // The preview's text changed under an open Find: search it again.
+            _subscriptions.push(cx.observe(markdown, |this, markdown, cx| {
+                let stale = this.find.as_ref().is_some_and(|find| {
+                    find.open && find.searched.as_ref() != Some(&markdown.read(cx).rendered_text())
+                });
+                if stale {
+                    this.search(false, cx);
+                }
+            }));
+        }
 
         cx.defer_in(window, |this, _, cx| {
             this.refresh_git_base(cx);
@@ -288,6 +330,8 @@ impl FilePanel {
             untitled: false,
             look,
             preview,
+            markdown,
+            find: None,
             view,
             page: None,
             announced: false,
@@ -653,9 +697,10 @@ impl EventEmitter<PaneEvent> for FilePanel {}
 
 impl Focusable for FilePanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match self.showing_view(cx) {
-            Some(_) => self.view_focus.clone(),
-            None => self.editor.focus_handle(cx),
+        match (self.showing_view(cx), &self.markdown) {
+            (Some(_), _) => self.view_focus.clone(),
+            (None, Some(markdown)) if self.preview => markdown.read(cx).focus_handle().clone(),
+            (None, _) => self.editor.focus_handle(cx),
         }
     }
 }
@@ -730,6 +775,9 @@ impl FilePanel {
         if !preview {
             self.editor
                 .update(cx, |editor, cx| editor.focus(window, cx));
+        } else if let Some(markdown) = &self.markdown {
+            // So Ctrl+F finds in it.
+            markdown.read(cx).focus_handle().clone().focus(window, cx);
         }
         cx.notify();
     }
@@ -915,35 +963,44 @@ impl FilePanel {
     /// The preview of the buffer, unsaved edits included.
     fn render_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let text = self.editor.read(cx).value();
-        match self.look {
-            Look::Markdown => {
+        match (self.look, self.markdown.clone()) {
+            (Look::Markdown, Some(markdown)) => {
+                markdown.update(cx, |markdown, cx| markdown.set_text(&text, cx));
                 // Images load relative to the document.
                 let dir = self
                     .path
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
-                div()
+                v_flex()
                     .size_full()
-                    .px_6()
-                    .py_4()
+                    .key_context(PREVIEW)
+                    .on_action(
+                        cx.listener(|this, _: &Search, window, cx| this.open_find(window, cx)),
+                    )
+                    .on_action(
+                        cx.listener(|this, _: &Escape, window, cx| this.close_find(window, cx)),
+                    )
+                    .children(self.render_find(cx))
                     .child(
-                        gpui_kit::base::TextView::markdown(("markdown", cx.entity_id()), text)
-                            .scrollable(true)
-                            .selectable(true)
-                            .size_full()
-                            .image_source(move |url| {
-                                let url = url.to_string();
-                                if url.contains("://") || url.starts_with("data:") {
-                                    ImageSource::from(url)
-                                } else {
-                                    ImageSource::from(dir.join(url.trim_start_matches("./")))
-                                }
-                            }),
+                        div().flex_1().min_h_0().px_6().py_4().child(
+                            TextView::new(&markdown)
+                                .scrollable(true)
+                                .selectable(true)
+                                .size_full()
+                                .image_source(move |url| {
+                                    let url = url.to_string();
+                                    if url.contains("://") || url.starts_with("data:") {
+                                        ImageSource::from(url)
+                                    } else {
+                                        ImageSource::from(dir.join(url.trim_start_matches("./")))
+                                    }
+                                }),
+                        ),
                     )
                     .into_any_element()
             }
-            Look::Svg => {
+            (Look::Svg, _) => {
                 let image = match &self.svg {
                     Some((source, image)) if *source == text => image.clone(),
                     _ => {
@@ -959,6 +1016,196 @@ impl FilePanel {
             }
             _ => picture(img(self.path.clone()), cx),
         }
+    }
+
+    /// Open Find over the Markdown preview, the preview's selection as its
+    /// query when there is one; open already, select its query again.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(markdown) = &self.markdown else {
+            return;
+        };
+        let selected = markdown.read(cx).selected_text();
+        let find = self.find.get_or_insert_with(|| {
+            let query = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+            let _subscription =
+                cx.subscribe(&query, |this, _, event: &InputEvent, cx| match event {
+                    InputEvent::Change => this.search(true, cx),
+                    InputEvent::PressEnter { shift, .. } => this.step(!shift, cx),
+                    _ => {}
+                });
+            PreviewFind {
+                open: false,
+                query,
+                match_case: false,
+                matcher: SearchMatcher::new(),
+                searched: None,
+                _subscription,
+            }
+        });
+        find.open = true;
+        find.query.update(cx, |query, cx| {
+            let line = selected.lines().next().unwrap_or_default().trim();
+            if !line.is_empty() {
+                query.set_value(line.to_string(), window, cx);
+            }
+            query.focus(window, cx);
+            query.select_all(window, cx);
+        });
+        // Setting the value is no change, so the search is not told of it.
+        self.search(true, cx);
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut().filter(|find| find.open) else {
+            return cx.propagate();
+        };
+        find.open = false;
+        self.highlight(false, cx);
+        if let Some(markdown) = &self.markdown {
+            markdown.read(cx).focus_handle().clone().focus(window, cx);
+        }
+    }
+
+    /// Find the query in the preview's text, and highlight the matches.
+    /// `reveal` (a new query) starts at the first match and scrolls to it;
+    /// otherwise the current match stays where it can.
+    fn search(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        let (Some(find), Some(markdown)) = (self.find.as_mut(), &self.markdown) else {
+            return;
+        };
+        let text = markdown.read(cx).rendered_text();
+        let current = find
+            .matcher
+            .current()
+            .map(|ix| find.matcher.matched_ranges()[ix].start);
+        find.matcher.update(&Rope::from(text.as_str()));
+        find.matcher
+            .update_query(&find.query.read(cx).value(), !find.match_case);
+        if let Some(offset) = current.filter(|_| !reveal) {
+            find.matcher.update_cursor_by_offset(offset);
+        }
+        find.searched = Some(text);
+        self.highlight(reveal, cx);
+    }
+
+    /// Go to the next match, or the previous one.
+    fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        if forward {
+            find.matcher.next();
+        } else {
+            find.matcher.next_back();
+        }
+        self.highlight(true, cx);
+    }
+
+    /// Paint the matches of an open Find in the preview, the current one as
+    /// the editor does, and scroll to that one when `reveal`.
+    fn highlight(&mut self, reveal: bool, cx: &mut Context<Self>) {
+        let (Some(find), Some(markdown)) = (&self.find, &self.markdown) else {
+            return;
+        };
+        let ranges = find.matcher.matched_ranges();
+        let current = find.matcher.current().filter(|_| find.open);
+        let selection = cx.theme().selection;
+        let others = Hsla {
+            s: 0.1,
+            ..selection
+        };
+        let highlights: Vec<_> = if find.open {
+            ranges
+                .iter()
+                .map(|range| RangeHighlight::new(range.clone(), others))
+                .chain(current.map(|ix| RangeHighlight::new(ranges[ix].clone(), selection)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        markdown.update(cx, |markdown, cx| {
+            _ = markdown.set_range_highlights(highlights, cx);
+            if let Some(ix) = current.filter(|_| reveal) {
+                _ = markdown.reveal_range(ranges[ix].clone(), cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// The Find bar above the Markdown preview, as the editor's.
+    fn render_find(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let find = self.find.as_ref().filter(|find| find.open)?;
+        let found = !find.matcher.is_empty();
+        let step = |id: &'static str, icon: IconName, tooltip: &'static str, forward: bool| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(icon))
+                .tooltip(crate::ui::key_label(tooltip))
+                .disabled(!found)
+                .on_click(cx.listener(move |this, _, _, cx| this.step(forward, cx)))
+        };
+        Some(
+            h_flex()
+                .flex_none()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .bg(cx.theme().popover)
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    div().flex_1().child(
+                        Input::new(&find.query).small().suffix(
+                            Button::new("find-case")
+                                .xsmall()
+                                .icon(Icon::new(IconName::CaseSensitive))
+                                .tooltip("Match Case")
+                                .map(|b| {
+                                    if find.match_case {
+                                        b.primary()
+                                    } else {
+                                        b.ghost()
+                                    }
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(find) = this.find.as_mut() {
+                                        find.match_case = !find.match_case;
+                                    }
+                                    this.search(true, cx);
+                                })),
+                        ),
+                    ),
+                )
+                .child(step(
+                    "find-prev",
+                    IconName::ChevronLeft,
+                    "Previous Match (Shift+Enter)",
+                    false,
+                ))
+                .child(step(
+                    "find-next",
+                    IconName::ChevronRight,
+                    "Next Match (Enter)",
+                    true,
+                ))
+                .child(
+                    div()
+                        .min_w_16()
+                        .text_sm()
+                        .when(!found, |this| this.text_color(cx.theme().muted_foreground))
+                        .child(find.matcher.label()),
+                )
+                .child(
+                    Button::new("find-close")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Close))
+                        .tooltip(crate::ui::key_label("Close (Escape)"))
+                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                )
+                .into_any_element(),
+        )
     }
 }
 
