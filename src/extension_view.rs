@@ -1009,7 +1009,7 @@ impl Render for ExtensionView {
         self.update_fits(&columns, window, cx);
         let widths = self.column_widths(&columns, cx);
         let shared = self.shared_width(&widths);
-        let header =columns.iter().any(|c| !c.title.is_empty()).then(|| {
+        let header = columns.iter().any(|c| !c.title.is_empty()).then(|| {
             h_flex()
                 .flex_none()
                 .h(px(26.))
