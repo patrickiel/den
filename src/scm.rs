@@ -18,7 +18,7 @@ use gpui_kit::component::{
     hover_card::HoverCard,
     input::{Input, InputState, Textarea, TextareaState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
-    scroll::ScrollableElement as _,
+    scroll::{ScrollableElement as _, Scrollbar},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -35,6 +35,9 @@ use crate::{
 
 /// A commit row's height.
 const COMMIT_ROW: f32 = 22.;
+
+/// The lists' right padding, clear of their scrollbar, which overlays them.
+const GUTTER: Pixels = Scrollbar::width();
 
 /// The commits section's height when the view opens, header included.
 const COMMITS_HEIGHT: f32 = 320.;
@@ -910,7 +913,8 @@ impl ScmView {
             h_flex()
                 .id(title)
                 .group("scm-group")
-                .px_2()
+                .pl_2()
+                .pr(GUTTER)
                 .h(px(24.))
                 .gap_1()
                 .text_xs()
@@ -1016,7 +1020,7 @@ impl ScmView {
                     .id(id.clone())
                     .group(id)
                     .pl(px(24.))
-                    .pr_2()
+                    .pr(GUTTER)
                     .h(px(22.))
                     .gap_1p5()
                     .text_sm()
@@ -1434,7 +1438,7 @@ impl ScmView {
                 let event = std::rc::Rc::new(event);
                 h_flex()
                     .id(SharedString::from(format!("{hash}-{ix}")))
-                    .pr_2()
+                    .pr(GUTTER)
                     .h(px(COMMIT_ROW))
                     .gap_2()
                     .text_sm()
@@ -1496,7 +1500,7 @@ impl ScmView {
         let hash = commit.hash.clone();
         let row = h_flex()
             .id(SharedString::from(commit.hash.clone()))
-            .pr_2()
+            .pr(GUTTER)
             .h(px(COMMIT_ROW))
             .gap_2()
             .text_sm()
@@ -1681,7 +1685,7 @@ impl ScmView {
             .when_some(uncommitted, |this, (count, graph)| {
                 this.child(
                     h_flex()
-                        .pr_2()
+                        .pr(GUTTER)
                         .h(px(COMMIT_ROW))
                         .gap_2()
                         .text_sm()
