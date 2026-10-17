@@ -391,6 +391,9 @@ pub struct AppState {
     /// view's: files it is offered for open showing it, until Source or
     /// Preview is picked on one of them.
     pub file_view: Option<(String, String)>,
+    /// The Source Control groups collapsed by hand, by title: they stay so
+    /// until opened again, in every folder.
+    pub scm_collapsed: Vec<String>,
 }
 
 impl Global for AppState {}

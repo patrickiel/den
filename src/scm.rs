@@ -192,7 +192,6 @@ pub struct ScmView {
     avatars: HashMap<String, Option<PathBuf>>,
     /// Emails whose avatar is being fetched.
     avatar_pending: HashSet<String>,
-    collapsed: Vec<&'static str>,
     /// Selected rows (by path) in one group, as den selects them: a click
     /// selects one, Ctrl+click adds or removes, Shift+click a range.
     selection: Vec<String>,
@@ -229,7 +228,6 @@ impl ScmView {
             stats: Default::default(),
             avatars: Default::default(),
             avatar_pending: Default::default(),
-            collapsed: Vec::new(),
             selection: Vec::new(),
             selection_group: None,
             anchor: None,
@@ -875,7 +873,10 @@ impl ScmView {
         }
         let theme = cx.theme().clone();
         let title = group.title();
-        let collapsed = self.collapsed.contains(&title);
+        let collapsed = crate::settings::AppState::get(cx)
+            .scm_collapsed
+            .iter()
+            .any(|t| t == title);
         let header_buttons = h_flex()
             .invisible()
             .group_hover("scm-group", |this| this.visible())
@@ -920,12 +921,14 @@ impl ScmView {
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
                 .hover(|this| this.bg(theme.list_hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.collapsed.contains(&title) {
-                        this.collapsed.push(title);
-                    } else {
-                        this.collapsed.retain(|t| *t != title);
-                    }
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::settings::AppState::update(cx, |state| {
+                        let open = state.scm_collapsed.len();
+                        state.scm_collapsed.retain(|t| t != title);
+                        if state.scm_collapsed.len() == open {
+                            state.scm_collapsed.push(title.to_string());
+                        }
+                    });
                     cx.notify();
                 }))
                 .child(
