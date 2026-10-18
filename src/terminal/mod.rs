@@ -710,6 +710,8 @@ impl TerminalPanel {
             _ => {}
         }
         let kind = match event.kind.as_str() {
+            // Not done yet: the agents report back with another turn.
+            "done" if agent::background_pending(&event.body) => return,
             "done" => AlertKind::Done,
             "input" => AlertKind::Input,
             _ => return,

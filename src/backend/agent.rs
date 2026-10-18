@@ -169,6 +169,20 @@ pub fn hook_field(body: &str, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether a finished turn left background agents or workflows running, which
+/// report back with another turn. Shells and monitors don't count: a dev
+/// server never ends. Without `background_tasks` (an older CLI), `false`.
+pub fn background_pending(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| json["background_tasks"].as_array().cloned())
+        .is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| task["agent_type"].is_string() || task["name"].is_string())
+        })
+}
+
 /// The command that brings a Claude Code conversation back, as den restarts
 /// it: `--resume <id>` with the conversation known, plain `claude` for a new
 /// or cleared one (nothing to resume yet), `--continue` when unknown. The
@@ -229,7 +243,19 @@ pub fn message(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inject, message, parse_path, program_of};
+    use super::{background_pending, inject, message, parse_path, program_of};
+
+    #[test]
+    fn waits_for_background_agents_only() {
+        assert!(background_pending(
+            r#"{"background_tasks":[{"id":"a","type":"subagent","status":"running","agent_type":"Explore"}]}"#
+        ));
+        assert!(!background_pending(
+            r#"{"background_tasks":[{"id":"b","type":"shell","command":"pnpm dev"}]}"#
+        ));
+        assert!(!background_pending(r#"{"background_tasks":[]}"#));
+        assert!(!background_pending("{}"));
+    }
 
     #[test]
     fn parses_the_request_path() {
