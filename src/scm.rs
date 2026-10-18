@@ -183,6 +183,9 @@ pub struct ScmView {
     /// Generate Commit Message while it runs: how to stop it. What it does
     /// shows as the message box's placeholder.
     generating: Option<crate::backend::http::Cancel>,
+    /// A commit asked for while the message generates, as (amend, push):
+    /// made once the message is in.
+    queued: Option<(bool, bool)>,
     /// Types quips into the placeholder while the model thinks.
     typewriter: Option<Task<()>>,
     /// Commits expanded to their files, with the files once loaded.
@@ -224,6 +227,7 @@ impl ScmView {
             commits_open: true,
             commits_height: COMMITS_HEIGHT,
             generating: None,
+            queued: None,
             typewriter: None,
             expanded: Default::default(),
             stats: Default::default(),
@@ -254,9 +258,13 @@ impl ScmView {
 
     /// Commit (and push after, with `push`). With nothing staged it goes by
     /// Settings ▸ Source Control: ask whether to stage everything and commit
-    /// it, always do, or never.
+    /// it, always do, or never. While a message generates, it waits for it.
     fn commit(&mut self, amend: bool, push: bool, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::{Settings, SmartCommit};
+        if self.generating.is_some() {
+            self.queued = Some((amend, push));
+            return cx.notify();
+        }
         let message = self.message.read(cx).value().to_string();
         let Some(status) = self.repo.read(cx).status() else {
             return;
@@ -1089,6 +1097,7 @@ impl ScmView {
         use crate::backend::ai;
         if let Some(cancel) = self.generating.take() {
             cancel.cancel();
+            self.queued = None;
             self.typewriter = None;
             self.message.update(cx, |input, cx| {
                 input.set_placeholder(message_placeholder(), window, cx)
@@ -1217,14 +1226,24 @@ impl ScmView {
                             this.message.update(cx, |input, cx| {
                                 input.set_placeholder(message_placeholder(), window, cx)
                             });
+                            let queued = this.queued.take();
                             match result {
-                                Ok(text) => this
-                                    .message
-                                    .update(cx, |input, cx| input.set_value(text, window, cx)),
+                                Ok(text) => {
+                                    this.message
+                                        .update(cx, |input, cx| input.set_value(text, window, cx));
+                                    if let Some((amend, push)) = queued {
+                                        this.commit(amend, push, window, cx);
+                                    }
+                                }
                                 Err(err) if err == crate::backend::http::CANCELLED || stopped => {}
                                 Err(err) => crate::toast::push(
                                     window,
-                                    format!("Generate Commit Message: {err}"),
+                                    match queued {
+                                        Some(_) => format!(
+                                            "Generate Commit Message: {err}. Nothing was committed."
+                                        ),
+                                        None => format!("Generate Commit Message: {err}"),
+                                    },
                                     cx,
                                 ),
                             }
@@ -2089,17 +2108,29 @@ impl Render for ScmView {
                         .child(
                             h_flex()
                                 .gap_1()
-                                .child(
+                                .child({
+                                    let label = match self.queued {
+                                        None => "Commit",
+                                        Some((true, _)) => "Amend when ready",
+                                        Some((false, true)) => "Commit & Push when ready",
+                                        Some((false, false)) => "Commit when ready",
+                                    };
                                     Button::new("commit")
                                         .primary()
                                         .small()
                                         .flex_1()
                                         .icon(Icon::new(IconName::Check))
-                                        .label("Commit")
+                                        .label(label)
+                                        .when(self.queued.is_some(), |b| {
+                                            b.tooltip("Commits once the message is generated. Click to cancel.")
+                                        })
                                         .on_click(cx.listener(|this, _, window, cx| {
+                                            if this.queued.take().is_some() {
+                                                return cx.notify();
+                                            }
                                             this.commit(false, false, window, cx)
-                                        })),
-                                )
+                                        }))
+                                })
                                 .child({
                                     let weak = cx.weak_entity();
                                     Button::new("commit-more")
