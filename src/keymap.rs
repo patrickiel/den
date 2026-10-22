@@ -468,6 +468,13 @@ fn den_commands() -> Vec<Command> {
             &["shift-alt-f"],
         ),
         command(
+            "den.toggleSoftWrap",
+            "View: Toggle Word Wrap",
+            ToggleSoftWrap,
+            &["alt-z"],
+            &["alt-z"],
+        ),
+        command(
             "den.goToLine",
             "Editor: Go to Line…",
             GoToLine,

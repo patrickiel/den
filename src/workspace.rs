@@ -30,7 +30,7 @@ use crate::{
     CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
     FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewBrowser, NewTerminal,
     NextTab, OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
-    ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight,
+    ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight, ToggleSoftWrap,
     backend::watch,
     defaults::{Defaults, GroupDefault, Kind},
     diff::DiffPanel,
@@ -3370,128 +3370,229 @@ impl Workspace {
                 let commands = crate::extensions::commands(cx);
                 type Run = fn(&mut Workspace, &mut Window, &mut Context<Workspace>);
                 // Each with the keys of the command it runs.
-                let item = |label: &'static str, keys: &dyn Action, run: Run| {
+                fn item(
+                    this: &WeakEntity<Workspace>,
+                    label: &'static str,
+                    keys: &dyn Action,
+                    run: Run,
+                    cx: &App,
+                ) -> PopupMenuItem {
                     let this = this.clone();
                     PopupMenuItem::new(crate::keymap::menu_label(label, keys, cx)).on_click(
                         move |_, window, cx| {
                             _ = this.update(cx, |this, cx| run(this, window, cx));
                         },
                     )
-                };
-                // As tall as the window allows below the title bar, so the
-                // whole menu shows and it only scrolls in a short window.
-                menu.max_h(window.viewport_size().height - px(56.))
-                    .scrollable(true)
-                    .item(item(
-                        "Show All Commands",
-                        &crate::ShowCommands,
-                        |this, window, cx| this.quick_open(true, window, cx),
+                }
+                let (file, edit, view, terminal, extensions) = (
+                    this.clone(),
+                    this.clone(),
+                    this.clone(),
+                    this.clone(),
+                    this.clone(),
+                );
+                menu.item(item(
+                    &this,
+                    "Show All Commands",
+                    &crate::ShowCommands,
+                    |this, window, cx| this.quick_open(true, window, cx),
+                    cx,
+                ))
+                .item(item(
+                    &this,
+                    "Go to File…",
+                    &crate::QuickOpen,
+                    |this, window, cx| this.quick_open(false, window, cx),
+                    cx,
+                ))
+                .separator()
+                .submenu("File", window, cx, move |menu, _, cx| {
+                    let this = &file;
+                    menu.item(item(
+                        this,
+                        "New File",
+                        &crate::NewFile,
+                        |this, window, cx| this.new_untitled(None, window, cx),
+                        cx,
                     ))
                     .item(item(
-                        "Go to File…",
-                        &crate::QuickOpen,
-                        |this, window, cx| this.quick_open(false, window, cx),
+                        this,
+                        "Open Folder…",
+                        &OpenFolder,
+                        |this, window, cx| this.prompt_open_folder(false, window, cx),
+                        cx,
                     ))
-                    .separator()
-                    .label("FILE")
-                    .item(item("New File", &crate::NewFile, |this, window, cx| {
-                        this.new_untitled(None, window, cx)
-                    }))
-                    .item(item("Open Folder…", &OpenFolder, |this, window, cx| {
-                        this.prompt_open_folder(false, window, cx)
-                    }))
                     .item(item(
+                        this,
                         "Open Folder in New Window…",
                         &OpenFolderInNewWindow,
                         |this, window, cx| this.prompt_open_folder(true, window, cx),
+                        cx,
                     ))
-                    .item(item("Open Files…", &OpenFiles, |this, window, cx| {
-                        this.prompt_open_files(window, cx)
-                    }))
-                    .item(item("Close Tab", &CloseTab, |this, window, cx| {
-                        if let Some(pane) = this.tree.active_tab(this.active_group) {
-                            this.request_close_pane(pane, window, cx);
-                        }
-                    }))
-                    .item(item("Close Group", &CloseGroup, |this, window, cx| {
-                        this.request_close_group(this.active_group, window, cx)
-                    }))
-                    .separator()
-                    .label("EDIT")
                     .item(item(
+                        this,
+                        "Open Files…",
+                        &OpenFiles,
+                        |this, window, cx| this.prompt_open_files(window, cx),
+                        cx,
+                    ))
+                    .separator()
+                    .item(item(
+                        this,
+                        "Close Tab",
+                        &CloseTab,
+                        |this, window, cx| {
+                            if let Some(pane) = this.tree.active_tab(this.active_group) {
+                                this.request_close_pane(pane, window, cx);
+                            }
+                        },
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Close Group",
+                        &CloseGroup,
+                        |this, window, cx| this.request_close_group(this.active_group, window, cx),
+                        cx,
+                    ))
+                })
+                .submenu("Edit", window, cx, move |menu, _, cx| {
+                    let this = &edit;
+                    menu.item(item(
+                        this,
                         "Format Document",
                         &FormatDocument,
                         |this, window, cx| this.format_active(window, cx),
+                        cx,
                     ))
-                    .item(item("Find in Files", &FocusSearch, |this, window, cx| {
-                        this.focus_view(SidebarView::Search, window, cx)
-                    }))
+                    .separator()
                     .item(item(
+                        this,
+                        "Find in Files",
+                        &FocusSearch,
+                        |this, window, cx| this.focus_view(SidebarView::Search, window, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
                         "Replace in Files",
                         &ReplaceInFiles,
                         |_, window, cx| window.dispatch_action(Box::new(ReplaceInFiles), cx),
+                        cx,
                     ))
-                    .separator()
-                    .label("VIEW")
-                    .item(item(
+                })
+                .submenu("View", window, cx, move |menu, _, cx| {
+                    let this = &view;
+                    menu.item(item(
+                        this,
                         "Toggle Sidebar",
                         &crate::ToggleSidebar,
                         |this, window, cx| this.toggle_sidebar(window, cx),
-                    ))
-                    .item(item("Explorer", &FocusExplorer, |this, _, cx| {
-                        this.toggle_view(SidebarView::Explorer, cx)
-                    }))
-                    .item(item("Search", &FocusSearch, |this, _, cx| {
-                        this.toggle_view(SidebarView::Search, cx)
-                    }))
-                    .item(item("Source Control", &FocusScm, |this, _, cx| {
-                        this.toggle_view(SidebarView::Scm, cx)
-                    }))
-                    .item(item("Extensions", &FocusExtensions, |this, _, cx| {
-                        this.toggle_view(SidebarView::Extensions, cx)
-                    }))
-                    .item(item("Split Right", &SplitRight, |this, _, cx| {
-                        this.split(this.active_group, Side::Right, cx)
-                    }))
-                    .item(item("Split Down", &SplitDown, |this, _, cx| {
-                        this.split(this.active_group, Side::Bottom, cx)
-                    }))
-                    .item(item("Save Layout…", &SaveLayout, |this, window, cx| {
-                        this.prompt_save_preset(window, cx)
-                    }))
-                    .item(item("Reset Layout", &ResetLayout, |this, _, cx| {
-                        this.reset_layout(cx)
-                    }))
-                    .item(item("Settings", &OpenSettings, |this, window, cx| {
-                        this.open_settings(false, window, cx)
-                    }))
-                    .item(item(
-                        "Keyboard Shortcuts",
-                        &crate::OpenKeyboardShortcuts,
-                        |this, window, cx| this.open_settings_at(Some(2), window, cx),
+                        cx,
                     ))
                     .item(item(
-                        "Check for Updates…",
-                        &CheckForUpdates,
-                        |_, window, cx| crate::update::check_in_window(true, window, cx),
+                        this,
+                        "Explorer",
+                        &FocusExplorer,
+                        |this, _, cx| this.toggle_view(SidebarView::Explorer, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Search",
+                        &FocusSearch,
+                        |this, _, cx| this.toggle_view(SidebarView::Search, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Source Control",
+                        &FocusScm,
+                        |this, _, cx| this.toggle_view(SidebarView::Scm, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Extensions",
+                        &FocusExtensions,
+                        |this, _, cx| this.toggle_view(SidebarView::Extensions, cx),
+                        cx,
                     ))
                     .separator()
-                    .label("TERMINAL")
-                    .item(item("New Terminal", &NewTerminal, |this, window, cx| {
-                        this.open_terminal(None, None, false, window, cx)
-                    }))
-                    .item(item("New Browser", &NewBrowser, |this, window, cx| {
-                        this.open_browser(None, None, window, cx)
-                    }))
                     .item(item(
+                        this,
+                        "Split Right",
+                        &SplitRight,
+                        |this, _, cx| this.split(this.active_group, Side::Right, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Split Down",
+                        &SplitDown,
+                        |this, _, cx| this.split(this.active_group, Side::Bottom, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Save Layout…",
+                        &SaveLayout,
+                        |this, window, cx| this.prompt_save_preset(window, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "Reset Layout",
+                        &ResetLayout,
+                        |this, _, cx| this.reset_layout(cx),
+                        cx,
+                    ))
+                    .separator()
+                    .item(
+                        item(
+                            this,
+                            "Word Wrap",
+                            &ToggleSoftWrap,
+                            |_, _, cx| Settings::update(cx, |s| s.soft_wrap = !s.soft_wrap),
+                            cx,
+                        )
+                        .checked(Settings::get(cx).soft_wrap),
+                    )
+                })
+                .submenu("Terminal", window, cx, move |menu, _, cx| {
+                    let this = &terminal;
+                    menu.item(item(
+                        this,
+                        "New Terminal",
+                        &NewTerminal,
+                        |this, window, cx| this.open_terminal(None, None, false, window, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
+                        "New Browser",
+                        &NewBrowser,
+                        |this, window, cx| this.open_browser(None, None, window, cx),
+                        cx,
+                    ))
+                    .item(item(
+                        this,
                         "Open Dev Server",
                         &OpenDevServer,
                         |this, window, cx| this.open_dev_server(None, window, cx),
+                        cx,
                     ))
-                    .item(item("Claude Code", &NewAgent, Self::open_agent))
-                    // The running extensions' commands, each by its extension.
-                    .when(!commands.is_empty(), |mut menu| {
-                        menu = menu.separator().label("EXTENSIONS");
+                    .item(item(
+                        this,
+                        "Claude Code",
+                        &NewAgent,
+                        Self::open_agent,
+                        cx,
+                    ))
+                })
+                // The running extensions' commands, each by its extension.
+                .when(!commands.is_empty(), |menu| {
+                    menu.submenu("Extensions", window, cx, move |mut menu, _, cx| {
                         for (id, name, command) in &commands {
                             let action = crate::extensions::RunCommand {
                                 extension: id.clone(),
@@ -3503,7 +3604,7 @@ impl Workspace {
                                 cx,
                             );
                             let (this, id, command_id) =
-                                (this.clone(), id.clone(), command.id.clone());
+                                (extensions.clone(), id.clone(), command.id.clone());
                             menu =
                                 menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
                                     _ = this.update(cx, |this, cx| {
@@ -3518,12 +3619,41 @@ impl Workspace {
                         }
                         menu
                     })
-                    .separator()
-                    .item(item("Exit", &crate::Quit, |this, window, cx| {
+                })
+                .separator()
+                .item(item(
+                    &this,
+                    "Settings",
+                    &OpenSettings,
+                    |this, window, cx| this.open_settings(false, window, cx),
+                    cx,
+                ))
+                .item(item(
+                    &this,
+                    "Keyboard Shortcuts",
+                    &crate::OpenKeyboardShortcuts,
+                    |this, window, cx| this.open_settings_at(Some(2), window, cx),
+                    cx,
+                ))
+                .item(item(
+                    &this,
+                    "Check for Updates…",
+                    &CheckForUpdates,
+                    |_, window, cx| crate::update::check_in_window(true, window, cx),
+                    cx,
+                ))
+                .separator()
+                .item(item(
+                    &this,
+                    "Exit",
+                    &crate::Quit,
+                    |this, window, cx| {
                         if this.request_close_window(window, cx) {
                             window.remove_window();
                         }
-                    }))
+                    },
+                    cx,
+                ))
             })
     }
 
@@ -3613,6 +3743,9 @@ impl Workspace {
             .on_action(
                 cx.listener(|this, _: &FormatDocument, window, cx| this.format_active(window, cx)),
             )
+            .on_action(cx.listener(|_, _: &ToggleSoftWrap, _, cx| {
+                Settings::update(cx, |s| s.soft_wrap = !s.soft_wrap)
+            }))
             .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| {
                 this.new_untitled(None, window, cx)
             }))
