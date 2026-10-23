@@ -1146,6 +1146,8 @@ impl Workspace {
                             h_flex()
                                 .relative()
                                 .gap_1p5()
+                                // Smaller than the tab's own `text_sm`, so more tabs fit.
+                                .text_xs()
                                 .child(zone_marker(&self.zones, float, Zone::Tab(group, ix)))
                                 .child(pane.icon_element(cx).unwrap_or_else(|| {
                                     Icon::new(pane.icon(cx)).small().into_any_element()
