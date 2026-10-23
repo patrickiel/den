@@ -439,6 +439,9 @@ pub struct Workspace {
     history: History,
     /// Going back or forward: what is shown now is no new visit.
     navigating: bool,
+    /// The tabs by when they were last shown, the latest last, for closing
+    /// the stalest file past the tab limit.
+    shown: Vec<PaneId>,
     explorer: Entity<Explorer>,
     search: Entity<SearchView>,
     scm: Entity<ScmView>,
@@ -615,6 +618,7 @@ impl Workspace {
             activate_float: None,
             history: History::default(),
             navigating: false,
+            shown: Vec::new(),
             explorer,
             search,
             scm,
@@ -794,6 +798,8 @@ impl Workspace {
         let Some(pane) = self.tree.active_tab(self.active_group) else {
             return;
         };
+        self.shown.retain(|p| *p != pane);
+        self.shown.push(pane);
         if self.navigating {
             self.history.arrive(pane);
         } else {
@@ -916,6 +922,7 @@ impl Workspace {
             .and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf));
         self.panes.remove(&pane);
         self.pane_subscriptions.remove(&pane);
+        self.shown.retain(|p| *p != pane);
         self.tree.remove_tab(pane);
         self.history.closed(pane, file);
     }
@@ -1723,7 +1730,39 @@ impl Workspace {
                 if preview {
                     self.preview = added;
                 }
+                if let Some(added) = added {
+                    self.limit_file_tabs(group, added, cx);
+                }
             }
+        }
+    }
+
+    /// Past the tab limit (Settings > Tabs), close `group`'s file tabs shown
+    /// longest ago, never `keep` or one with unsaved changes.
+    fn limit_file_tabs(&mut self, group: NodeId, keep: PaneId, cx: &mut Context<Self>) {
+        let limit = Settings::get(cx).max_file_tabs;
+        if limit == 0 {
+            return;
+        }
+        let mut files: Vec<PaneId> = self
+            .tree
+            .tabs(group)
+            .iter()
+            .copied()
+            .filter(|id| self.pane_as::<FilePanel>(*id).is_some())
+            .collect();
+        while files.len() > limit {
+            // Never shown (back with the session, unvisited) counts as oldest.
+            let Some(stalest) = files
+                .iter()
+                .copied()
+                .filter(|id| *id != keep && !self.panes.get(id).is_some_and(|p| p.is_dirty(cx)))
+                .min_by_key(|id| self.shown.iter().position(|p| p == id))
+            else {
+                break;
+            };
+            files.retain(|id| *id != stalest);
+            self.close_pane(stalest, cx);
         }
     }
 

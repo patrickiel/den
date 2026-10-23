@@ -135,6 +135,9 @@ pub struct Settings {
     /// Lines a terminal keeps above the screen.
     pub scrollback: usize,
     pub tab_close_button: bool,
+    /// File tabs a group keeps: past it, opening a file closes the one shown
+    /// longest ago that has no unsaved changes. 0 for no limit.
+    pub max_file_tabs: usize,
     /// A maximized group (or one maximized as tiles) covers the sidebar too,
     /// not just the groups.
     pub maximize_covers_sidebar: bool,
@@ -246,6 +249,7 @@ impl Default for Settings {
             shell: String::new(),
             scrollback: 10_000,
             tab_close_button: true,
+            max_file_tabs: 0,
             maximize_covers_sidebar: true,
             format_on_save: false,
             diff_layout: DiffLayout::Automatic,
