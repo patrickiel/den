@@ -5,7 +5,10 @@
 //! lighter-theme colours of its own. The font has an empty `m` (and space)
 //! added: GPUI on macOS measures text with `m` and will not load a font
 //! without one, falling back to the system font, which has no glyph for the
-//! icons' private-use characters (boxes with question marks).
+//! icons' private-use characters (boxes with question marks). Its left side
+//! bearings are set to the glyphs' real left edges: unpacked they were all 0,
+//! and DirectWrite, trusting them, drew each icon left in its box, leaving a
+//! wide gap before the text after it.
 
 use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
 
