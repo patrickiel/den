@@ -382,7 +382,8 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     pub(crate) tree: Tree,
     pub(crate) panes: HashMap<PaneId, PaneRef>,
-    pane_subscriptions: HashMap<PaneId, Subscription>,
+    /// Each pane's events and its focus.
+    pane_subscriptions: HashMap<PaneId, [Subscription; 2]>,
     pub(crate) defaults: Defaults,
     pub(crate) active_group: NodeId,
     /// The preview tab (italic), replaced by the next file opened as a preview.
@@ -439,7 +440,7 @@ pub struct Workspace {
     history: History,
     /// Going back or forward: what is shown now is no new visit.
     navigating: bool,
-    /// The tabs by when they were last shown, the latest last, for closing
+    /// The tabs by when they last had focus, the latest last, for closing
     /// the stalest file past the tab limit.
     shown: Vec<PaneId>,
     explorer: Entity<Explorer>,
@@ -749,8 +750,12 @@ impl Workspace {
     }
 
     fn track(&mut self, id: PaneId, pane: PaneRef, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = cx.on_focus_in(&pane.focus_handle(cx), window, move |this, _, _| {
+            this.shown.retain(|p| *p != id);
+            this.shown.push(id);
+        });
         self.pane_subscriptions
-            .insert(id, pane.subscribe(id, window, cx));
+            .insert(id, [pane.subscribe(id, window, cx), focused]);
         self.panes.insert(id, pane);
     }
 
@@ -798,8 +803,6 @@ impl Workspace {
         let Some(pane) = self.tree.active_tab(self.active_group) else {
             return;
         };
-        self.shown.retain(|p| *p != pane);
-        self.shown.push(pane);
         if self.navigating {
             self.history.arrive(pane);
         } else {
@@ -1737,8 +1740,8 @@ impl Workspace {
         }
     }
 
-    /// Past the tab limit (Settings > Tabs), close `group`'s file tabs shown
-    /// longest ago, never `keep` or one with unsaved changes.
+    /// Past the tab limit (Settings > Tabs), close `group`'s file tabs
+    /// focused longest ago, never `keep` or one with unsaved changes.
     fn limit_file_tabs(&mut self, group: NodeId, keep: PaneId, cx: &mut Context<Self>) {
         let limit = Settings::get(cx).max_file_tabs;
         if limit == 0 {
@@ -1752,7 +1755,8 @@ impl Workspace {
             .filter(|id| self.pane_as::<FilePanel>(*id).is_some())
             .collect();
         while files.len() > limit {
-            // Never shown (back with the session, unvisited) counts as oldest.
+            // Never focused (back with the session, or a preview) counts as
+            // oldest.
             let Some(stalest) = files
                 .iter()
                 .copied()
@@ -1804,6 +1808,9 @@ impl Workspace {
         let file = cx.new(|cx| FilePanel::untitled(path, window, cx));
         let group = group.unwrap_or_else(|| self.target_group(Kind::Files));
         self.add_pane(file, group, true, window, cx);
+        if let Some(added) = self.tree.active_tab(group) {
+            self.limit_file_tabs(group, added, cx);
+        }
     }
 
     /// Keep the preview tab open (editing it, or double-clicking it), or turn
