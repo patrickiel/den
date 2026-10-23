@@ -1146,8 +1146,10 @@ impl Workspace {
                             h_flex()
                                 .relative()
                                 .gap_1p5()
-                                // Smaller than the tab's own `text_sm`, so more tabs fit.
-                                .text_xs()
+                                // VS Code's size and tighter than the tab's own `text_sm`
+                                // and 12px sides, so more tabs fit.
+                                .text_size(px(13.))
+                                .mx(-px(4.))
                                 .child(zone_marker(&self.zones, float, Zone::Tab(group, ix)))
                                 .child(pane.icon_element(cx).unwrap_or_else(|| {
                                     Icon::new(pane.icon(cx)).small().into_any_element()
@@ -1179,7 +1181,7 @@ impl Workspace {
                                     .xsmall()
                                     .ghost()
                                     .ml(-px(8.))
-                                    .mr_2()
+                                    .mr_1()
                                     .tab_stop(false)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
