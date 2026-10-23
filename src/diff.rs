@@ -1,7 +1,7 @@
 //! Diff tabs, as in den: a change clicked in Source Control opens read-only,
 //! side by side (one column, inline, when the view is narrow or a side is
-//! empty, as for an added or deleted file). `name (Working Tree)` compares the file on disk with the
-//! index, `name (Index)` the index with HEAD. The header's button (or
+//! empty, as for an added or deleted file). `name ~` compares the file on disk with the
+//! index, `name +` the index with HEAD. The header's button (or
 //! Ctrl+Enter) opens the file itself.
 
 use std::{
@@ -704,12 +704,13 @@ impl Pane for DiffPanel {
 
     fn label(&self, _: &App) -> SharedString {
         let name = self.rel.rsplit('/').next().unwrap_or(&self.rel);
-        let side = match &self.commit {
-            Some(commit) => commit.hash.chars().take(7).collect(),
-            None if self.staged => "Index".to_string(),
-            None => "Working Tree".to_string(),
-        };
-        format!("{name} ({side})").into()
+        // Short, so the tab stays narrow; the header names both sides.
+        match &self.commit {
+            Some(commit) => format!("{name} ({})", &commit.hash[..commit.hash.len().min(7)]),
+            None if self.staged => format!("{name} +"),
+            None => format!("{name} ~"),
+        }
+        .into()
     }
 
     fn dump(&self, _: &App) -> Value {
