@@ -2,7 +2,9 @@
 //! inside a group. The toolbar has back / forward / reload and a URL bar (a
 //! host opens as https, `localhost` as http, anything else is a web search);
 //! links that open a new window open as a new browser tab. Tabs come back at
-//! their last URL; logins persist in den's own browser profile.
+//! their last URL; logins persist in den's own browser profile. A page going
+//! full screen (a video) takes the whole screen, its window going full screen
+//! with it.
 //!
 //! The page is a native child window painted over the app: it follows its
 //! pane's bounds every frame it is drawn, and the workspace hides it while
@@ -95,6 +97,38 @@ enum PageEvent {
     Loading(String),
     Loaded(String),
     NewWindow(String),
+    /// The page went full screen (a video), or back.
+    #[cfg(windows)]
+    FullScreen(bool),
+    /// F11 or Escape pressed in the page while full screen: back.
+    #[cfg(windows)]
+    LeaveFullScreen,
+    /// F11 pressed in the page otherwise: den's Toggle Full Screen.
+    #[cfg(windows)]
+    ToggleFullScreen,
+}
+
+/// Tell `tx` when the page goes full screen and back. wry leaves WebView2's
+/// event unhandled, which keeps a full screen page inside its own area.
+#[cfg(windows)]
+fn watch_full_screen(webview: &WebView, tx: mpsc::UnboundedSender<PageEvent>) {
+    let handler = webview2_com::ContainsFullScreenElementChangedEventHandler::create(Box::new(
+        move |sender, _| {
+            let mut full = windows::core::BOOL::default();
+            if let Some(sender) = sender {
+                // SAFETY: a getter of the page that sent the event, on its thread.
+                unsafe { sender.ContainsFullScreenElement(&mut full)? };
+            }
+            _ = tx.unbounded_send(PageEvent::FullScreen(full.as_bool()));
+            Ok(())
+        },
+    ));
+    let mut token = 0;
+    // SAFETY: adds a handler to a page of this thread.
+    unsafe {
+        _ = wry::WebViewExtWindows::webview(webview)
+            .add_ContainsFullScreenElementChanged(&handler, &mut token);
+    }
 }
 
 pub struct BrowserPanel {
@@ -117,6 +151,10 @@ pub struct BrowserPanel {
     owner: Option<(String, String)>,
     /// Just the page, without the toolbar: a file view's, inside a file tab.
     bare: bool,
+    /// The page is full screen: it covers its window, made full screen too.
+    full_screen: Rc<Cell<bool>>,
+    /// While the page is full screen, whether its window was before.
+    window_was_full: Option<bool>,
     _events: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -175,6 +213,45 @@ fn profile_dir() -> PathBuf {
     crate::settings::data_dir().join("webview")
 }
 
+/// F11 is den's also while the page has the keyboard: it leaves the page's
+/// full screen (as Escape does), or else toggles den's.
+#[cfg(windows)]
+fn watch_keys(
+    webview: &WebView,
+    full_screen: Rc<Cell<bool>>,
+    tx: mpsc::UnboundedSender<PageEvent>,
+) {
+    use webview2_com::{AcceleratorKeyPressedEventHandler, Microsoft::Web::WebView2::Win32::*};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_F11};
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let (mut kind, mut key) = (COREWEBVIEW2_KEY_EVENT_KIND::default(), 0);
+        // SAFETY: getters of the key the page was sent, on its thread.
+        unsafe {
+            args.KeyEventKind(&mut kind)?;
+            args.VirtualKey(&mut key)?;
+        }
+        let full = full_screen.get();
+        let ours = key == VK_F11.0 as u32 || (key == VK_ESCAPE.0 as u32 && full);
+        if ours && kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN {
+            // SAFETY: as above.
+            unsafe { args.SetHandled(true)? };
+            _ = tx.unbounded_send(if full {
+                PageEvent::LeaveFullScreen
+            } else {
+                PageEvent::ToggleFullScreen
+            });
+        }
+        Ok(())
+    }));
+    let mut token = 0;
+    // SAFETY: adds a handler to a page of this thread.
+    unsafe {
+        _ = wry::WebViewExtWindows::controller(webview)
+            .add_AcceleratorKeyPressed(&handler, &mut token);
+    }
+}
+
 impl BrowserPanel {
     pub fn new(url: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let url = url
@@ -187,6 +264,8 @@ impl BrowserPanel {
                 .default_value(url.clone())
         });
         let (tx, mut rx) = mpsc::unbounded::<PageEvent>();
+        #[cfg(windows)]
+        let full_tx = tx.clone();
         let (title_tx, load_tx, window_tx) = (tx.clone(), tx.clone(), tx);
         // WebView2 is created with a nested message loop (wry waits for its
         // controller), which runs GPUI's queued tasks too. Inside an update
@@ -195,6 +274,9 @@ impl BrowserPanel {
         // native handle taken now.
         let parent = HasWindowHandle::window_handle(window).map(|handle| handle.as_raw());
         let start_url = url.clone();
+        let full_screen: Rc<Cell<bool>> = Rc::default();
+        #[cfg(windows)]
+        let keys_full = full_screen.clone();
         let _events = cx.spawn(async move |this, cx| {
             let built = match parent {
                 Ok(raw) => {
@@ -226,6 +308,11 @@ impl BrowserPanel {
                 }
                 Err(err) => Err(err.to_string()),
             };
+            #[cfg(windows)]
+            if let Ok(webview) = &built {
+                watch_keys(webview, keys_full, full_tx.clone());
+                watch_full_screen(webview, full_tx);
+            }
             let alive = this.update(cx, |this, cx| {
                 match built {
                     Ok(webview) => this.webview = Some(Rc::new(webview)),
@@ -276,6 +363,8 @@ impl BrowserPanel {
             parent: Rc::new(Cell::new(hwnd(window))),
             owner: None,
             bare: false,
+            full_screen,
+            window_was_full: None,
             _events,
             _subscriptions,
         }
@@ -293,6 +382,22 @@ impl BrowserPanel {
                 self.url = url;
             }
             PageEvent::NewWindow(url) => cx.emit(PaneEvent::OpenBrowser(url)),
+            #[cfg(windows)]
+            PageEvent::FullScreen(full) => self.full_screen.set(full),
+            #[cfg(windows)]
+            PageEvent::LeaveFullScreen => {
+                self.full_screen.set(false);
+                self.script("document.fullscreenElement && document.exitFullscreen()");
+            }
+            #[cfg(windows)]
+            PageEvent::ToggleFullScreen => cx.defer(|cx| {
+                let Some(window) = cx.active_window() else {
+                    return;
+                };
+                _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::ToggleFullScreen), cx)
+                });
+            }),
         }
         // The URL bar follows the page, unless the user is typing in it.
         let url = self.url.clone();
@@ -382,6 +487,10 @@ impl BrowserPanel {
             if !shown {
                 self.release_focus(webview);
             }
+            // Out of sight (another tab took its place), it leaves full screen.
+            if !shown && self.full_screen.get() {
+                _ = webview.evaluate_script("document.exitFullscreen()");
+            }
             _ = webview.set_visible(shown && self.bounds.get().is_some());
         }
     }
@@ -420,6 +529,49 @@ impl BrowserPanel {
         }
         #[cfg(not(windows))]
         let _ = to;
+    }
+
+    /// Put the window full screen with the page, over the other pages, and
+    /// back as it was once the page leaves full screen.
+    fn follow_full_screen(&mut self, window: &mut Window) {
+        match (self.full_screen.get(), self.window_was_full) {
+            (true, None) => {
+                let was_full = window.is_fullscreen();
+                self.window_was_full = Some(was_full);
+                if !was_full {
+                    window.toggle_fullscreen();
+                }
+                // The keyboard goes to the page, for the keys that leave.
+                if let Some(webview) = &self.webview {
+                    _ = webview.focus();
+                }
+                #[cfg(windows)]
+                if let Some(webview) = &self.webview {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+                    };
+                    // SAFETY: a plain call on a window of this thread.
+                    unsafe {
+                        _ = SetWindowPos(
+                            wry::WebViewExtWindows::hwnd(webview.as_ref()),
+                            Some(HWND_TOP),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
+            (false, Some(was_full)) => {
+                self.window_was_full = None;
+                if !was_full && window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Take the keyboard back from the page. On Windows any click in den
@@ -479,7 +631,8 @@ impl Pane for BrowserPanel {
 }
 
 impl Render for BrowserPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.follow_full_screen(window);
         let theme = cx.theme().clone();
         let tool = |id: &'static str, icon: IconName, tip: &'static str| {
             Button::new(id)
@@ -488,11 +641,12 @@ impl Render for BrowserPanel {
                 .icon(Icon::new(icon))
                 .tooltip(tip)
         };
-        let (bounds, shown, webview, parent) = (
+        let (bounds, shown, webview, parent, full_screen) = (
             self.bounds.clone(),
             self.shown.clone(),
             self.webview.clone(),
             self.parent.clone(),
+            self.full_screen.clone(),
         );
         v_flex()
             .size_full()
@@ -570,7 +724,13 @@ impl Render for BrowserPanel {
                                     bounds.set(None);
                                 }
                                 #[cfg(not(windows))]
-                                let _ = (&parent, window);
+                                let _ = &parent;
+                                // Full screen, the page covers the whole window.
+                                let area = if full_screen.get() {
+                                    Bounds::new(Point::default(), window.viewport_size())
+                                } else {
+                                    area
+                                };
                                 if bounds.get() != Some(area) {
                                     bounds.set(Some(area));
                                     _ = webview.set_bounds(Rect {

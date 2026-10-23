@@ -30,6 +30,7 @@ mod layout_view;
 mod overlays;
 mod pane;
 mod panels;
+mod pdf;
 mod preset_icon;
 mod quick_open;
 mod repo;
@@ -96,6 +97,7 @@ actions!(
         ToggleMaximizeGroup,
         ToggleGroupTiles,
         GoToLine,
+        ToggleFullScreen,
         NavigateBack,
         NavigateForward,
     ]
@@ -391,6 +393,7 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<ToggleSidebar>,
         forward::<ToggleMaximizeGroup>,
         forward::<ToggleGroupTiles>,
+        forward::<ToggleFullScreen>,
         forward::<NavigateBack>,
         forward::<NavigateForward>,
         forward::<OpenTab>,

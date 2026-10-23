@@ -44,10 +44,17 @@ encoding_rs = "0.8"
 raw-window-handle = "0.6"
 minisign-verify = "0.2"
 libloading = "0.8"
+# PDF tabs: PDFium, bound at run time to the library den downloads (`pdf.rs`).
+pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest"] }
+# The version gpui builds; its frames carry a PDF's drawn pages.
+image = { version = "0.25", default-features = false }
 den-extension = { path = "crates/den-extension" }
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
+# The version wry builds; for what wry leaves out of WebView2: a page's full
+# screen event, and its keys.
+webview2-com = "0.39"
 # The version gpui builds; for a monitor's scale under a point (floating windows).
 windows = { version = "0.62", features = [
     "Win32_Foundation",

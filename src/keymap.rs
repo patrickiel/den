@@ -481,6 +481,13 @@ fn den_commands() -> Vec<Command> {
             &["ctrl-g"],
             &["ctrl-g"],
         ),
+        command(
+            "den.toggleFullScreen",
+            "View: Toggle Full Screen",
+            ToggleFullScreen,
+            &["f11"],
+            &["ctrl-cmd-f"],
+        ),
         // Preferences
         command(
             "den.openSettings",

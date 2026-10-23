@@ -19,9 +19,10 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
-    resizable::{h_resizable, resizable_panel},
+    resizable::resize_handle_appearance,
     v_flex,
 };
+use gpui_kit::base::resize_handle;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +42,7 @@ use crate::{
     float::FloatWindow,
     history::{Entry, History},
     layout::{Float, Node, NodeId, PaneId, Side, Tree},
-    layout_view::{Dragged, Drop, DropHint, Flash, Hints, Zones},
+    layout_view::{Dragged, Drop, DropHint, Flash, Hints, Nothing, Zones},
     overlays::{Maximized, PaintedRef},
     pane::{self, Pane, PaneRef, PaneState},
     panels::{FilePanel, SettingsPanel},
@@ -410,6 +411,10 @@ pub struct Workspace {
     flash: Option<(Flash, std::time::Instant)>,
     /// A group drawn over its window's body, sidebar and all (`overlays.rs`).
     pub(crate) maximized: Option<Maximized>,
+    /// Toggle Full Screen (F11): this group maximized in its window, which is
+    /// full screen without its title bar; and whether that window was full
+    /// screen before.
+    full_screen: Option<(NodeId, bool)>,
     /// Where the windows' bodies and the maximized group's slot were painted.
     pub(crate) painted: PaintedRef,
     /// Tabs whose program wanted the user while they looked elsewhere.
@@ -604,6 +609,7 @@ impl Workspace {
             hint_seq: 0,
             flash: None,
             maximized: None,
+            full_screen: None,
             painted: PaintedRef::default(),
             attention: Default::default(),
             window: window.window_handle(),
@@ -1437,6 +1443,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.settle_overlays();
+        self.settle_full_screen(Some(id), window);
         self.sync_browsers(Some(id), window, cx);
         let Some(root) = self.tree.window_root(Some(id)) else {
             return Empty.into_any_element();
@@ -1482,7 +1489,7 @@ impl Workspace {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(title_bar)
+            .when(!self.full_screen_in(Some(id)), |this| this.child(title_bar))
             .child(
                 div()
                     .flex_1()
@@ -3347,6 +3354,64 @@ impl Workspace {
             .and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf))
     }
 
+    /// Toggle Full Screen: `group` maximized in its window, which goes full
+    /// screen without its title bar; and all back again.
+    pub(crate) fn toggle_full_screen(
+        &mut self,
+        group: NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((group, was_full)) = self.full_screen.take() {
+            if self.maximized_group() == Some(group) {
+                self.restore_group(cx);
+            }
+            if !was_full && window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+            return cx.notify();
+        }
+        if !self.is_maximized(group, false) && !self.is_maximized(group, true) {
+            self.toggle_maximize(group, false, window, cx);
+        }
+        if self.maximized_group() != Some(group) {
+            return;
+        }
+        let was_full = window.is_fullscreen();
+        if !was_full {
+            window.toggle_fullscreen();
+        }
+        self.full_screen = Some((group, was_full));
+        cx.notify();
+    }
+
+    /// Leave full screen once its group is no longer maximized (restored,
+    /// another group made active, the group closed), when it is in `float`.
+    fn settle_full_screen(&mut self, float: Option<u64>, window: &mut Window) {
+        let Some((group, was_full)) = self.full_screen else {
+            return;
+        };
+        let maximized = self.is_maximized(group, false) || self.is_maximized(group, true);
+        if maximized || self.tree.float_of(group) != float && self.tree.find(group).is_some() {
+            return;
+        }
+        self.full_screen = None;
+        if !was_full && window.is_fullscreen() {
+            window.toggle_fullscreen();
+        }
+    }
+
+    /// Whether `group` is full screen (Toggle Full Screen).
+    pub(crate) fn is_full_screen(&self, group: NodeId) -> bool {
+        self.full_screen.is_some_and(|(g, _)| g == group)
+    }
+
+    /// Whether the window of `float` is full screen for Toggle Full Screen.
+    fn full_screen_in(&self, float: Option<u64>) -> bool {
+        self.full_screen
+            .is_some_and(|(group, _)| self.tree.float_of(group) == float)
+    }
+
     /// Tell the extensions when the active file changed since they last heard.
     fn report_active_file(&mut self, cx: &App) {
         let active = self.active_file(cx);
@@ -3800,6 +3865,11 @@ impl Workspace {
             .on_action(cx.listener(|_, _: &ToggleSoftWrap, _, cx| {
                 Settings::update(cx, |s| s.soft_wrap = !s.soft_wrap)
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::ToggleFullScreen, window, cx| {
+                    this.toggle_full_screen(this.active_group, window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &crate::NewFile, window, cx| {
                 this.new_untitled(None, window, cx)
             }))
@@ -4056,9 +4126,17 @@ fn open_float_window(
     Some(window)
 }
 
+/// The handle between the sidebar and the groups being dragged.
+struct SidebarResize;
+
+/// How narrow and how wide the handle takes the sidebar.
+const SIDEBAR_MIN: f32 = 160.;
+const SIDEBAR_MAX: f32 = 640.;
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_overlays();
+        self.settle_full_screen(None, window);
         self.sync_browsers(None, window, cx);
         self.report_active_file(cx);
         let sidebar = AppState::get(cx).sidebar.clone();
@@ -4066,25 +4144,48 @@ impl Render for Workspace {
         let groups = self.render_layout(&self.tree.root, None, window, cx);
 
         let body = if sidebar.visible {
-            let panel = resizable_panel()
-                .size(px(sidebar.width))
-                .size_range(px(160.)..px(640.))
-                .flex_none()
-                .child(self.render_sidebar(cx));
+            // A fixed width rather than the kit's resizable group, which
+            // rescales every panel with the window: only the handle moves it.
             let left = side == SidebarSide::Left;
-            let width_ix = if left { 0 } else { 1 };
-            let group = h_resizable(if left { "body-left" } else { "body-right" }).on_resize(
-                move |state, _, cx| {
-                    if let Some(width) = state.read(cx).sizes().get(width_ix).copied() {
-                        AppState::update(cx, |s| s.sidebar.width = width.as_f32());
-                    }
-                },
-            );
+            let panel = div()
+                .flex_none()
+                .h_full()
+                .relative()
+                .w(px(sidebar.width.clamp(SIDEBAR_MIN, SIDEBAR_MAX)))
+                .child(self.render_sidebar(cx));
+            let groups = div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .child(groups);
+            // The kit's handle, straddling the boundary from whichever side
+            // comes second.
+            let handle = resize_handle("sidebar-handle", gpui::Axis::Horizontal)
+                .with_appearance(resize_handle_appearance())
+                .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| Nothing));
+            let body = h_flex()
+                .id("body")
+                .size_full()
+                .on_drag_move::<std::rc::Rc<SidebarResize>>(cx.listener(
+                    move |_, event: &DragMoveEvent<std::rc::Rc<SidebarResize>>, _, cx| {
+                        let (bounds, at) = (event.bounds, event.event.position.x);
+                        let width = if left {
+                            at - bounds.left()
+                        } else {
+                            bounds.right() - at
+                        };
+                        let width = width.as_f32().clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                        AppState::update(cx, |s| s.sidebar.width = width);
+                        cx.notify();
+                    },
+                ));
             if left {
-                group.child(panel).child(groups).into_any_element()
+                body.child(panel).child(groups.child(handle))
             } else {
-                group.child(groups).child(panel).into_any_element()
+                body.child(groups).child(panel.child(handle))
             }
+            .into_any_element()
         } else {
             groups
         };
@@ -4147,7 +4248,9 @@ impl Render for Workspace {
                     )
                 }),
             )
-            .child(self.render_title_bar(window, cx))
+            .when(!self.full_screen_in(None), |this| {
+                this.child(self.render_title_bar(window, cx))
+            })
             // The overlays (a maximized group, the tiles) lie over the whole
             // body, sidebar and all, under the title bar.
             .child(

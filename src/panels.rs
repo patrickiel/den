@@ -42,6 +42,7 @@ pub const SETTINGS: &str = "Settings";
 const PREVIEW: &str = "MarkdownPreview";
 
 pub fn init(cx: &mut App) {
+    crate::pdf::init(cx);
     cx.bind_keys([
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-f", Search, Some(PREVIEW)),
@@ -106,9 +107,16 @@ enum Look {
     Svg,
     /// A picture: shown as one, never as text.
     Image,
+    /// Its pages, drawn by den (`pdf.rs`), never as text.
+    Pdf,
 }
 
 impl Look {
+    /// Shown only, never read as text, edited or saved.
+    fn binary(self) -> bool {
+        matches!(self, Look::Image | Look::Pdf)
+    }
+
     fn of(path: &Path) -> Self {
         match path
             .extension()
@@ -120,6 +128,7 @@ impl Look {
             "md" | "markdown" => Look::Markdown,
             "svg" => Look::Svg,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" => Look::Image,
+            "pdf" => Look::Pdf,
             _ => Look::Text,
         }
     }
@@ -142,6 +151,8 @@ pub struct FilePanel {
     view: Option<(String, String)>,
     /// The page of an extension's file view, once the extension loaded one.
     page: Option<Page>,
+    /// A PDF's pages.
+    pdf: Option<Entity<crate::pdf::PdfView>>,
     /// The extension was told its view shows, since it was last picked.
     announced: bool,
     /// Holds the keyboard while a file view shows, so keys never reach the
@@ -195,7 +206,7 @@ struct PreviewFind {
 impl FilePanel {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let look = Look::of(&path);
-        let (text, encoding, error) = if look == Look::Image {
+        let (text, encoding, error) = if look.binary() {
             (
                 String::new(),
                 "utf8".to_string(),
@@ -320,6 +331,9 @@ impl FilePanel {
             }));
         }
 
+        let pdf =
+            (look == Look::Pdf).then(|| cx.new(|cx| crate::pdf::PdfView::new(path.clone(), cx)));
+
         cx.defer_in(window, |this, _, cx| {
             this.refresh_git_base(cx);
             // Opened showing a file view: its extension hears of it.
@@ -334,6 +348,7 @@ impl FilePanel {
             find: None,
             view,
             page: None,
+            pdf,
             announced: false,
             view_focus: cx.focus_handle(),
             svg: None,
@@ -371,7 +386,7 @@ impl FilePanel {
     /// Read the file from the git index again (after a save, a stage, a
     /// checkout), in the background, and mark the lines anew.
     pub fn refresh_git_base(&mut self, cx: &mut Context<Self>) {
-        if self.look == Look::Image || self.untitled {
+        if self.look.binary() || self.untitled {
             return;
         }
         let path = self.path.clone();
@@ -455,7 +470,10 @@ impl FilePanel {
     /// Take what is on disk now (an agent edited the file, `git checkout`),
     /// keeping the cursor. A tab with unsaved changes keeps them.
     pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.look == Look::Image || self.untitled {
+        if let Some(pdf) = &self.pdf {
+            pdf.update(cx, |pdf, cx| pdf.reload(cx));
+        }
+        if self.look.binary() || self.untitled {
             return cx.notify();
         }
         self.refresh_git_base(cx);
@@ -482,7 +500,7 @@ impl FilePanel {
     }
 
     fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
-        if self.look == Look::Image {
+        if self.look.binary() {
             return;
         }
         // Where to first; formatted by what the name it gets says.
@@ -617,7 +635,7 @@ impl FilePanel {
             _ = this.update_in(cx, |this, window, cx| {
                 // Text it stays, whatever the name; a picture would not save.
                 this.look = match Look::of(&path) {
-                    Look::Image => Look::Text,
+                    look if look.binary() => Look::Text,
                     look => look,
                 };
                 this.set_language(&language_of(&path), cx);
@@ -697,6 +715,9 @@ impl EventEmitter<PaneEvent> for FilePanel {}
 
 impl Focusable for FilePanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if let Some(pdf) = &self.pdf {
+            return pdf.focus_handle(cx);
+        }
         match (self.showing_view(cx), &self.markdown) {
             (Some(_), _) => self.view_focus.clone(),
             (None, Some(markdown)) if self.preview => markdown.read(cx).focus_handle().clone(),
@@ -782,10 +803,13 @@ impl FilePanel {
         cx.notify();
     }
 
-    /// The file views the extensions offer for this file.
+    /// The file views the extensions offer for this file; none for a PDF,
+    /// which has no source to switch to.
     fn file_views(&self, cx: &App) -> Vec<(String, den_extension::FileView)> {
         match cx.try_global::<crate::extensions::Extensions>() {
-            Some(extensions) if !self.untitled => extensions.file_views_for(&self.path),
+            Some(extensions) if !self.untitled && self.pdf.is_none() => {
+                extensions.file_views_for(&self.path)
+            }
             _ => Vec::new(),
         }
     }
@@ -1014,6 +1038,10 @@ impl FilePanel {
                 };
                 picture(img(image), cx)
             }
+            (Look::Pdf, _) => div()
+                .size_full()
+                .children(self.pdf.clone())
+                .into_any_element(),
             _ => picture(img(self.path.clone()), cx),
         }
     }
@@ -1714,7 +1742,7 @@ impl Render for FilePanel {
                 .into_any_element()
         });
         let showing_preview =
-            self.look == Look::Image || showing.is_some() || (previewable && self.preview);
+            self.look.binary() || showing.is_some() || (previewable && self.preview);
         let preview = showing_preview.then(|| match &showing {
             Some(showing) => self.render_page(showing, cx),
             None => self.render_preview(cx),
@@ -1775,7 +1803,7 @@ impl Render for FilePanel {
                     ),
                 }
             }))
-            .when(self.look != Look::Image && !showing_preview, |this| {
+            .when(!self.look.binary() && !showing_preview, |this| {
                 this.child(self.render_status(cx))
             })
     }

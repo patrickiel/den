@@ -404,7 +404,7 @@ impl Render for DragLabel {
     }
 }
 
-struct Nothing;
+pub(crate) struct Nothing;
 
 impl Render for Nothing {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -1742,7 +1742,7 @@ fn group_menu_items(
     let Some(workspace) = this.upgrade() else {
         return menu;
     };
-    let (floating, maximized, tiled, kinds) = {
+    let (floating, maximized, tiled, full_screen, kinds) = {
         let workspace = workspace.read(cx);
         // The kinds of tab this group takes: its menu lists only their buttons.
         let kinds: Vec<Kind> = Kind::ALL
@@ -1753,6 +1753,7 @@ fn group_menu_items(
             workspace.tree.float_of(group).is_some(),
             workspace.is_maximized(group, false),
             workspace.is_maximized(group, true),
+            workspace.is_full_screen(group),
             kinds,
         )
     };
@@ -1802,6 +1803,17 @@ fn group_menu_items(
                 |this, group, window, cx| this.toggle_maximize(group, true, window, cx),
             )
             .icon(Icon::new(IconName::LayoutGrid)),
+        )
+        .item(
+            item(
+                if full_screen {
+                    "Exit Full Screen"
+                } else {
+                    "Full Screen"
+                },
+                |this, group, window, cx| this.toggle_full_screen(group, window, cx),
+            )
+            .icon(Icon::new(IconName::Fullscreen)),
         )
         .separator()
         .map(|menu| window_items(menu, &this, group, floating))

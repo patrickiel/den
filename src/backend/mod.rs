@@ -10,6 +10,7 @@ pub mod extensions;
 pub mod format;
 pub mod git;
 pub mod http;
+pub mod pdf;
 pub mod process;
 pub mod search;
 pub mod watch;

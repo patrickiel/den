@@ -391,6 +391,10 @@ pub struct AppState {
     /// The view last picked for Markdown and SVG files: preview, not source.
     pub preview_markdown: bool,
     pub preview_svg: bool,
+    /// PDFs show one whole page at a time, and two side by side; as last
+    /// picked.
+    pub pdf_whole_pages: bool,
+    pub pdf_two_pages: bool,
     /// The extension's file view last picked, by the extension's id and the
     /// view's: files it is offered for open showing it, until Source or
     /// Preview is picked on one of them.
