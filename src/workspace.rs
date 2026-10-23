@@ -440,8 +440,8 @@ pub struct Workspace {
     history: History,
     /// Going back or forward: what is shown now is no new visit.
     navigating: bool,
-    /// The tabs by when they last had focus, the latest last, for closing
-    /// the stalest file past the tab limit.
+    /// The tabs by when they were opened or last had focus, the latest last,
+    /// for closing the stalest file past the tab limit.
     shown: Vec<PaneId>,
     explorer: Entity<Explorer>,
     search: Entity<SearchView>,
@@ -852,6 +852,7 @@ impl Workspace {
         let id = self.tree.mint();
         let pane: PaneRef = std::rc::Rc::new(pane);
         self.track(id, pane, window, cx);
+        self.shown.push(id);
         self.tree.add_tab(group, id, None, true);
         self.set_active_group(group, cx);
         if focus {
@@ -1690,6 +1691,11 @@ impl Workspace {
                 let pane = make(window, cx);
                 let group = self.target_group(kind);
                 self.add_pane(pane, group, focus, window, cx);
+                if kind == Kind::Files
+                    && let Some(added) = self.tree.active_tab(group)
+                {
+                    self.limit_file_tabs(group, added, cx);
+                }
             }
         }
     }
@@ -1740,8 +1746,9 @@ impl Workspace {
         }
     }
 
-    /// Past the tab limit (Settings > Tabs), close `group`'s file tabs
-    /// focused longest ago, never `keep` or one with unsaved changes.
+    /// Past the tab limit (Settings > Tabs), close `group`'s file and diff
+    /// tabs opened or focused longest ago, never `keep` or one with unsaved
+    /// changes.
     fn limit_file_tabs(&mut self, group: NodeId, keep: PaneId, cx: &mut Context<Self>) {
         let limit = Settings::get(cx).max_file_tabs;
         if limit == 0 {
@@ -1752,11 +1759,12 @@ impl Workspace {
             .tabs(group)
             .iter()
             .copied()
-            .filter(|id| self.pane_as::<FilePanel>(*id).is_some())
+            .filter(|id| {
+                self.pane_as::<FilePanel>(*id).is_some() || self.pane_as::<DiffPanel>(*id).is_some()
+            })
             .collect();
         while files.len() > limit {
-            // Never focused (back with the session, or a preview) counts as
-            // oldest.
+            // Untouched since coming back with the session counts as oldest.
             let Some(stalest) = files
                 .iter()
                 .copied()
