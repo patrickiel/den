@@ -181,16 +181,16 @@ All three methods run on the extension's own thread, one at a time. While `event
 | `set_buttons(root, &[Button])` | Sets the extension's title-bar and Source Control buttons for the windows on `root`; see [Title-bar buttons](#title-bar-buttons) |
 | `run_in_terminal(root, command, cwd)` | Opens a terminal tab in the window on `root` and runs `command` in its shell (PowerShell by default), in `cwd` or else the root |
 | `open_file(root, path, line)` | Opens `path` in an editor tab of the window on `root` (or switches to its tab), at `line` (from 1) if given, scrolled to the top. A relative path counts from `root`. |
-| `open_browser(root, url, tab)` | Opens `url` in a browser tab of the window on `root`, where browsers go. With a `tab` name, the extension's tab of that name is reused (loaded at `url`, again if it is there) and shown, without taking the keyboard; den remembers it across restarts |
-| `browser_script(root, tab, script)` | Runs JavaScript in the page of the extension's browser tab `tab`; logged when that tab isn't open |
+| `open_browser(root, url, tab)` | Opens `url` in the system's browser; `tab` is no longer used |
+| `browser_script(root, tab, script)` | Does nothing: den has no browser tabs of its own since 0.32, and can't run scripts in the system's browser |
 | `open_view(root, view)` | Opens a tab of the manifest's view `view` in the window on `root`, or shows the open one |
 | `set_view(root, view, &Content)` | Sets what the view shows; the parts the `Content` sets replace what was there |
 | `prompt(root, &Prompt)` | Asks the user in a dialog (text boxes, checkboxes, choices); the answer comes as `prompt_answered` |
 | `open_diff(root, &Diff)` | Shows a commit's change to a file, or its uncommitted change, side by side |
 | `copy(text)` | Puts `text` on the clipboard |
 | `set_file_views(root, &[FileView])` | Offers ways of showing files beside Source and Preview, for the windows on `root`; see [File views](#file-views) |
-| `load_file_view(root, path, view, url)` | Loads `url` in the page of file view `view` of `path`'s tab (made now if it has none); logged when the file has no tab open |
-| `file_view_script(root, path, view, script)` | Runs JavaScript in that page; logged when there is none yet |
+| `load_file_view(root, path, view, url)` | Opens `url`, the page of file view `view` of `path`, in the system's browser |
+| `file_view_script(root, path, view, script)` | Does nothing, as `browser_script` |
 | `call(method, args)` | Calls any host method by name with JSON arguments, such as `info` (no arguments), which returns `{ id, den_version, data_dir, api }` |
 
 Every method takes a **`root`**: the folder of a den window, exactly as den named it in `workspace_opened` (or in any event's `root`). Pass the string back unchanged; den finds the window by it. If no window is open on that root, the call does nothing (it's logged).
@@ -213,7 +213,7 @@ The typed methods return `Result<(), String>`. `log` and `toast` ignore errors.
 | `VIEW_CLOSED` | `view_closed` | `{ root, view }` | That tab closed |
 | `VIEW_ACTION` | `view_action` | `{ root, view, action, row, data, value }` | Something was clicked, picked or typed in a view |
 | `PROMPT_ANSWERED` | `prompt_answered` | `{ root, id, values }` | A prompt was answered; `values` is null when cancelled |
-| `FILE_VIEW_SHOWN` | `file_view_shown` | `{ root, path, view, line, url }` | A file's tab switched to one of its file views, or came back showing one after a restart; `line` is the file's cursor (from 1), `url` the page's address, null before `load_file_view` |
+| `FILE_VIEW_SHOWN` | `file_view_shown` | `{ root, path, view, line, url }` | One of its file views was clicked on a file's tab; `line` is the file's cursor (from 1), `url` always null |
 | `SETTINGS_CHANGED` | `settings_changed` | `{ settings }` | The user changed one of its settings; `settings` holds every value, like `Context::settings` |
 
 ## Settings
@@ -341,13 +341,11 @@ What happens comes back as `view_action`: a toolbar item's, menu item's, span's 
 
 A view with `"location": "sidebar"` in the manifest shows in the window's **sidebar** instead, beside the Explorer, Search and Source Control. It has a button of its own in the title bar, after den's, while the extension runs; the button, or `open_view`, shows it there. den opens it (sending `view_opened`) the first time it shows, and keeps it with the folder's session, opening it again at start like a restored tab. It stays open while the window does, so `view_closed` comes when the window closes. A tab of the view left from before it moved to the sidebar moves there on the next `open_view`.
 
-A view can sit beside a **browser tab** the extension drives: `open_browser` with a `tab` name keeps one tab for it (a preview, say), and `browser_script` runs JavaScript in that page, to move it along without reloading it. Together with `cursor_moved`, that is a preview that follows the editor; [`slidev`](https://github.com/patrickiel/slidev) works this way.
-
 `prompt` asks with a dialog of `Field`s (`text`, `checkbox`, `choice`); OK sends `values` by field id, and a `required` text box keeps OK from closing while it is empty. `open_diff` shows a commit's change (`hash`, `parent`, `old_path`) or the uncommitted one (`staged`) in den's diff tab. `git-graph` uses all of these.
 
 ## File views
 
-A file view is a way of showing a file beside den's own Source and Preview, as a button in the switch above the files it matches. Picked, the editor gives way to a page the extension loads: the slide under the cursor, a rendered diagram, a running app.
+A file view is a way of showing a file beside den's own Source and Preview, as a button in the switch above the files it matches. Clicked, it opens a page the extension serves in the system's browser: the slide under the cursor, a drawing to edit, a running app.
 
 ```rust
 use den_extension::FileView;
@@ -365,8 +363,8 @@ host.load_file_view(&root, path, "slide", &format!("http://localhost:3030/{}", s
 ```
 
 - Like title-bar buttons, file views belong to a **folder**, and each call replaces the extension's views for that root; an empty list removes them. A view shows above the files under `root` whose path its `file_pattern` matches; one that doesn't compile matches none.
-- Picking it sends `file_view_shown` with where the file's cursor is. Answer with `load_file_view`; until then the tab says it's waiting for the extension. den remembers the choice per tab, and sends `file_view_shown` again after a restart, once the extension has set its views.
-- The page lives as long as the tab: switching to Source and back keeps it, and `url` in `file_view_shown` says where it is, so it can be moved along with `file_view_script` rather than loaded again.
+- Clicking it sends `file_view_shown` with where the file's cursor is. Answer with `load_file_view`, which opens the page in the system's browser; the file's tab stays on its editor.
+- den can't reach into that page afterwards, so a page that should follow the file (its edits, the cursor) has to ask the extension's server itself.
 
 ## Threads, state and shutdown
 

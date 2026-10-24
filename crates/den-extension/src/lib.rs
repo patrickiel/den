@@ -98,12 +98,10 @@ pub mod events {
     /// `{ "root", "id", "values" }`, `values` holding each field's value by
     /// its id, or null when the user cancelled.
     pub const PROMPT_ANSWERED: &str = "prompt_answered";
-    /// A file's tab switched to one of the extension's
-    /// [`FileView`](crate::FileView)s, or came back showing it after a
-    /// restart: `{ "root", "path", "view", "line", "url" }`. `line` is where
-    /// the file's cursor is (from 1), `url` the address of the view's page,
-    /// null until [`Host::load_file_view`](crate::Host::load_file_view)
-    /// loaded one.
+    /// One of the extension's [`FileView`](crate::FileView)s was clicked on
+    /// a file's tab: `{ "root", "path", "view", "line", "url" }`. `line` is
+    /// where the file's cursor is (from 1); `url` is always null, as the
+    /// view's page opens in the system's browser, not in den.
     pub const FILE_VIEW_SHOWN: &str = "file_view_shown";
 }
 
@@ -420,9 +418,9 @@ impl ButtonLocation {
 
 /// A way of showing a file beside den's Source and Preview, which an
 /// extension adds with [`Host::set_file_views`]: a button in the switch above
-/// the files its `file_pattern` matches. Picked, the file's editor gives way
-/// to a page the extension loads with [`Host::load_file_view`], after
-/// [`events::FILE_VIEW_SHOWN`] says so.
+/// the files its `file_pattern` matches. Clicked, it sends
+/// [`events::FILE_VIEW_SHOWN`], and the page the extension then loads with
+/// [`Host::load_file_view`] opens in the system's browser.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileView {
     /// The extension's own name for it, sent back when it shows.
@@ -571,10 +569,8 @@ impl Host {
         .map(drop)
     }
 
-    /// Open `url` in a browser tab of the window on `root`, where browsers
-    /// go. With a `tab` name, the extension's browser tab of that name is
-    /// reused (loaded at `url`, again if it is there) and shown,
-    /// without taking the keyboard; it is found again after a restart.
+    /// Open `url` in the system's browser. `root` and `tab` are no longer
+    /// used: den had browser tabs of its own before 0.32.
     pub fn open_browser(&self, root: &str, url: &str, tab: Option<&str>) -> Result<(), String> {
         self.call(
             "open_browser",
@@ -583,9 +579,8 @@ impl Host {
         .map(drop)
     }
 
-    /// Run JavaScript `script` in the page of the extension's browser tab
-    /// `tab` (see [`Host::open_browser`]) in the window on `root`. Nothing
-    /// happens when no such tab is open (it's logged).
+    /// Does nothing since den 0.32: pages open in the system's browser,
+    /// where den cannot run scripts.
     pub fn browser_script(&self, root: &str, tab: &str, script: &str) -> Result<(), String> {
         self.call(
             "browser_script",
@@ -652,9 +647,8 @@ impl Host {
         .map(drop)
     }
 
-    /// Load `url` in the page of file view `view` of the tab of `path` (a
-    /// relative path counts from `root`), whether it shows now or not.
-    /// Logged when that file has no tab open.
+    /// Open `url`, the page of file view `view` of `path`, in the system's
+    /// browser.
     pub fn load_file_view(
         &self,
         root: &str,
@@ -669,8 +663,8 @@ impl Host {
         .map(drop)
     }
 
-    /// Run JavaScript `script` in the page of file view `view` of the tab
-    /// of `path`. Logged when there is no such page yet.
+    /// Does nothing since den 0.32: file views' pages open in the system's
+    /// browser, where den cannot run scripts.
     pub fn file_view_script(
         &self,
         root: &str,

@@ -17,18 +17,16 @@ pub enum Kind {
     Files,
     Terminals,
     Agents,
-    Browsers,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Files, Kind::Terminals, Kind::Agents, Kind::Browsers];
+    pub const ALL: [Kind; 3] = [Kind::Files, Kind::Terminals, Kind::Agents];
 
     pub fn label(self) -> &'static str {
         match self {
             Kind::Files => "Files",
             Kind::Terminals => "Terminals",
             Kind::Agents => "Agents",
-            Kind::Browsers => "Browsers",
         }
     }
 
@@ -37,7 +35,6 @@ impl Kind {
             Kind::Files => IconName::FileText,
             Kind::Terminals => IconName::SquareTerminal,
             Kind::Agents => IconName::Bot,
-            Kind::Browsers => IconName::Globe,
         }
     }
 }
@@ -46,6 +43,15 @@ impl Kind {
 pub struct GroupDefault {
     pub kind: Kind,
     pub node: NodeId,
+}
+
+/// Saved defaults, but those of kinds den no longer has (browsers).
+pub fn known<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<GroupDefault>, D::Error> {
+    let saved = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(saved
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
 }
 
 #[derive(Clone, Debug, Default)]

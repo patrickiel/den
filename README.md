@@ -1,6 +1,6 @@
 # <img src="docs/images/title-icon.png" alt="den" width="48" height="56" align="absmiddle"> den
 
-**Terminals, agents, files and browsers in one native window, each exactly where you want it.**
+**Terminals, agents and files in one native window, each exactly where you want it.**
 
 [![Latest release](https://img.shields.io/github/v/release/patrickiel/den?label=release)](https://github.com/patrickiel/den/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS%20arm64-0078D6)](https://github.com/patrickiel/den/releases/latest)
@@ -12,7 +12,7 @@
 
 In VS Code, terminals are squeezed into a bottom panel and a file opens wherever focus happens to be, often right on top of what you were working on. den lets you decide where everything goes.
 
-- **A layout you design.** Split the window any way you like, then give each area a job: terminals here, files there, agents on the right, the browser below. Open a file and it lands in the files area, every time. Each project remembers its layout, and you can save your favorites as presets.
+- **A layout you design.** Split the window any way you like, then give each area a job: terminals here, files there, agents on the right. Open a file and it lands in the files area, every time. Each project remembers its layout, and you can save your favorites as presets.
 - **Native and fast.** Written in Rust on GPUI, the GPU-rendered UI framework behind Zed. No Electron, no web view for the UI.
 - **Feels like VS Code.** The same shortcuts, the same command palette (Ctrl+Shift+P) and Quick Open (Ctrl+P), your VS Code color themes, and an Extensions view to add features.
 - **Made for coding agents.** Claude Code, Codex or any command is one click away. den marks the tab when an agent finishes or needs your input, and Claude Code sessions resume after a restart.
@@ -21,7 +21,7 @@ In VS Code, terminals are squeezed into a bottom panel and a file opens wherever
 
 - **Terminals** for PowerShell, bash, zsh and WSL.
 - **Editor** with syntax highlighting, git changes in the gutter and Format Document using your project's own formatter.
-- **Browser tabs** next to your code, so `localhost` sits beside the files you're changing. One button opens the project's dev server, its port read from the project itself (`vite.config`, `package.json`, `.env`, `launchSettings.json`, …).
+- **Your dev server one click away.** A button opens the project's dev server in your browser, its port read from the project itself (`vite.config`, `package.json`, `.env`, `launchSettings.json`, …); link presets open any other page.
 - **Explorer, search and source control** with diffs, a commit graph and commit messages written by a local AI model.
 - **Automatic updates** from signed releases.
 

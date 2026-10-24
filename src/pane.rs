@@ -24,8 +24,6 @@ pub enum PaneEvent {
         line: Option<u32>,
         column: Option<u32>,
     },
-    /// Open a URL in a new browser tab (a page's link to a new window).
-    OpenBrowser(String),
     /// The program in it wants the user.
     Alert {
         kind: AlertKind,
@@ -35,14 +33,13 @@ pub enum PaneEvent {
     Saved(std::path::PathBuf),
     /// The cursor in this file moved to another line (from 1).
     Cursor { path: std::path::PathBuf, line: u32 },
-    /// This file's tab switched to extension `id`'s file view `view`; the
-    /// cursor is on `line` (from 1), the view's page at `url` if it has one.
+    /// Extension `id`'s file view `view` was clicked on this file's tab;
+    /// the cursor is on `line` (from 1).
     FileView {
         id: String,
         view: String,
         path: std::path::PathBuf,
         line: u32,
-        url: Option<String>,
     },
 }
 
@@ -145,9 +142,6 @@ impl<T: Pane> PaneHandle for Entity<T> {
                 PaneEvent::OpenFile { path, line, column } => {
                     this.open_file_at(path.clone(), *line, *column, window, cx)
                 }
-                PaneEvent::OpenBrowser(url) => {
-                    this.open_browser(None, Some(url.clone()), window, cx)
-                }
                 PaneEvent::Alert { kind, message } => {
                     this.pane_alert(id, *kind, message.clone(), window, cx)
                 }
@@ -166,16 +160,7 @@ impl<T: Pane> PaneHandle for Entity<T> {
                     view,
                     path,
                     line,
-                    url,
-                } => crate::extensions::file_view_shown(
-                    id,
-                    &this.root,
-                    path,
-                    view,
-                    *line,
-                    url.as_deref(),
-                    cx,
-                ),
+                } => crate::extensions::file_view_shown(id, &this.root, path, view, *line, cx),
             },
         )
     }

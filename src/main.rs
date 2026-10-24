@@ -67,7 +67,6 @@ actions!(
         SplitRight,
         SplitDown,
         NewTerminal,
-        NewBrowser,
         OpenDevServer,
         ReplaceInFiles,
         CloseTab,
@@ -235,8 +234,8 @@ pub(crate) fn set_menus(cx: &mut App) {
                 MenuItem::action("Close Group", CloseGroup),
             ],
         ),
-        // The system's actions where a native view (a browser tab, a file
-        // dialog) has the focus; den's text fields and terminals otherwise.
+        // The system's actions where a native view (a file dialog) has the
+        // focus; den's text fields and terminals otherwise.
         menu(
             "Edit",
             vec![
@@ -284,7 +283,6 @@ pub(crate) fn set_menus(cx: &mut App) {
             "Terminal",
             vec![
                 MenuItem::action("New Terminal", NewTerminal),
-                MenuItem::action("New Browser", NewBrowser),
                 MenuItem::action("Open Dev Server", OpenDevServer),
                 MenuItem::action("Claude Code", NewAgent),
             ],
@@ -370,7 +368,6 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<SplitRight>,
         forward::<SplitDown>,
         forward::<NewTerminal>,
-        forward::<NewBrowser>,
         forward::<OpenDevServer>,
         forward::<ReplaceInFiles>,
         forward::<CloseTab>,
@@ -562,12 +559,6 @@ fn wait_for_exit(pid: u32) -> bool {
 fn main() {
     #[cfg(target_os = "macos")]
     inherit_login_path();
-    // GPUI composites its frame topmost over child windows through
-    // DirectComposition, which would hide the browser tabs' WebView2.
-    // Presenting to the window directly puts child windows on top. Read once
-    // when the platform starts, so set it before anything else.
-    // SAFETY: nothing else runs yet, so no thread reads the environment.
-    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "1") };
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     // A restart (see `restart`): once the den before has quit.
     if args.len() >= 2 && args[0] == "--wait-for" {

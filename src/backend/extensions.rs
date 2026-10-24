@@ -154,20 +154,9 @@ pub enum Report {
         line: Option<u32>,
         column: Option<u32>,
     },
-    /// A browser tab at `url` in the window on `root`; its tab `tab` if named.
-    OpenBrowser {
-        id: String,
-        root: String,
-        url: String,
-        tab: Option<String>,
-    },
-    /// JavaScript to run in its browser tab `tab` of the window on `root`.
-    BrowserScript {
-        id: String,
-        root: String,
-        tab: String,
-        script: String,
-    },
+    /// A page to open in the system's browser (`open_browser`,
+    /// `load_file_view`).
+    OpenUrl(String),
     /// A tab of its view `view` in the window on `root`.
     OpenView {
         id: String,
@@ -198,22 +187,6 @@ pub enum Report {
         id: String,
         root: String,
         views: Vec<FileView>,
-    },
-    /// A URL to load in the page of its file view `view` of `path`'s tab.
-    LoadFileView {
-        id: String,
-        root: String,
-        path: String,
-        view: String,
-        url: String,
-    },
-    /// JavaScript to run in the page of its file view `view` of `path`'s tab.
-    FileViewScript {
-        id: String,
-        root: String,
-        path: String,
-        view: String,
-        script: String,
     },
 }
 
@@ -414,27 +387,17 @@ impl HostCtx {
                     column: number("column"),
                 })
             }
+            // den has no pages of its own: they open in the system's browser,
+            // where it cannot run scripts, so those do nothing.
             "open_browser" => {
-                let (root, url) = (string(args, "root", method)?, string(args, "url", method)?);
-                self.report(Report::OpenBrowser {
-                    id: self.id.clone(),
-                    root,
-                    url,
-                    tab: args["tab"].as_str().map(str::to_string),
-                })
+                string(args, "root", method)?;
+                self.report(Report::OpenUrl(string(args, "url", method)?))
             }
             "browser_script" => {
-                let (root, tab, script) = (
-                    string(args, "root", method)?,
-                    string(args, "tab", method)?,
-                    string(args, "script", method)?,
-                );
-                self.report(Report::BrowserScript {
-                    id: self.id.clone(),
-                    root,
-                    tab,
-                    script,
-                })
+                for key in ["root", "tab", "script"] {
+                    string(args, key, method)?;
+                }
+                Ok(Value::Null)
             }
             "open_view" => {
                 let (root, view) = (string(args, "root", method)?, self.view(args, method)?);
@@ -483,34 +446,16 @@ impl HostCtx {
                 })
             }
             "load_file_view" => {
-                let (root, path, view, url) = (
-                    string(args, "root", method)?,
-                    string(args, "path", method)?,
-                    string(args, "view", method)?,
-                    string(args, "url", method)?,
-                );
-                self.report(Report::LoadFileView {
-                    id: self.id.clone(),
-                    root,
-                    path,
-                    view,
-                    url,
-                })
+                for key in ["root", "path", "view"] {
+                    string(args, key, method)?;
+                }
+                self.report(Report::OpenUrl(string(args, "url", method)?))
             }
             "file_view_script" => {
-                let (root, path, view, script) = (
-                    string(args, "root", method)?,
-                    string(args, "path", method)?,
-                    string(args, "view", method)?,
-                    string(args, "script", method)?,
-                );
-                self.report(Report::FileViewScript {
-                    id: self.id.clone(),
-                    root,
-                    path,
-                    view,
-                    script,
-                })
+                for key in ["root", "path", "view", "script"] {
+                    string(args, key, method)?;
+                }
+                Ok(Value::Null)
             }
             _ => Err(format!(
                 "den has no method \"{method}\" (extension API {API_VERSION})"
@@ -1158,17 +1103,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(rx.try_recv().unwrap(), Report::OpenBrowser { url, tab: Some(tab), .. } if url == "http://localhost:3030" && tab == "preview")
+            matches!(rx.try_recv().unwrap(), Report::OpenUrl(url) if url == "http://localhost:3030")
         );
-        ctx.call(
-            "open_browser",
-            &json!({ "root": "C:/p", "url": "http://localhost:3030" }),
-        )
-        .unwrap();
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            Report::OpenBrowser { tab: None, .. }
-        ));
         assert!(
             ctx.call("open_browser", &json!({ "root": "C:/p" }))
                 .unwrap_err()
@@ -1179,9 +1115,7 @@ mod tests {
             &json!({ "root": "C:/p", "tab": "preview", "script": "1" }),
         )
         .unwrap();
-        assert!(
-            matches!(rx.try_recv().unwrap(), Report::BrowserScript { tab, script, .. } if tab == "preview" && script == "1")
-        );
+        assert!(rx.try_recv().is_err());
         assert!(
             ctx.call(
                 "browser_script",
@@ -1213,7 +1147,7 @@ mod tests {
         ctx.call("load_file_view", &with("url", "http://localhost:3030/2"))
             .unwrap();
         assert!(
-            matches!(rx.try_recv().unwrap(), Report::LoadFileView { path, view, url, .. } if path == "slides.md" && view == "slide" && url == "http://localhost:3030/2")
+            matches!(rx.try_recv().unwrap(), Report::OpenUrl(url) if url == "http://localhost:3030/2")
         );
         assert!(
             ctx.call("load_file_view", &page)
@@ -1221,9 +1155,7 @@ mod tests {
                 .contains("\"url\"")
         );
         ctx.call("file_view_script", &with("script", "1")).unwrap();
-        assert!(
-            matches!(rx.try_recv().unwrap(), Report::FileViewScript { script, .. } if script == "1")
-        );
+        assert!(rx.try_recv().is_err());
         assert!(
             ctx.call("file_view_script", &page)
                 .unwrap_err()

@@ -23,14 +23,8 @@ impl FloatWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let weak = workspace.downgrade();
-        window.on_window_should_close(cx, move |window, cx| {
-            let from = crate::browser::hwnd(window);
-            _ = weak.update(cx, |workspace, cx| {
-                workspace.dock_float(id, false, cx);
-                if let Some(from) = from {
-                    workspace.rehome_browsers(from, cx);
-                }
-            });
+        window.on_window_should_close(cx, move |_, cx| {
+            _ = weak.update(cx, |workspace, cx| workspace.dock_float(id, false, cx));
             true
         });
         let _subscriptions = vec![

@@ -387,34 +387,7 @@ fn on_report(report: Report, cx: &mut App) {
             line,
             column,
         } => return open_file(Path::new(&root), PathBuf::from(path), line, column, cx),
-        Report::OpenBrowser { id, root, url, tab } => {
-            return in_window(
-                Path::new(&root),
-                "open_browser",
-                cx,
-                |workspace, window, cx| workspace.open_extension_browser(id, url, tab, window, cx),
-            );
-        }
-        Report::BrowserScript {
-            id,
-            root,
-            tab,
-            script,
-        } => {
-            return in_window(
-                Path::new(&root),
-                "browser_script",
-                cx,
-                |workspace, _, cx| {
-                    if !workspace.extension_browser_script(&id, &tab, &script, cx) {
-                        backend::log(
-                            &id,
-                            &format!("browser_script: no browser tab \"{tab}\" is open"),
-                        );
-                    }
-                },
-            );
-        }
+        Report::OpenUrl(url) => return crate::browser::open(&url, cx),
         Report::OpenView { id, root, view } => {
             return in_window(
                 Path::new(&root),
@@ -462,53 +435,6 @@ fn on_report(report: Report, cx: &mut App) {
                 extensions.file_views.push(FileViews { id, root, views });
             }
             return;
-        }
-        Report::LoadFileView {
-            id,
-            root,
-            path,
-            view,
-            url,
-        } => {
-            let path = Path::new(&root).join(path);
-            return in_window(
-                Path::new(&root),
-                "load_file_view",
-                cx,
-                |workspace, window, cx| {
-                    if !workspace.load_file_view(&path, &id, &view, &url, window, cx) {
-                        backend::log(
-                            &id,
-                            &format!("load_file_view: {} has no tab open", path.display()),
-                        );
-                    }
-                },
-            );
-        }
-        Report::FileViewScript {
-            id,
-            root,
-            path,
-            view,
-            script,
-        } => {
-            let path = Path::new(&root).join(path);
-            return in_window(
-                Path::new(&root),
-                "file_view_script",
-                cx,
-                |workspace, _, cx| {
-                    if !workspace.file_view_script(&path, &id, &view, &script, cx) {
-                        backend::log(
-                            &id,
-                            &format!(
-                                "file_view_script: {} has no page of \"{view}\" open",
-                                path.display()
-                            ),
-                        );
-                    }
-                },
-            );
         }
     };
     let extensions = cx.global_mut::<Extensions>();
@@ -773,21 +699,14 @@ pub fn button_clicked(id: &str, root: &Path, button: &str, cx: &App) {
     );
 }
 
-/// A file's tab in the window on `root` switched to extension `id`'s file
-/// view `view` (`den_extension::events::FILE_VIEW_SHOWN`).
-pub fn file_view_shown(
-    id: &str,
-    root: &Path,
-    path: &Path,
-    view: &str,
-    line: u32,
-    url: Option<&str>,
-    cx: &App,
-) {
+/// Extension `id`'s file view `view` was clicked on a file's tab in the
+/// window on `root` (`den_extension::events::FILE_VIEW_SHOWN`). It has no
+/// page in den, so `url` is always null.
+pub fn file_view_shown(id: &str, root: &Path, path: &Path, view: &str, line: u32, cx: &App) {
     send(
         id,
         den_extension::events::FILE_VIEW_SHOWN,
-        serde_json::json!({ "root": root, "path": path, "view": view, "line": line, "url": url }),
+        serde_json::json!({ "root": root, "path": path, "view": view, "line": line, "url": null }),
         cx,
     );
 }

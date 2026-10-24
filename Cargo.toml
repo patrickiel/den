@@ -5,7 +5,7 @@ members = [".", "crates/den-extension", "examples/hello-extension"]
 name = "den"
 version = "0.31.0"
 edition = "2024"
-description = "A project terminal for Windows and macOS: split panes, editor, browser, explorer, search and source control"
+description = "A project terminal for Windows and macOS: split panes, editor, explorer, search and source control"
 
 [dependencies]
 anyhow = "1"
@@ -38,10 +38,8 @@ trash = "5"
 similar = "2"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
-wry = "0.57"
 smallvec = "1"
 encoding_rs = "0.8"
-raw-window-handle = "0.6"
 minisign-verify = "0.2"
 libloading = "0.8"
 # PDF tabs: PDFium, bound at run time to the library den downloads (`pdf.rs`).
@@ -52,9 +50,6 @@ den-extension = { path = "crates/den-extension" }
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
-# The version wry builds; for what wry leaves out of WebView2: a page's full
-# screen event, and its keys.
-webview2-com = "0.39"
 # The version gpui builds; for a monitor's scale under a point (floating windows).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
@@ -63,8 +58,6 @@ windows = { version = "0.62", features = [
     # The updater closes the other dens before the installer runs.
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
-    # Clicks outside a browser page take the keyboard back from it.
-    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [build-dependencies]

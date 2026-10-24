@@ -37,7 +37,6 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
 use crate::{
-    browser::BrowserPanel,
     defaults::Kind,
     diff::DiffPanel,
     layout::{Axis, Node, NodeId, PaneId, Side},
@@ -1225,7 +1224,7 @@ impl Workspace {
             .collect();
 
         let current = self.defaults.get(group);
-        // The buttons that open something here: the shell, the browser and
+        // The buttons that open something here: the shell, the dev server and
         // the pinned presets; a group that is the default of another kind does
         // not get the buttons for this one. A rule sets them apart from the
         // buttons that act on the group itself.
@@ -1247,27 +1246,10 @@ impl Workspace {
                     .into_any_element(),
             );
         }
-        if buttons.browser && self.defaults.allows(group, Kind::Browsers) {
-            openers.push(
-                Button::new(("group-browser", group))
-                    .small()
-                    .ghost()
-                    .icon(Icon::new(IconName::Globe))
-                    .tooltip(crate::keymap::with_keys(
-                        "New Browser",
-                        &crate::NewBrowser,
-                        cx,
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_browser(Some(group), None, window, cx)
-                    }))
-                    .into_any_element(),
-            );
-        }
         // The project's dev server, found from the project: its port, as a
-        // browser preset shows.
+        // link preset shows.
         if buttons.dev_server
-            && self.defaults.allows(group, Kind::Browsers)
+            && self.defaults.allows(group, Kind::Terminals)
             && let Some(server) = self.dev_servers.first()
         {
             let look = crate::settings::Preset {
@@ -1285,7 +1267,7 @@ impl Workspace {
                         cx,
                     ))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_dev_server(Some(group), window, cx)
+                        this.open_dev_server(window, cx)
                     }))
                     .into_any_element(),
             );
@@ -1338,12 +1320,7 @@ impl Workspace {
                                 .tooltip(tooltip)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if launch.browser {
-                                        this.open_browser(
-                                            Some(group),
-                                            Some(launch.command.clone()),
-                                            window,
-                                            cx,
-                                        );
+                                        crate::browser::open(&launch.command, cx);
                                     } else {
                                         this.open_terminal(
                                             Some(group),
@@ -1638,27 +1615,6 @@ impl Workspace {
                 .disabled(!path.is_file()),
             );
             menu = path_items(menu, this, &path, &self.root);
-        } else if let Ok(browser) = view.clone().downcast::<BrowserPanel>() {
-            let url = browser.read(cx).url().to_string();
-            let open = url.clone();
-            menu = menu
-                .separator()
-                .item(
-                    menu_action(this, "Copy URL", move |_, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))
-                    })
-                    .icon(Icon::new(IconName::Link)),
-                )
-                .item(
-                    menu_action(this, "Open in Default Browser", move |_, _, cx| {
-                        cx.open_url(&open)
-                    })
-                    .icon(Icon::new(IconName::SquareArrowOutUpRight)),
-                )
-                .item(
-                    menu_action(this, "Reload", move |_, _, cx| browser.read(cx).reload())
-                        .icon(Icon::new(IconName::RotateCw)),
-                );
         } else if let Ok(terminal) = view.clone().downcast::<TerminalPanel>() {
             let cwd = terminal.read(cx).cwd().to_string_lossy().to_string();
             menu = menu
@@ -1964,13 +1920,8 @@ fn group_buttons_menu(
                 Rc::new(|s| s.group_buttons.shell = !s.group_buttons.shell),
             ))
         })
-        .when(kinds.contains(&Kind::Browsers), |menu| {
+        .when(kinds.contains(&Kind::Terminals), |menu| {
             menu.item(toggle(
-                "Browser".into(),
-                buttons.browser,
-                Rc::new(|s| s.group_buttons.browser = !s.group_buttons.browser),
-            ))
-            .item(toggle(
                 "Dev server".into(),
                 buttons.dev_server,
                 Rc::new(|s| s.group_buttons.dev_server = !s.group_buttons.dev_server),

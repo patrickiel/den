@@ -154,7 +154,7 @@ function changesPrompt(version: string, lastTag: string | null, log: string): st
   const scale = readFileSync(join(ROOT, "scripts/release-scale.md"), "utf8");
   const parts = [
     "Decide the version bump for the next release of den (a native desktop app for Windows and macOS: a project",
-    "terminal with split panes, editor, browser, explorer, search and source control) and write its release notes,",
+    "terminal with split panes, editor, explorer, search and source control) and write its release notes,",
     "following the scale below. Answer with the structured output only.",
     `\n<scale>\n${scale}\n</scale>`,
     `\nCurrent version: ${version}. ${lastTag ? `Last release: ${lastTag}.` : "There is no earlier release."}`,

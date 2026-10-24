@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::pane::AlertKind;
 use crate::{
     CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
-    FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewBrowser, NewTerminal,
+    FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewTerminal,
     NextTab, OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
     ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight, ToggleSoftWrap,
     backend::watch,
@@ -60,7 +60,7 @@ pub struct LayoutState {
     pub root: Node,
     #[serde(default)]
     pub panes: HashMap<PaneId, PaneState>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::defaults::known")]
     pub defaults: Vec<GroupDefault>,
     #[serde(default)]
     pub active: Option<NodeId>,
@@ -401,9 +401,6 @@ pub struct Workspace {
     hints_at: std::time::Instant,
     /// The numbers fading out, once their modifiers are let go.
     hints_gone: Option<Hints>,
-    /// The windows that drew a frame: before its first, a window has no
-    /// rendered tree to read the focused element's contexts from.
-    drawn: HashSet<AnyWindowHandle>,
     /// Counts the changes of the modifiers: the numbers come after a short
     /// hold, when the modifiers did not change meanwhile.
     hint_seq: u64,
@@ -605,7 +602,6 @@ impl Workspace {
             hints: None,
             hints_at: std::time::Instant::now(),
             hints_gone: None,
-            drawn: HashSet::new(),
             hint_seq: 0,
             flash: None,
             maximized: None,
@@ -696,8 +692,9 @@ impl Workspace {
         let mut panes = HashMap::new();
         for id in tree.panes() {
             match state.panes.get(&id) {
-                // Settings are a dialog now; a tab of them in an older layout goes.
-                Some(saved) if saved.kind == crate::panels::SETTINGS => {
+                // Settings are a dialog now, and pages open in the system's
+                // browser; such a tab in an older layout goes.
+                Some(saved) if saved.kind == crate::panels::SETTINGS || saved.kind == "Browser" => {
                     tree.remove_tab(id);
                 }
                 Some(saved) => {
@@ -1185,13 +1182,8 @@ impl Workspace {
                     });
                 }
             }
-            // Then the windows to close, once the pages in them have a new home.
+            // Then the windows to close.
             for window in gone {
-                if let Ok(Some(from)) =
-                    window.update(cx, |_, window, _| crate::browser::hwnd(window))
-                {
-                    this.update(cx, |this, cx| this.rehome_browsers(from, cx));
-                }
                 _ = window.update(cx, |_, window, _| window.remove_window());
             }
         });
@@ -1273,29 +1265,6 @@ impl Workspace {
         self.move_node(root_id, main, Side::Right, cx);
         if empty_main {
             self.close_group(main, cx);
-        }
-    }
-
-    /// Native window `from` is closing: the browser pages in it move to the
-    /// window their tab is in now (a page dies with its parent window).
-    pub(crate) fn rehome_browsers(&self, from: isize, cx: &mut App) {
-        let moves: Vec<(Entity<crate::browser::BrowserPanel>, AnyWindowHandle)> = self
-            .browser_pages(cx)
-            .into_iter()
-            .map(|(id, browser, _)| {
-                let float = self
-                    .tree
-                    .group_of(id)
-                    .and_then(|group| self.tree.float_of(group));
-                (browser, self.window_of(float))
-            })
-            .collect();
-        for (browser, target) in moves {
-            if let Ok(Some(to)) = target.update(cx, |_, window, _| crate::browser::hwnd(window))
-                && to != from
-            {
-                browser.read(cx).rehome(from, to);
-            }
         }
     }
 
@@ -1444,7 +1413,6 @@ impl Workspace {
     ) -> AnyElement {
         self.settle_overlays();
         self.settle_full_screen(Some(id), window);
-        self.sync_browsers(Some(id), window, cx);
         let Some(root) = self.tree.window_root(Some(id)) else {
             return Empty.into_any_element();
         };
@@ -2091,8 +2059,6 @@ impl Workspace {
         window.defer(cx, move |window, cx| {
             search.update(cx, |input, cx| input.focus(window, cx))
         });
-        // A browser page hides while the dialog is open.
-        cx.notify();
     }
 
     /// A terminal running the coding agent's preset (a plain shell without one).
@@ -2120,7 +2086,7 @@ impl Workspace {
             return;
         };
         if preset.browser {
-            self.open_browser(None, Some(preset.command), window, cx);
+            crate::browser::open(&preset.command, cx);
         } else {
             self.open_terminal(None, Some(preset.command), preset.agent, window, cx);
         }
@@ -2182,15 +2148,9 @@ impl Workspace {
         }));
     }
 
-    /// Open Dev Server: the project's dev server in a browser tab, in
-    /// `group` or where browsers go. The one answering now when several were
-    /// found; a toast when none was.
-    pub(crate) fn open_dev_server(
-        &mut self,
-        group: Option<NodeId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Open Dev Server: the project's dev server in the system's browser.
+    /// The one answering now when several were found; a toast when none was.
+    pub(crate) fn open_dev_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let found = if self.dev_servers.is_empty() {
             crate::backend::dev_server::detect(&self.root)
         } else {
@@ -2200,178 +2160,16 @@ impl Workspace {
             crate::toast::push(window, "No dev server found in this project.", cx);
             return;
         }
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             let url = cx
                 .background_executor()
                 .spawn(async move { crate::backend::dev_server::pick(&found) })
                 .await;
-            _ = this.update_in(cx, |this, window, cx| {
-                this.open_browser(group, url, window, cx);
-            });
+            if let Some(url) = url {
+                cx.update(|cx| crate::browser::open(&url, cx));
+            }
         })
         .detach();
-    }
-
-    /// A browser tab at `url` (the home page when none), in `group` or where
-    /// browsers go.
-    pub(crate) fn open_browser(
-        &mut self,
-        group: Option<NodeId>,
-        url: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let group = group.unwrap_or_else(|| self.target_group(Kind::Browsers));
-        let browser = cx.new(|cx| crate::browser::BrowserPanel::new(url, window, cx));
-        self.add_pane(browser, group, true, window, cx);
-    }
-
-    /// An extension's `open_browser`: a browser tab at `url` where browsers
-    /// go, or, for a named `tab`, extension `id`'s tab of that name, loaded
-    /// at `url` (again, when it is there). Either way it shows without
-    /// taking the keyboard or the active group, so the editor the extension
-    /// follows stays in charge.
-    pub(crate) fn open_extension_browser(
-        &mut self,
-        id: String,
-        url: String,
-        tab: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab) = tab else {
-            return self.open_browser(None, Some(url), window, cx);
-        };
-        let owner = (id, tab);
-        if let Some(pane) =
-            self.find_pane::<crate::browser::BrowserPanel>(|b| b.owner() == Some(&owner), cx)
-        {
-            if let Some(browser) = self.pane_as::<crate::browser::BrowserPanel>(pane) {
-                browser.update(cx, |browser, cx| browser.load(&url, cx));
-            }
-            self.tree.activate(pane);
-            return self.changed(cx);
-        }
-        let browser =
-            cx.new(|cx| crate::browser::BrowserPanel::new(Some(url), window, cx).owned_by(owner));
-        let group = self.target_group(Kind::Browsers);
-        let id = self.tree.mint();
-        self.track(id, std::rc::Rc::new(browser), window, cx);
-        self.tree.add_tab(group, id, None, true);
-        self.changed(cx);
-    }
-
-    /// An extension's `browser_script`: run `script` in extension `id`'s
-    /// browser tab `tab`; false when it has none open.
-    pub(crate) fn extension_browser_script(
-        &self,
-        id: &str,
-        tab: &str,
-        script: &str,
-        cx: &App,
-    ) -> bool {
-        let browser = self
-            .panes_of::<crate::browser::BrowserPanel>()
-            .find(|(_, b)| {
-                b.read(cx)
-                    .owner()
-                    .is_some_and(|(owner, name)| owner == id && name == tab)
-            });
-        browser.map(|(_, b)| b.read(cx).script(script)).is_some()
-    }
-
-    /// An extension's `load_file_view`: load `url` in the page of extension
-    /// `id`'s file view `view` of `path`'s tab; false when it has none.
-    pub(crate) fn load_file_view(
-        &self,
-        path: &std::path::Path,
-        id: &str,
-        view: &str,
-        url: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(file) = self.file_pane(path, cx) else {
-            return false;
-        };
-        file.update(cx, |file, cx| file.load_view(id, view, url, window, cx));
-        true
-    }
-
-    /// An extension's `file_view_script`: run `script` in the page of
-    /// extension `id`'s file view `view` of `path`'s tab; false when there
-    /// is no such page.
-    pub(crate) fn file_view_script(
-        &self,
-        path: &std::path::Path,
-        id: &str,
-        view: &str,
-        script: &str,
-        cx: &App,
-    ) -> bool {
-        self.file_pane(path, cx)
-            .is_some_and(|file| file.read(cx).view_script(id, view, script, cx))
-    }
-
-    /// The browser pages of the window: the browser tabs', and the file
-    /// views' in file tabs, each with its tab and whether it shows in it.
-    fn browser_pages(&self, cx: &App) -> Vec<(PaneId, Entity<crate::browser::BrowserPanel>, bool)> {
-        let tabs = self
-            .panes_of::<crate::browser::BrowserPanel>()
-            .map(|(id, browser)| (id, browser, true));
-        let files = self.panes_of::<FilePanel>().filter_map(|(id, file)| {
-            let (browser, showing) = file.read(cx).page(cx)?;
-            Some((id, browser, showing))
-        });
-        tabs.chain(files).collect()
-    }
-
-    /// Show the browser pages in `window` (the main one, or float `float`'s)
-    /// whose tab is showing; hide the others, and all of them while something
-    /// den draws may be over them (a native page is drawn over everything).
-    fn sync_browsers(&self, float: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
-        // A drag, a dialog or sheet, a popover or select, a menu (it holds
-        // the keyboard while open), or the group numbers. Tooltips and toasts
-        // stay under the page.
-        let menu_open = if self.drawn.contains(&window.window_handle()) {
-            window
-                .context_stack()
-                .iter()
-                .any(|context| context.contains("PopupMenu"))
-        } else {
-            let this = cx.weak_entity();
-            let handle = window.window_handle();
-            window.on_next_frame(move |_, cx| {
-                _ = this.update(cx, |this, _| this.drawn.insert(handle));
-            });
-            false
-        };
-        let covered = cx.has_active_drag()
-            || window.has_active_dialog(cx)
-            || window.has_active_sheet(cx)
-            || gpui_kit::base::GlobalState::is_in_deferred_context(cx)
-            || menu_open
-            || self.hints == Some(Hints::Groups);
-        // Under a maximized group, the other groups' pages are out of sight;
-        // in one maximized as tiles, every page is in sight.
-        let maximized = self
-            .maximized
-            .as_ref()
-            .filter(|m| self.tree.float_of(m.group) == float);
-        for (id, browser, in_tab) in self.browser_pages(cx) {
-            let Some(group) = self.tree.group_of(id) else {
-                continue;
-            };
-            if self.tree.float_of(group) != float {
-                continue;
-            }
-            let showing = match maximized {
-                Some(m) if m.group != group => false,
-                Some(m) if m.tiles => true,
-                _ => self.tree.active_tab(group) == Some(id),
-            };
-            browser.read(cx).set_shown(showing && in_tab && !covered);
-        }
     }
 
     /// The page of extension `id` (a preview of `listing` when it is not
@@ -2668,7 +2466,6 @@ impl Workspace {
                     return self.open_terminal(Some(group), preset, true, window, cx);
                 }
             }
-            Some(Kind::Browsers) => return self.open_browser(Some(group), None, window, cx),
             None => {}
         }
         let programs: Vec<Option<(String, bool)>> = self
@@ -2689,17 +2486,6 @@ impl Workspace {
             .cloned()
             .flatten()
             .filter(|first| programs.iter().all(|p| p.as_ref() == Some(first)));
-        // A group of browsers gets another browser.
-        let tabs = self.tree.tabs(group);
-        if !tabs.is_empty()
-            && tabs.iter().all(|id| {
-                self.panes
-                    .get(id)
-                    .is_some_and(|p| p.kind(cx) == crate::browser::BROWSER)
-            })
-        {
-            return self.open_browser(Some(group), None, window, cx);
-        }
         let (program, agent) =
             same.map_or((None, false), |(command, agent)| (Some(command), agent));
         self.open_terminal(Some(group), program, agent, window, cx);
@@ -3685,16 +3471,9 @@ impl Workspace {
                     ))
                     .item(item(
                         this,
-                        "New Browser",
-                        &NewBrowser,
-                        |this, window, cx| this.open_browser(None, None, window, cx),
-                        cx,
-                    ))
-                    .item(item(
-                        this,
                         "Open Dev Server",
                         &OpenDevServer,
-                        |this, window, cx| this.open_dev_server(None, window, cx),
+                        |this, window, cx| this.open_dev_server(window, cx),
                         cx,
                     ))
                     .item(item(
@@ -3815,9 +3594,6 @@ impl Workspace {
     /// Alt for the split buttons, and the actions on groups and tabs.
     fn layout_actions(&self, root: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         root
-            // A click anywhere den draws takes the keyboard back from a
-            // browser page that had it.
-            .capture_any_mouse_down(|_, window, _| crate::browser::focus_window(window))
             // Files dropped from the system's file manager open kept; a
             // folder opens as the session.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
@@ -3833,8 +3609,7 @@ impl Workspace {
             // looked at, wherever the pointer is (before a group takes the
             // press as a click into it).
             .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                // A click is not the keys' way about: the numbers go (and
-                // those left behind when the keys' release went to a browser).
+                // A click is not the keys' way about: the numbers go.
                 if this.hints.is_some() {
                     this.set_hints(None);
                     cx.notify();
@@ -3845,11 +3620,6 @@ impl Workspace {
                 }
             }))
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
-                this.modifiers_changed(event.modifiers, cx)
-            }))
-            // The keys' changes go to a browser while it has the keyboard, so
-            // the pointer's moves (which carry the keys' state) catch up.
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.modifiers_changed(event.modifiers, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
@@ -3872,11 +3642,8 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.open_terminal(None, None, false, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &NewBrowser, window, cx| {
-                this.open_browser(None, None, window, cx)
-            }))
             .on_action(cx.listener(|this, _: &OpenDevServer, window, cx| {
-                this.open_dev_server(None, window, cx)
+                this.open_dev_server(window, cx)
             }))
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
@@ -4133,7 +3900,6 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_overlays();
         self.settle_full_screen(None, window);
-        self.sync_browsers(None, window, cx);
         self.report_active_file(cx);
         let sidebar = AppState::get(cx).sidebar.clone();
         let side = Settings::get(cx).sidebar_position;

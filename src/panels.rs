@@ -51,26 +51,10 @@ pub fn init(cx: &mut App) {
     ]);
     pane::register(cx, FILE, |data, window, cx| {
         let path = PathBuf::from(data["path"].as_str().unwrap_or_default());
-        let view = data["view"][0].as_str().zip(data["view"][1].as_str());
         match data["untitled"].as_bool() {
             Some(true) => Rc::new(cx.new(|cx| FilePanel::untitled(path, window, cx))),
-            _ => Rc::new(cx.new(|cx| {
-                let mut file = FilePanel::new(path, window, cx);
-                file.view = view.map(|(id, view)| (id.to_string(), view.to_string()));
-                file
-            })),
+            _ => Rc::new(cx.new(|cx| FilePanel::new(path, window, cx))),
         }
-    });
-    pane::register(cx, crate::browser::BROWSER, |data, window, cx| {
-        let url = data["url"].as_str().map(str::to_string);
-        let owner = data["owner"][0].as_str().zip(data["owner"][1].as_str());
-        Rc::new(cx.new(|cx| {
-            let browser = crate::browser::BrowserPanel::new(url, window, cx);
-            match owner {
-                Some((id, tab)) => browser.owned_by((id.to_string(), tab.to_string())),
-                None => browser,
-            }
-        }))
     });
     pane::register(cx, SETTINGS, |_, window, cx| {
         Rc::new(cx.new(|cx| SettingsPanel::new(window, cx)))
@@ -146,18 +130,8 @@ pub struct FilePanel {
     markdown: Option<Entity<TextViewState>>,
     /// Find in the Markdown preview, once opened; its query stays after closing.
     find: Option<PreviewFind>,
-    /// An extension's file view picked in the switch, by the extension's id
-    /// and the view's: it shows instead of both while the extension offers it.
-    view: Option<(String, String)>,
-    /// The page of an extension's file view, once the extension loaded one.
-    page: Option<Page>,
     /// A PDF's pages.
     pdf: Option<Entity<crate::pdf::PdfView>>,
-    /// The extension was told its view shows, since it was last picked.
-    announced: bool,
-    /// Holds the keyboard while a file view shows, so keys never reach the
-    /// editor out of sight.
-    view_focus: FocusHandle,
     /// The last SVG preview and the text it was made from.
     svg: Option<(SharedString, Arc<Image>)>,
     /// The encoding the file was read in and is saved in.
@@ -180,15 +154,6 @@ pub struct FilePanel {
     /// The cursor's line (from 0) the extensions were last told of.
     cursor_line: Option<u32>,
     _subscriptions: Vec<Subscription>,
-}
-
-/// A file view's page: a browser without its toolbar, which the workspace
-/// shows while the view does (see `Workspace::sync_browsers`).
-struct Page {
-    /// The extension's id and the view's.
-    owner: (String, String),
-    browser: Entity<crate::browser::BrowserPanel>,
-    _subscription: Subscription,
 }
 
 /// Find in a Markdown preview, as the editor's without Replace: it searches
@@ -258,8 +223,6 @@ impl FilePanel {
             Look::Svg => state.preview_svg,
             _ => false,
         };
-        // Shown where its extension offers it (see `showing_view`).
-        let view = state.file_view.clone();
         let settings = Settings::get(cx).clone();
         let language = language_of(&path);
         let editor = cx.new(|cx| {
@@ -314,10 +277,7 @@ impl FilePanel {
                 cx.notify();
             }),
             // An extension offering file views, or no longer.
-            cx.observe_global::<crate::extensions::Extensions>(|this, cx| {
-                this.announce(cx);
-                cx.notify();
-            }),
+            cx.observe_global::<crate::extensions::Extensions>(|_, cx| cx.notify()),
         ];
         if let Some(markdown) = &markdown {
             // The preview's text changed under an open Find: search it again.
@@ -334,11 +294,7 @@ impl FilePanel {
         let pdf =
             (look == Look::Pdf).then(|| cx.new(|cx| crate::pdf::PdfView::new(path.clone(), cx)));
 
-        cx.defer_in(window, |this, _, cx| {
-            this.refresh_git_base(cx);
-            // Opened showing a file view: its extension hears of it.
-            this.announce(cx);
-        });
+        cx.defer_in(window, |this, _, cx| this.refresh_git_base(cx));
         Self {
             path,
             untitled: false,
@@ -346,11 +302,7 @@ impl FilePanel {
             preview,
             markdown,
             find: None,
-            view,
-            page: None,
             pdf,
-            announced: false,
-            view_focus: cx.focus_handle(),
             svg: None,
             encoding,
             indent,
@@ -718,10 +670,9 @@ impl Focusable for FilePanel {
         if let Some(pdf) = &self.pdf {
             return pdf.focus_handle(cx);
         }
-        match (self.showing_view(cx), &self.markdown) {
-            (Some(_), _) => self.view_focus.clone(),
-            (None, Some(markdown)) if self.preview => markdown.read(cx).focus_handle().clone(),
-            (None, _) => self.editor.focus_handle(cx),
+        match &self.markdown {
+            Some(markdown) if self.preview => markdown.read(cx).focus_handle().clone(),
+            _ => self.editor.focus_handle(cx),
         }
     }
 }
@@ -757,41 +708,23 @@ impl Pane for FilePanel {
 
     fn dump(&self, _: &App) -> Value {
         // An untitled tab comes back empty, as its unsaved edits are lost.
-        match (self.untitled, &self.view) {
-            (true, _) => json!({ "path": self.path.to_string_lossy(), "untitled": true }),
-            (false, Some((id, view))) => {
-                json!({ "path": self.path.to_string_lossy(), "view": [id, view] })
-            }
-            (false, None) => json!({ "path": self.path.to_string_lossy() }),
+        match self.untitled {
+            true => json!({ "path": self.path.to_string_lossy(), "untitled": true }),
+            false => json!({ "path": self.path.to_string_lossy() }),
         }
     }
 }
 
 impl FilePanel {
     /// Switch Markdown or SVG between source and preview; the choice is
-    /// remembered per type for the next file opened, and over the file view
-    /// last picked, when this file offers that one.
+    /// remembered per type for the next file opened.
     fn set_preview(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.preview = preview;
-        if self.view.take().is_some() {
-            // The workspace hides the view's page.
-            cx.emit(PaneEvent::Changed);
-        }
         let look = self.look;
-        let offered = self.file_views(cx);
-        crate::settings::AppState::update(cx, |state| {
-            match look {
-                Look::Markdown => state.preview_markdown = preview,
-                Look::Svg => state.preview_svg = preview,
-                _ => {}
-            }
-            if state
-                .file_view
-                .as_ref()
-                .is_some_and(|(id, view)| offered.iter().any(|(i, v)| i == id && v.id == *view))
-            {
-                state.file_view = None;
-            }
+        crate::settings::AppState::update(cx, |state| match look {
+            Look::Markdown => state.preview_markdown = preview,
+            Look::Svg => state.preview_svg = preview,
+            _ => {}
         });
         if !preview {
             self.editor
@@ -814,112 +747,27 @@ impl FilePanel {
         }
     }
 
-    /// The file view showing: the one picked, while its extension offers it.
-    fn showing_view(&self, cx: &App) -> Option<&(String, String)> {
-        let picked = self.view.as_ref()?;
-        self.file_views(cx)
-            .iter()
-            .any(|(id, view)| *id == picked.0 && view.id == picked.1)
-            .then_some(picked)
-    }
-
-    /// Show extension `id`'s file view `view` instead of the editor.
-    /// Remembered for the next file opened that offers it.
-    fn set_view(&mut self, id: String, view: String, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = (id, view);
-        crate::settings::AppState::update(cx, |state| state.file_view = Some(picked.clone()));
-        self.view = Some(picked);
-        self.announced = false;
-        self.view_focus.focus(window, cx);
-        self.announce(cx);
-        cx.emit(PaneEvent::Changed);
-        cx.notify();
-    }
-
-    /// Tell the extension its file view shows, once each time it is picked
-    /// (or found picked after a restart, once the extension offers it).
-    fn announce(&mut self, cx: &mut Context<Self>) {
-        if self.announced {
-            return;
-        }
-        let Some((id, view)) = self.showing_view(cx).cloned() else {
-            return;
-        };
-        self.announced = true;
-        let url = self
-            .page
-            .as_ref()
-            .filter(|page| page.owner.0 == id && page.owner.1 == view)
-            .map(|page| page.browser.read(cx).url().to_string());
+    /// Tell extension `id` its file view `view` was clicked; it opens what
+    /// the view shows in the system's browser.
+    fn open_view(&self, id: String, view: String, cx: &mut Context<Self>) {
         cx.emit(PaneEvent::FileView {
             id,
             view,
             path: self.path.clone(),
             line: self.editor.read(cx).cursor_position().line + 1,
-            url,
         });
-    }
-
-    /// Load `url` in the page of extension `id`'s file view `view`, made now
-    /// if there is none.
-    pub fn load_view(
-        &mut self,
-        id: &str,
-        view: &str,
-        url: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let owner = (id.to_string(), view.to_string());
-        if let Some(page) = self.page.as_ref().filter(|page| page.owner == owner) {
-            page.browser.update(cx, |browser, cx| browser.load(url, cx));
-            return;
-        }
-        let browser = cx
-            .new(|cx| crate::browser::BrowserPanel::new(Some(url.to_string()), window, cx).bare());
-        // A link the page opens in a new window opens as a browser tab.
-        let _subscription = cx.subscribe(&browser, |_, _, event: &PaneEvent, cx| {
-            if let PaneEvent::OpenBrowser(url) = event {
-                cx.emit(PaneEvent::OpenBrowser(url.clone()));
-            }
-        });
-        self.page = Some(Page {
-            owner,
-            browser,
-            _subscription,
-        });
-        cx.emit(PaneEvent::Changed);
-        cx.notify();
-    }
-
-    /// Run `script` in the page of extension `id`'s file view `view`; false
-    /// when it has none.
-    pub fn view_script(&self, id: &str, view: &str, script: &str, cx: &App) -> bool {
-        self.page
-            .as_ref()
-            .filter(|page| page.owner.0 == id && page.owner.1 == view)
-            .map(|page| page.browser.read(cx).script(script))
-            .is_some()
-    }
-
-    /// The file view's page, and whether it shows (its view does).
-    pub fn page(&self, cx: &App) -> Option<(Entity<crate::browser::BrowserPanel>, bool)> {
-        let page = self.page.as_ref()?;
-        let showing = self.showing_view(cx) == Some(&page.owner);
-        Some((page.browser.clone(), showing))
     }
 
     /// The Source / Preview switch above a Markdown or SVG file, with the
-    /// extensions' file views after.
+    /// extensions' file views after, which open in the system's browser.
     fn render_switch(
         &self,
         views: Vec<(String, den_extension::FileView)>,
-        showing: Option<&(String, String)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let previewable = matches!(self.look, Look::Markdown | Look::Svg);
-        let preview = self.preview && showing.is_none();
-        let source = !self.preview && showing.is_none();
+        let preview = self.preview;
+        let source = !self.preview;
         h_flex()
             .flex_none()
             .justify_end()
@@ -949,39 +797,16 @@ impl FilePanel {
                 )
             })
             .children(views.into_iter().enumerate().map(|(ix, (id, view))| {
-                let on = showing.is_some_and(|(i, v)| *i == id && *v == view.id);
                 Button::new(("file-view", ix))
                     .xsmall()
+                    .ghost()
                     .label(view.label)
+                    .icon(Icon::new(IconName::SquareArrowOutUpRight))
                     .when(!view.tooltip.is_empty(), |b| b.tooltip(view.tooltip))
-                    .map(|b| if on { b.primary() } else { b.ghost() })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.set_view(id.clone(), view.id.clone(), window, cx)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_view(id.clone(), view.id.clone(), cx)
                     }))
             }))
-    }
-
-    /// Where a file view's page goes, or what says it is on its way.
-    fn render_page(&self, showing: &(String, String), cx: &mut Context<Self>) -> AnyElement {
-        let area = div().size_full().track_focus(&self.view_focus);
-        match &self.page {
-            Some(page) if page.owner == *showing => {
-                area.child(page.browser.clone()).into_any_element()
-            }
-            _ => {
-                let id = &showing.0;
-                let name = crate::extensions::Extensions::get(cx)
-                    .entry(id)
-                    .map_or(id.to_string(), |entry| entry.name().to_string());
-                area.flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("Waiting for {name}…"))
-                    .into_any_element()
-            }
-        }
     }
 
     /// The preview of the buffer, unsaved edits included.
@@ -1736,17 +1561,10 @@ impl Render for FilePanel {
         let font_size = Settings::get(cx).editor_font_size;
         let previewable = matches!(self.look, Look::Markdown | Look::Svg);
         let views = self.file_views(cx);
-        let showing = self.showing_view(cx).cloned();
-        let switch = (previewable || !views.is_empty()).then(|| {
-            self.render_switch(views, showing.as_ref(), cx)
-                .into_any_element()
-        });
-        let showing_preview =
-            self.look.binary() || showing.is_some() || (previewable && self.preview);
-        let preview = showing_preview.then(|| match &showing {
-            Some(showing) => self.render_page(showing, cx),
-            None => self.render_preview(cx),
-        });
+        let switch = (previewable || !views.is_empty())
+            .then(|| self.render_switch(views, cx).into_any_element());
+        let showing_preview = self.look.binary() || (previewable && self.preview);
+        let preview = showing_preview.then(|| self.render_preview(cx));
         v_flex()
             .size_full()
             .on_action(cx.listener(Self::save))
@@ -1822,7 +1640,6 @@ pub struct SettingsPanel {
     shortcuts: bool,
     font_family: Entity<InputState>,
     shell: Entity<InputState>,
-    browser_home: Entity<InputState>,
     ai_command: Entity<InputState>,
     /// The imported colour themes.
     themes: Vec<crate::theme::Imported>,
@@ -1863,11 +1680,6 @@ impl SettingsPanel {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
         let shortcuts_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search keyboard shortcuts"));
-        let browser_home = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("https://www.google.com")
-                .default_value(settings.browser_home.clone())
-        });
         // Filled in, to be edited rather than typed out.
         let ai_command = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1883,12 +1695,6 @@ impl SettingsPanel {
             cx.subscribe(&shortcuts_search, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
-                }
-            }),
-            cx.subscribe(&browser_home, |_, input, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value().trim().to_string();
-                    Settings::update(cx, |s| s.browser_home = value);
                 }
             }),
             cx.subscribe(&ai_command, |_, input, event: &InputEvent, cx| {
@@ -1919,7 +1725,6 @@ impl SettingsPanel {
             shortcuts: false,
             font_family,
             shell,
-            browser_home,
             ai_command,
             themes: crate::theme::imported(),
             preset_rows: Vec::new(),
@@ -2159,27 +1964,27 @@ impl SettingsPanel {
             .collect();
     }
 
-    /// The presets of one section (agents or terminals), as den lists them:
-    /// mark (click for another colour), pin, name, command, order, remove.
-    fn render_presets(&self, kind: Kind, cx: &mut Context<Self>) -> Div {
+    /// The presets of one section (agents, terminals or `links`), as den
+    /// lists them: mark (click for another colour), pin, name, command,
+    /// order, remove.
+    fn render_presets(&self, kind: Kind, links: bool, cx: &mut Context<Self>) -> Div {
         let agents = kind == Kind::Agents;
-        let browsers = kind == Kind::Browsers;
         let theme = cx.theme().clone();
         let presets = Settings::get(cx).presets.clone();
         let indices: Vec<usize> = presets
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.kind() == kind)
+            .filter(|(_, p)| p.kind() == kind && p.browser == links)
             .map(|(ix, _)| ix)
             .collect();
         let defaults: Vec<Preset> = crate::settings::default_presets()
             .into_iter()
-            .filter(|p| p.kind() == kind)
+            .filter(|p| p.kind() == kind && p.browser == links)
             .collect();
         let is_default = indices.iter().map(|&ix| &presets[ix]).eq(defaults.iter());
         let section = match kind {
+            _ if links => "link",
             Kind::Agents => "agent",
-            Kind::Browsers => "browser",
             _ => "terminal",
         };
         v_flex()
@@ -2299,14 +2104,14 @@ impl SettingsPanel {
                                 Settings::update(cx, |s| {
                                     let name = if agents {
                                         "New agent"
-                                    } else if browsers {
+                                    } else if links {
                                         "New page"
                                     } else {
                                         "New preset"
                                     };
                                     s.presets.push(Preset {
                                         agent: agents,
-                                        browser: browsers,
+                                        browser: links,
                                         ..Preset::new(name, "")
                                     })
                                 })
@@ -3101,7 +2906,6 @@ impl Render for SettingsPanel {
                             h_flex()
                                 .gap_1()
                                 .child(strip_toggle("strip-shell", "Shell", settings.group_buttons.shell, |b| b.shell = !b.shell))
-                                .child(strip_toggle("strip-browser", "Browser", settings.group_buttons.browser, |b| b.browser = !b.browser))
                                 .child(strip_toggle("strip-dev-server", "Dev server", settings.group_buttons.dev_server, |b| b.dev_server = !b.dev_server))
                                 .child(strip_toggle("strip-split", "Split", settings.group_buttons.split, |b| b.split = !b.split))
                                 .child(strip_toggle("strip-maximize", "Maximize", settings.group_buttons.maximize, |b| b.maximize = !b.maximize))
@@ -3157,21 +2961,19 @@ impl Render for SettingsPanel {
                         .child(preset_section(
                             "Terminal Presets",
                             "Programs a tab-strip button starts in a new terminal: a dev server, a script. The plain shell has its own button.",
-                            self.render_presets(Kind::Terminals, cx),
+                            self.render_presets(Kind::Terminals, false, cx),
                             cx,
                         ))
                         .child(preset_section(
                             "Agent Presets",
                             "Coding agents, started in a shell like terminal presets but opening where agents go, so a group can be the default for agents apart from terminals. Pinned presets get their own button; click a preset's mark for another colour.",
-                            self.render_presets(Kind::Agents, cx),
+                            self.render_presets(Kind::Agents, false, cx),
                             cx,
                         ))
-                        .child(section_title("Browser", cx))
-                        .child(setting_row("Home page", "The page a new browser tab opens.", div().w(px(260.)).child(Input::new(&self.browser_home).small()), cx))
                         .child(preset_section(
-                            "Browser Presets",
-                            "Pages a tab-strip button opens in a new browser tab: a dev server, docs. The plain browser has its own button.",
-                            self.render_presets(Kind::Browsers, cx),
+                            "Link Presets",
+                            "Pages a tab-strip button opens in your browser, on the strips that take terminals: a dev server, docs.",
+                            self.render_presets(Kind::Terminals, true, cx),
                             cx,
                         )),
                 )

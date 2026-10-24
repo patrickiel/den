@@ -30,7 +30,6 @@ pub enum ThemeChoice {
 #[serde(default)]
 pub struct GroupButtons {
     pub shell: bool,
-    pub browser: bool,
     /// The project's dev server (see `backend::dev_server`).
     pub dev_server: bool,
     pub split: bool,
@@ -42,7 +41,6 @@ impl Default for GroupButtons {
     fn default() -> Self {
         Self {
             shell: true,
-            browser: true,
             dev_server: true,
             split: true,
             maximize: true,
@@ -88,7 +86,7 @@ pub struct Preset {
     pub command: String,
     #[serde(default)]
     pub agent: bool,
-    /// A browser preset: `command` is the URL it opens.
+    /// A link preset: `command` is the page it opens in the system's browser.
     #[serde(default)]
     pub browser: bool,
     /// Pinned presets get their own button on every tab strip.
@@ -178,8 +176,6 @@ pub struct Settings {
     /// 0..100.
     pub notify_volume: u32,
     pub notify_taskbar: bool,
-    /// The page a new browser tab opens.
-    pub browser_home: String,
     /// Installed extensions that den does not load, by id.
     pub disabled_extensions: Vec<String>,
     /// What the user set of each extension's settings, by id and key.
@@ -204,12 +200,11 @@ impl Preset {
         }
     }
 
-    /// Which kind of tab it opens, for the default groups.
+    /// Which kind of tab it opens, for the default groups; a link opens
+    /// none, and shows where terminals do.
     pub fn kind(&self) -> crate::defaults::Kind {
         use crate::defaults::Kind;
-        if self.browser {
-            Kind::Browsers
-        } else if self.agent {
+        if self.agent && !self.browser {
             Kind::Agents
         } else {
             Kind::Terminals
@@ -273,7 +268,6 @@ impl Default for Settings {
             notify_sound_input: "ping".into(),
             notify_volume: 60,
             notify_taskbar: true,
-            browser_home: "https://www.google.com".into(),
             disabled_extensions: Vec::new(),
             extension_settings: Default::default(),
             keybindings: Default::default(),
@@ -395,10 +389,6 @@ pub struct AppState {
     /// picked.
     pub pdf_whole_pages: bool,
     pub pdf_two_pages: bool,
-    /// The extension's file view last picked, by the extension's id and the
-    /// view's: files it is offered for open showing it, until Source or
-    /// Preview is picked on one of them.
-    pub file_view: Option<(String, String)>,
     /// The Source Control groups collapsed by hand, by title: they stay so
     /// until opened again, in every folder.
     pub scm_collapsed: Vec<String>,

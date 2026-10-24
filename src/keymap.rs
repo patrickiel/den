@@ -683,7 +683,7 @@ fn den_commands() -> Vec<Command> {
             &[],
             &[],
         ),
-        // Terminals and browsers
+        // Terminals
         command(
             "den.newTerminal",
             "Terminal: New Terminal",
@@ -731,15 +731,8 @@ fn den_commands() -> Vec<Command> {
         )
         .only_in(crate::terminal::TERMINAL),
         command(
-            "den.newBrowser",
-            "Browser: New Browser",
-            NewBrowser,
-            &["ctrl-shift-b"],
-            &["cmd-shift-b"],
-        ),
-        command(
             "den.openDevServer",
-            "Browser: Open Dev Server",
+            "Terminal: Open Dev Server",
             OpenDevServer,
             &[],
             &[],
