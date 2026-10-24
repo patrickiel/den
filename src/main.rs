@@ -12,6 +12,7 @@ mod backend;
 mod browser;
 mod defaults;
 mod diff;
+mod diff_list;
 mod dirty_diff;
 mod downloads;
 mod encoding;

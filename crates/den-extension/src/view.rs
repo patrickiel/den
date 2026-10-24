@@ -3,14 +3,14 @@
 //! A view is declared in the manifest ([`View`](crate::View)) and opened in
 //! a window with [`Host::open_view`](crate::Host::open_view). What it shows
 //! is a [`Content`]: a toolbar, a list of rows in columns (a cell holds
-//! styled text, badges, or a [`Graph`] of lanes), right-click menus, and a
-//! details pane under the list. The extension sends it with
+//! styled text, badges, or a [`Graph`] of lanes), right-click menus, and the
+//! selected row's details, opened under it. The extension sends it with
 //! [`Host::set_view`](crate::Host::set_view); every field it sets replaces
 //! that part, the ones it leaves out stay as they are. Clicks, menu picks and
 //! typing come back as [`events::VIEW_ACTION`](crate::events::VIEW_ACTION).
 //!
 //! den keeps the list virtual, so thousands of rows are fine; send them again
-//! only when they change, and the details pane or the selection on their own.
+//! only when they change, and the details or the selection on their own.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// `action`. They start with `:`, so they never clash with an extension's ids.
 pub mod actions {
     /// A row was clicked or picked with the arrow keys: `row` is its id, or
-    /// null when the details pane was closed.
+    /// null when the details were closed.
     pub const SELECT: &str = ":select";
     /// A row was double-clicked, or Enter pressed on it: `row`.
     pub const OPEN: &str = ":open";
@@ -52,7 +52,8 @@ pub struct Content {
     /// Rows marked as found (a search's matches), by id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlighted: Option<Vec<String>>,
-    /// The details pane under the list, line by line; empty closes it.
+    /// The selected row's details, opened under it, line by line; empty
+    /// closes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<Vec<Line>>,
     /// Shown in place of the list while it has no rows (loading, an error,
@@ -305,7 +306,7 @@ pub struct GraphDot {
     pub hollow: bool,
 }
 
-/// A line of the details pane: spans that wrap.
+/// A line of the details: spans that wrap.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Line {
     #[serde(default)]
@@ -313,9 +314,14 @@ pub struct Line {
     /// Indented this many steps.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub indent: u32,
-    /// A click on the line (not on one of its spans' own actions) sends this, with `data`.
+    /// A click on the line (not on one of its spans' own actions) sends this,
+    /// with `data`; a double-click on a line with a `diff`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub action: String,
+    /// The change of the file the line names: den shows the changes of all
+    /// such lines beside the details, and a click on one scrolls to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Diff>,
     /// The name of its right-click menu in [`Content::menus`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub menu: String,
@@ -354,6 +360,11 @@ impl Line {
 
     pub fn menu(mut self, menu: impl Into<String>) -> Self {
         self.menu = menu.into();
+        self
+    }
+
+    pub fn diff(mut self, diff: Diff) -> Self {
+        self.diff = Some(diff);
         self
     }
 

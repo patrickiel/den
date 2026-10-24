@@ -142,11 +142,15 @@ pub fn rows(old: &str, new: &str) -> Vec<Row> {
 }
 
 /// One line's syntax colours: byte ranges within the line.
-type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
+pub(crate) type LineStyles = Vec<(Range<usize>, HighlightStyle)>;
 
 /// Syntax colours for each line of `text` (LF endings), by line index, so a
 /// row's colours come from its whole file rather than the line alone.
-fn highlight_lines(text: &str, language: &str, theme: &HighlightTheme) -> Vec<LineStyles> {
+pub(crate) fn highlight_lines(
+    text: &str,
+    language: &str,
+    theme: &HighlightTheme,
+) -> Vec<LineStyles> {
     let mut highlighter = SyntaxHighlighter::new(language);
     highlighter.update(None, &Rope::from_str(text), None);
     let styles = highlighter.styles(&(0..text.len()), theme);
@@ -213,7 +217,7 @@ pub fn inline_lines(rows: &[Row]) -> Vec<(usize, usize)> {
 /// Both sides' text: a commit's parent and the commit, HEAD and the index
 /// (staged), or the index and the file. A side with no such file is empty
 /// (added, deleted); one git cannot read is the error shown instead.
-fn load_sides(
+pub(crate) fn load_sides(
     top: &Path,
     rel: &str,
     path: &Path,
@@ -241,6 +245,16 @@ fn load_sides(
         Err(err) => return Err(format!("{}: {err}", path.display())),
     };
     Ok((side("", rel)?, new))
+}
+
+/// An extension's path to a changed file (relative to `top` or absolute)
+/// relative to `top`, with forward slashes, as git names it.
+pub fn rel_in(top: &Path, path: &str) -> String {
+    let full = Path::new(path);
+    match full.strip_prefix(top) {
+        Ok(rel) if full.is_absolute() => rel.to_string_lossy().replace('\\', "/"),
+        _ => path.replace('\\', "/"),
+    }
 }
 
 /// What a commit diff compares.

@@ -13,6 +13,7 @@ use std::{
 };
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::resize_handle;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Selectable as _, Sizable as _, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -22,7 +23,6 @@ use gpui_kit::component::{
     resizable::resize_handle_appearance,
     v_flex,
 };
-use gpui_kit::base::resize_handle;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use serde::{Deserialize, Serialize};
 
@@ -2516,11 +2516,7 @@ impl Workspace {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
             return;
         };
-        let path = std::path::Path::new(&diff.path);
-        let rel = match path.strip_prefix(&top) {
-            Ok(rel) if path.is_absolute() => rel.to_string_lossy().replace('\\', "/"),
-            _ => diff.path.replace('\\', "/"),
-        };
+        let rel = crate::diff::rel_in(&top, &diff.path);
         match diff.hash {
             Some(hash) => {
                 let old_rel = diff.old_path.unwrap_or_else(|| rel.clone());
@@ -4153,12 +4149,7 @@ impl Render for Workspace {
                 .relative()
                 .w(px(sidebar.width.clamp(SIDEBAR_MIN, SIDEBAR_MAX)))
                 .child(self.render_sidebar(cx));
-            let groups = div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .relative()
-                .child(groups);
+            let groups = div().flex_1().min_w_0().h_full().relative().child(groups);
             // The kit's handle, straddling the boundary from whichever side
             // comes second.
             let handle = resize_handle("sidebar-handle", gpui::Axis::Horizontal)

@@ -5,12 +5,17 @@
 //!
 //! Also the dialogs extensions ask with `prompt`.
 
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use den_extension::events;
 use den_extension::view::{
-    Column, Content, FieldKind, Graph, Line, MenuItem, Prompt, Row, Span, ToolbarItem, ToolbarKind,
-    actions,
+    Column, Content, Diff, FieldKind, Graph, Line, MenuItem, Prompt, Row, Span, ToolbarItem,
+    ToolbarKind, actions,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -21,15 +26,15 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     radio::Radio,
-    resizable::{resizable_panel, v_resizable},
     scroll::{Scrollbar, ScrollbarMode},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use serde_json::{Map, Value, json};
 
+use crate::diff_list::{DiffList, OpenDiff};
 use crate::extensions::{self, Extensions};
-use crate::git_graph::{GRAPH_PAD, LANE, graph_canvas};
+use crate::git_graph::{GRAPH_PAD, LANE, continuation, graph_canvas};
 use crate::pane::{Pane, PaneEvent};
 use crate::preset_icon::parse_color;
 
@@ -45,6 +50,10 @@ const COLUMN_MIN: f32 = 24.;
 /// A column that shares the space left is at least this wide; the table
 /// scrolls sideways past that.
 const SHARE_MIN: f32 = 160.;
+/// The details are at least this many rows tall.
+const DETAIL_MIN: usize = 6;
+/// The details' text beside the diffs is at least this wide.
+const TEXT_MIN: f32 = 160.;
 
 /// A column's edge being dragged in the header.
 struct ColumnResize;
@@ -52,6 +61,46 @@ struct ColumnResize;
 impl Render for ColumnResize {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+/// The details' bottom edge being dragged.
+struct DetailResize;
+
+impl Render for DetailResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// The edge between the details' text and their diffs being dragged.
+struct TextResize;
+
+impl Render for TextResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
+/// Where the details sit in the list: under row `row`, over `rows` empty
+/// rows. The list stays one of equal rows; the details are drawn across them.
+#[derive(Clone, Copy, PartialEq)]
+struct Placed {
+    row: usize,
+    rows: usize,
+}
+
+/// What the list draws at an index: a row, or the `k`th row under the details.
+enum Item {
+    Row(usize),
+    Under(usize),
+}
+
+fn item(ix: usize, placed: Option<Placed>) -> Item {
+    match placed {
+        Some(p) if ix > p.row + p.rows => Item::Row(ix - p.rows),
+        Some(p) if ix > p.row => Item::Under(ix - p.row - 1),
+        _ => Item::Row(ix),
     }
 }
 
@@ -81,6 +130,29 @@ pub struct ExtensionView {
     /// for: the views' revision, the rem size and the fonts.
     fits: Vec<Option<Pixels>>,
     fits_for: Option<(u64, Pixels, SharedString, SharedString)>,
+    /// How many rows tall the user dragged the details; kept with the tab.
+    pub(crate) detail_rows: Option<usize>,
+    /// The details' edge being dragged: the mouse's y and the rows when it began.
+    detail_resize: Option<(Pixels, usize)>,
+    /// The row the details were last drawn under, so they are brought into
+    /// view once when they move.
+    detail_at: Option<usize>,
+    detail_scroll: ScrollHandle,
+    /// The change last clicked in the details: its line is marked and the
+    /// diffs scrolled to it.
+    picked: Option<Diff>,
+    /// The changes shown beside the details, and the views' revision they
+    /// were last read at.
+    diffs: Option<(Entity<DiffList>, u64, Subscription)>,
+    /// How wide the user dragged the details' text, beside the diffs; kept
+    /// with the tab.
+    pub(crate) detail_width: Option<f32>,
+    /// The text's edge being dragged: the mouse's x and the width when it began.
+    width_resize: Option<(Pixels, Pixels)>,
+    /// Where the details' text is, caught as it paints.
+    text_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The root's repository, for the diff; looked up once.
+    top: Option<Option<PathBuf>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -118,6 +190,16 @@ impl ExtensionView {
             h_scroll: ScrollHandle::new(),
             fits: Vec::new(),
             fits_for: None,
+            detail_rows: None,
+            detail_resize: None,
+            detail_at: None,
+            detail_scroll: ScrollHandle::new(),
+            picked: None,
+            diffs: None,
+            detail_width: None,
+            width_resize: None,
+            text_bounds: Rc::default(),
+            top: None,
             _subscriptions: vec![
                 cx.observe_global::<Extensions>(|_, cx| cx.notify()),
                 cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify()),
@@ -130,6 +212,8 @@ impl ExtensionView {
         let text = |key: &str| data[key].as_str().unwrap_or_default().to_string();
         let mut view = Self::new(text("id"), text("view"), PathBuf::from(text("root")), cx);
         view.widths = serde_json::from_value(data["widths"].clone()).unwrap_or_default();
+        view.detail_rows = data["detail_rows"].as_u64().map(|rows| rows as usize);
+        view.detail_width = data["detail_width"].as_f64().map(|width| width as f32);
         view
     }
 
@@ -504,6 +588,7 @@ impl ExtensionView {
         &mut self,
         range: std::ops::Range<usize>,
         widths: &[Option<Pixels>],
+        placed: Option<Placed>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -512,14 +597,34 @@ impl ExtensionView {
             return Vec::new();
         };
         let total = content.rows.as_ref().map_or(0, Vec::len);
+        let all = content.rows.as_deref().unwrap_or_default();
         // Only the rows on screen are copied out of the global.
-        let rows: Vec<Row> = content
-            .rows
-            .as_deref()
-            .unwrap_or_default()
-            .get(range.start.min(total)..range.end.min(total))
+        let row_of = |ix| match item(ix, placed) {
+            Item::Row(row) => row,
+            Item::Under(_) => placed.map_or(0, |p| p.row + 1),
+        };
+        let first = row_of(range.start);
+        let rows: Vec<Row> = all
+            .get(first.min(total)..row_of(range.end).min(total))
             .unwrap_or_default()
             .to_vec();
+        // The lanes of the graph columns the details sit beside, run on
+        // below the selected row, and how far in the details start.
+        let lanes: Vec<(Pixels, Graph)> = placed
+            .and_then(|p| all.get(p.row))
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .zip(widths)
+                    .map_while(|(cell, width)| {
+                        Some(((*width)?, continuation(cell.graph.as_ref()?)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let detail = placed
+            .is_some()
+            .then(|| content.detail.clone().unwrap_or_default());
         let selected = content.selected.clone().unwrap_or_default();
         let highlighted = content.highlighted.clone().unwrap_or_default();
         let more = content.more == Some(true);
@@ -527,8 +632,44 @@ impl ExtensionView {
         let focused = self.focus_handle.contains_focused(window, cx);
         let mut elements = Vec::new();
         for ix in range.clone() {
-            let Some(row) = rows.get(ix - range.start) else {
-                if more && ix == total {
+            let row_ix = match item(ix, placed) {
+                Item::Row(row) => row,
+                Item::Under(k) => {
+                    let mut under =
+                        h_flex()
+                            .h(ROW_HEIGHT)
+                            .w_full()
+                            .relative()
+                            .children(lanes.iter().map(|(width, graph)| {
+                                div()
+                                    .flex_none()
+                                    .w(*width)
+                                    .h_full()
+                                    .child(graph_canvas(graph.clone(), theme.background))
+                            }));
+                    // The first of these rows on screen draws the details.
+                    if let (Some(p), Some(lines)) = (placed, &detail)
+                        && (k == 0 || ix == range.start)
+                    {
+                        let left: Pixels = lanes.iter().map(|(width, _)| *width).sum();
+                        under = under.child(
+                            div()
+                                .absolute()
+                                .left(left)
+                                .right_0()
+                                .top(ROW_HEIGHT * -(k as f32))
+                                .h(ROW_HEIGHT * p.rows as f32)
+                                // They scroll on their own, not the list.
+                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                .child(self.render_detail(lines, p.rows, cx)),
+                        );
+                    }
+                    elements.push(under.into_any_element());
+                    continue;
+                }
+            };
+            let Some(row) = rows.get(row_ix - first) else {
+                if more && row_ix == total {
                     elements.push(
                         div()
                             .id("load-more")
@@ -712,8 +853,89 @@ impl ExtensionView {
         element.into_any_element()
     }
 
-    fn render_detail(&self, lines: &[Line], cx: &mut Context<Self>) -> impl IntoElement {
+    /// How many rows tall the details are: as dragged, else most of the list.
+    fn detail_rows(&self) -> usize {
+        self.detail_rows
+            .unwrap_or_else(|| {
+                let viewport = self.scroll.0.borrow().base_handle.bounds().size.height;
+                (viewport * 0.6 / ROW_HEIGHT) as usize
+            })
+            .max(DETAIL_MIN)
+    }
+
+    /// Scroll row `row` into view, with the `rows` of details under it when
+    /// they fit.
+    fn reveal(&self, row: usize, rows: usize) {
+        let (top, height) = {
+            let state = self.scroll.0.borrow();
+            let handle = &state.base_handle;
+            (-handle.offset().y, handle.bounds().size.height)
+        };
+        if ROW_HEIGHT * row as f32 >= top && ROW_HEIGHT * (rows + 1) as f32 <= height {
+            self.scroll
+                .scroll_to_item(row + rows, ScrollStrategy::Nearest);
+        } else {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// The changes to show beside `lines`, all of them; their view is made
+    /// when they change.
+    fn shown_diffs(&mut self, lines: &[Line], cx: &mut Context<Self>) -> Option<Entity<DiffList>> {
+        let wanted: Vec<Diff> = lines.iter().filter_map(|l| l.diff.clone()).collect();
+        if self.picked.as_ref().is_some_and(|p| !wanted.contains(p)) {
+            self.picked = None;
+        }
+        if wanted.is_empty() || self.in_sidebar {
+            self.diffs = None;
+            return None;
+        }
+        let revision = Extensions::get(cx).view_revision();
+        if let Some((view, read_at, _)) = &mut self.diffs
+            && view.read(cx).diffs() == wanted.as_slice()
+        {
+            // The uncommitted changes are read again with the details.
+            if wanted.iter().any(|d| d.hash.is_none()) && *read_at != revision {
+                *read_at = revision;
+                view.update(cx, |view, cx| view.reload(cx));
+            }
+            return Some(view.clone());
+        }
+        let root = self.root.clone();
+        let top = self
+            .top
+            .get_or_insert_with(|| crate::backend::git::toplevel(&root).ok().flatten())
+            .clone()?;
+        let view = cx.new(|cx| DiffList::new(top, wanted, cx));
+        // A header's Open in Tab does what a double-click on the file's line does.
+        let subscription = cx.subscribe(&view, |this, _, OpenDiff(diff), cx| {
+            let row = this.content(cx).and_then(|c| {
+                let line = c
+                    .detail
+                    .as_ref()?
+                    .iter()
+                    .find(|l| l.diff.as_ref() == Some(diff))?;
+                Some((line.action.clone(), line.data.clone(), c.selected.clone()?))
+            });
+            if let Some((action, data, row)) = row.filter(|(action, ..)| !action.is_empty()) {
+                this.send(&action, Some(&row), Some(&data), None, cx);
+            }
+        });
+        self.diffs = Some((view.clone(), revision, subscription));
+        Some(view)
+    }
+
+    /// The details, `rows` rows tall: the lines on the left, the changes
+    /// they list on the right.
+    fn render_detail(
+        &mut self,
+        lines: &[Line],
+        rows: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let diff = self.shown_diffs(lines, cx);
+        let shown = self.picked.clone();
         let menus = Rc::new(
             self.content(cx)
                 .and_then(|c| c.menus.clone())
@@ -723,10 +945,24 @@ impl ExtensionView {
             .content(cx)
             .and_then(|c| c.selected.clone())
             .unwrap_or_default();
-        v_flex()
-            .size_full()
-            .border_t_1()
-            .border_color(theme.border)
+        let text = v_flex()
+            .h_full()
+            .relative()
+            .map(|this| match (&diff, self.detail_width) {
+                (Some(_), Some(width)) => this.flex_none().w(px(width)),
+                (Some(_), None) => this
+                    .flex_none()
+                    .w(relative(0.3))
+                    .min_w(px(260.))
+                    .max_w(px(480.)),
+                (None, _) => this.flex_1().min_w_0(),
+            })
+            .child({
+                let bounds = self.text_bounds.clone();
+                canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
             .child(
                 h_flex().flex_none().justify_end().px_1().pt_1().child(
                     Button::new("close-detail")
@@ -743,10 +979,12 @@ impl ExtensionView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.detail_scroll)
                     .px_4()
                     .pb_3()
                     .child(
                         v_flex().children(lines.iter().enumerate().map(|(ix, line)| {
+                            let is_shown = line.diff.is_some() && line.diff == shown;
                             let mut element = h_flex()
                                 .id(("detail-line", ix))
                                 .flex_wrap()
@@ -757,12 +995,41 @@ impl ExtensionView {
                                 .when(line.heading, |this| {
                                     this.mt_2().font_weight(FontWeight::SEMIBOLD)
                                 })
+                                .when(is_shown, |this| this.bg(theme.list_active))
                                 .children(line.spans.iter().enumerate().map(|(span_ix, span)| {
                                     self.render_detail_span(span, &selected, (ix, span_ix), cx)
                                 }));
-                            if !line.action.is_empty() {
-                                let (action, data, row) =
-                                    (line.action.clone(), line.data.clone(), selected.clone());
+                            let (action, data, row) =
+                                (line.action.clone(), line.data.clone(), selected.clone());
+                            if let Some(diff) = line.diff.clone() {
+                                // A click scrolls the diffs to that change; a
+                                // double-click does the line's action.
+                                element = element
+                                    .cursor_pointer()
+                                    .rounded(px(3.))
+                                    .when(!is_shown, |this| {
+                                        this.hover(|this| this.bg(theme.list_hover))
+                                    })
+                                    .on_click(cx.listener(
+                                        move |this, event: &ClickEvent, _, cx| {
+                                            if event.click_count() >= 2 && !action.is_empty() {
+                                                this.send(
+                                                    &action,
+                                                    Some(&row),
+                                                    Some(&data),
+                                                    None,
+                                                    cx,
+                                                );
+                                            } else {
+                                                this.picked = Some(diff.clone());
+                                                if let Some((view, ..)) = &this.diffs {
+                                                    view.update(cx, |view, cx| view.reveal(&diff, cx));
+                                                }
+                                                cx.notify();
+                                            }
+                                        },
+                                    ));
+                            } else if !action.is_empty() {
                                 element = element
                                     .cursor_pointer()
                                     .rounded(px(3.))
@@ -783,6 +1050,59 @@ impl ExtensionView {
                             self.with_menu(element, None, selected.clone(), menus.clone(), cx)
                         })),
                     ),
+            )
+            .when(diff.is_some(), |this| {
+                // Its edge by the diffs drags to widen either.
+                this.border_r_1().border_color(theme.border).child(
+                    div()
+                        .id("detail-width")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .w(px(5.))
+                        .cursor_col_resize()
+                        .hover(|this| this.bg(theme.primary.opacity(0.5)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, _| {
+                                let width = this.text_bounds.get().size.width;
+                                this.width_resize = Some((event.position.x, width));
+                            }),
+                        )
+                        .on_drag(TextResize, |_, _, _, cx| cx.new(|_| TextResize)),
+                )
+            });
+        h_flex()
+            .relative()
+            .size_full()
+            .bg(if self.in_sidebar {
+                theme.sidebar
+            } else {
+                theme.background
+            })
+            .border_y_1()
+            .border_color(theme.border)
+            .child(text)
+            .children(diff.map(|diff| div().flex_1().min_w_0().h_full().child(diff)))
+            // Its bottom edge drags to make them taller or shorter.
+            .child(
+                div()
+                    .id("detail-resize")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(5.))
+                    .cursor_row_resize()
+                    .hover(|this| this.bg(theme.primary.opacity(0.5)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                            this.detail_resize = Some((event.position.y, rows));
+                        }),
+                    )
+                    .on_drag(DetailResize, |_, _, _, cx| cx.new(|_| DetailResize)),
             )
     }
 
@@ -807,7 +1127,10 @@ impl ExtensionView {
         } else {
             theme.foreground
         });
+        // Free to shrink, so text longer than the line wraps rather than
+        // running under the diffs.
         div()
+            .min_w_0()
             .text_color(color)
             .when(span.bold, |this| this.font_weight(FontWeight::SEMIBOLD))
             .when(span.italic, |this| this.italic())
@@ -953,7 +1276,7 @@ impl Pane for ExtensionView {
     }
 
     fn dump(&self, _: &App) -> Value {
-        json!({ "id": self.id, "view": self.view, "root": self.root, "widths": self.widths })
+        json!({ "id": self.id, "view": self.view, "root": self.root, "widths": self.widths, "detail_rows": self.detail_rows, "detail_width": self.detail_width })
     }
 }
 
@@ -995,16 +1318,31 @@ impl Render for ExtensionView {
             None => Default::default(),
         };
 
+        let selected_row = selected
+            .as_ref()
+            .and_then(|s| self.rows(cx).iter().position(|r| &r.id == s));
         // A selection made by the extension (a search's next match) is scrolled to.
         if selected != self.scrolled_to {
-            if let Some(ix) = selected
-                .as_ref()
-                .and_then(|s| self.rows(cx).iter().position(|r| &r.id == s))
-            {
+            if let Some(ix) = selected_row {
                 self.scroll.scroll_to_item(ix, ScrollStrategy::Center);
             }
             self.scrolled_to = selected;
         }
+        // The details open under the selected row, and come into view when they move.
+        let placed = selected_row
+            .filter(|_| !detail.is_empty())
+            .map(|row| Placed {
+                row,
+                rows: self.detail_rows(),
+            });
+        if placed.map(|p| p.row) != self.detail_at {
+            if let Some(p) = placed {
+                self.reveal(p.row, p.rows);
+                self.detail_scroll.set_offset(point(px(0.), px(0.)));
+            }
+            self.detail_at = placed.map(|p| p.row);
+        }
+        let count = count + placed.map_or(0, |p| p.rows);
 
         self.update_fits(&columns, window, cx);
         let widths = self.column_widths(&columns, cx);
@@ -1077,7 +1415,7 @@ impl Render for ExtensionView {
                 "extension-view-rows",
                 count,
                 cx.processor(move |this, range, window, cx| {
-                    this.render_rows(range, &widths, window, cx)
+                    this.render_rows(range, &widths, placed, window, cx)
                 }),
             )
             .track_scroll(&self.scroll)
@@ -1105,6 +1443,29 @@ impl Render for ExtensionView {
                     cx.notify();
                 },
             ))
+            .on_drag_move::<DetailResize>(cx.listener(
+                |this, event: &DragMoveEvent<DetailResize>, _, cx| {
+                    let Some((y, start)) = this.detail_resize else {
+                        return;
+                    };
+                    let rows = (start as f32 + (event.event.position.y - y) / ROW_HEIGHT).round();
+                    let rows = Some((rows.max(0.) as usize).max(DETAIL_MIN));
+                    if this.detail_rows != rows {
+                        this.detail_rows = rows;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drag_move::<TextResize>(cx.listener(
+                |this, event: &DragMoveEvent<TextResize>, _, cx| {
+                    let Some((x, start)) = this.width_resize else {
+                        return;
+                    };
+                    let width = (start + event.event.position.x - x).max(px(TEXT_MIN));
+                    this.detail_width = Some(width.as_f32());
+                    cx.notify();
+                },
+            ))
             .child(
                 div()
                     .id("extension-view-table")
@@ -1128,26 +1489,10 @@ impl Render for ExtensionView {
                     .mode(ScrollbarMode::Always),
             );
 
-        let body = if detail.is_empty() {
-            list.into_any_element()
-        } else {
-            v_resizable(SharedString::from(format!(
-                "extension-view-{}-{}",
-                self.id, self.view
-            )))
-            .child(resizable_panel().child(list))
-            .child(
-                resizable_panel()
-                    .size(px(260.))
-                    .size_range(px(80.)..px(2000.))
-                    .child(self.render_detail(&detail, cx)),
-            )
-            .into_any_element()
-        };
         base.when(!toolbar.is_empty(), |this| {
             this.child(self.render_toolbar(&toolbar, window, cx))
         })
-        .child(div().flex_1().min_h_0().child(body))
+        .child(div().flex_1().min_h_0().child(list))
     }
 }
 

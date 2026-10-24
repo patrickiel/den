@@ -334,7 +334,7 @@ host.set_view(&root, "my-view", &content)?;
 | `Graph` | Lines and dots in lanes, drawn across a row: a lane change is a curve, `dashed` and `hollow` are there for "not committed yet" |
 | `menus` | Right-click menus by name, for rows (`Row::menu`), spans (`Span::menu`, sent with its `data`) and detail lines |
 | `selected`, `highlighted` | The selected row (den scrolls to it) and rows marked as found |
-| `detail` | Lines under the list, in a pane the user can resize and close; spans and lines can send actions |
+| `detail` | The selected row's details, opened under it (the user can resize and close them); spans and lines can send actions. The changes of the lines with a `diff` (the files a commit changed) show beside the details, one after another; a click on such a line scrolls to its change, a double-click sends the line's action |
 | `message`, `more` | Text in place of an empty list; a "Load more" row at the end |
 
 What happens comes back as `view_action`: a toolbar item's, menu item's, span's or line's id as `action`, or den's own `:select` (a row clicked or reached with the arrow keys; `row` null when the details were closed), `:open` (double-click or Enter) and `:more`. Each `set_view` only needs the parts that changed: send `selected` and `detail` alone when a row is picked, not the rows again.
