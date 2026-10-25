@@ -555,12 +555,51 @@ fn app_dir(name: &str) -> PathBuf {
     base.unwrap_or_else(|| PathBuf::from(".")).join(name)
 }
 
-/// The most recent folder that still exists, read before the app starts.
+/// The most recent folder that still exists and no other den has open,
+/// read before the app starts: a second den opens the folder before. With
+/// every one open, the most recent.
 pub fn last_folder() -> Option<PathBuf> {
-    read_json::<AppState>("state.json")?
+    let recent: Vec<PathBuf> = read_json::<AppState>("state.json")?
         .recent
         .into_iter()
-        .find(|p| p.is_dir())
+        .filter(|p| p.is_dir())
+        .collect();
+    recent
+        .iter()
+        .find(|p| !FolderLock::held_elsewhere(p))
+        .or(recent.first())
+        .cloned()
+}
+
+/// A lock on a file for a folder, held while a window has the folder open,
+/// so another den starting knows. The system lets it go when den quits,
+/// crashes included.
+pub struct FolderLock {
+    _file: std::fs::File,
+}
+
+impl FolderLock {
+    fn file(root: &Path) -> Option<std::fs::File> {
+        let dir = data_dir().join("open");
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(session_key(root)))
+            .ok()
+    }
+
+    pub fn new(root: &Path) -> Option<Self> {
+        let file = Self::file(root)?;
+        file.try_lock().ok()?;
+        Some(Self { _file: file })
+    }
+
+    fn held_elsewhere(root: &Path) -> bool {
+        Self::file(root)
+            .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+    }
 }
 
 /// The settings file: the defaults when there is none. One that cannot be
@@ -738,6 +777,17 @@ mod tests {
             "{ not json"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn folder_locks_are_seen_while_held() {
+        let root = Path::new("/den-test/folder-lock");
+        assert!(!super::FolderLock::held_elsewhere(root));
+        let lock = super::FolderLock::new(root).unwrap();
+        assert!(super::FolderLock::held_elsewhere(root));
+        assert!(super::FolderLock::new(root).is_none());
+        drop(lock);
+        assert!(!super::FolderLock::held_elsewhere(root));
     }
 
     #[test]

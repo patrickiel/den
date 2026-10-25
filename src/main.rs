@@ -176,7 +176,8 @@ fn workspace_opened(
 
 /// The folder to open with none given. Started from a shell, that shell's
 /// folder; from the Start menu or taskbar (whose working folder is den's own
-/// install folder), the folder last open.
+/// install folder), or a desktop launcher or the Dock (which start it in the
+/// home folder or `/`, with no terminal), the folder last open.
 fn start_folder() -> PathBuf {
     let cwd = std::env::current_dir().ok();
     let exe_dir = std::env::current_exe()
@@ -185,7 +186,7 @@ fn start_folder() -> PathBuf {
     let from_shell = match (&cwd, &exe_dir) {
         (Some(cwd), Some(exe_dir)) => repo::key(cwd) != repo::key(exe_dir),
         (cwd, _) => cwd.is_some(),
-    };
+    } && (cfg!(windows) || std::io::IsTerminal::is_terminal(&std::io::stdin()));
     if !from_shell && let Some(last) = settings::last_folder() {
         return last;
     }

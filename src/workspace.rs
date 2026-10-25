@@ -462,6 +462,8 @@ pub struct Workspace {
     _watch_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// Tells other dens this folder is open here (see `settings::FolderLock`).
+    _folder_lock: Option<crate::settings::FolderLock>,
     /// The active file as last told to the extensions.
     active_file: Option<PathBuf>,
     /// The folder's name in the title bar (see [`session_name`]), kept up
@@ -590,6 +592,7 @@ impl Workspace {
         let active_group = tree.root.id();
         let session_name = session_name(&root, cx);
         let mut this = Self {
+            _folder_lock: crate::settings::FolderLock::new(&root),
             root,
             tree,
             panes: HashMap::new(),
