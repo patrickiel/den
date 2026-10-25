@@ -955,7 +955,7 @@ mod tests {
         let m = Manifest::parse(r#"{"id":"ai-usage","name":"AI Usage","version":"0.1.0","api":1,"repository":"me/ai-usage"}"#).unwrap();
         assert_eq!(m.repository, "me/ai-usage");
         assert!(m.check_api().is_ok());
-        assert_eq!(m.asset(), "ai-usage-windows-x86_64.zip");
+        assert_eq!(m.asset(), format!("ai-usage-{PLATFORM}.zip"));
         if cfg!(windows) {
             assert_eq!(m.library(), "ai_usage.dll");
         }
