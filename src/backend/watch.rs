@@ -66,7 +66,11 @@ pub fn watch(root: &Path) -> Result<(Watcher, UnboundedReceiver<PathBuf>), Strin
         return watch_wsl(root, &distro, &linux, tx).map(|watcher| (watcher, rx));
     }
     let mut inner = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
+        // Linux reports files opened and read too; den reading a file (a PDF
+        // tab opening it again) would then reload it, over and over.
+        if let Ok(event) = event
+            && changes(&event.kind)
+        {
             for path in event.paths {
                 let _ = tx.unbounded_send(path);
             }
@@ -83,6 +87,14 @@ pub fn watch(root: &Path) -> Result<(Watcher, UnboundedReceiver<PathBuf>), Strin
         },
         rx,
     ))
+}
+
+/// Whether an event changed something: not a file opened, read or closed
+/// unwritten.
+fn changes(kind: &notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode, EventKind};
+    !matches!(kind, EventKind::Access(access)
+        if *access != AccessKind::Close(AccessMode::Write))
 }
 
 /// Watch `root`, the folder `linux` in `distro`, from inside WSL.
@@ -170,6 +182,17 @@ pub fn in_git_dir(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_and_reading_a_file_change_nothing() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind};
+        assert!(!changes(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
+        assert!(!changes(&EventKind::Access(AccessKind::Read)));
+        assert!(!changes(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+        assert!(changes(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
+        assert!(changes(&EventKind::Modify(ModifyKind::Any)));
+        assert!(changes(&EventKind::Create(CreateKind::File)));
+    }
 
     #[test]
     fn git_state_files_count_and_objects_do_not() {
