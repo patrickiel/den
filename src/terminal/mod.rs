@@ -753,6 +753,9 @@ impl TerminalPanel {
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            // No text, so maybe an image. The program gets the Ctrl+V itself:
+            // Claude Code reads an image off the clipboard when it sees one.
+            self.input(b"\x16", cx);
             return;
         };
         // Line ends as a terminal sends them, wrapped for programs that ask.

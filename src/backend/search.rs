@@ -327,7 +327,7 @@ impl Budget {
     fn take(&self) -> bool {
         if self
             .left
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .is_ok()
         {
             return true;
