@@ -89,6 +89,8 @@ enum Look {
     Text,
     Markdown,
     Svg,
+    /// Its preview opens in the system's browser, as den draws no HTML.
+    Html,
     /// A picture: shown as one, never as text.
     Image,
     /// Its pages, drawn by den (`pdf.rs`), never as text.
@@ -111,6 +113,7 @@ impl Look {
         {
             "md" | "markdown" => Look::Markdown,
             "svg" => Look::Svg,
+            "html" | "htm" | "xhtml" => Look::Html,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" => Look::Image,
             "pdf" => Look::Pdf,
             _ => Look::Text,
@@ -758,14 +761,16 @@ impl FilePanel {
         });
     }
 
-    /// The Source / Preview switch above a Markdown or SVG file, with the
-    /// extensions' file views after, which open in the system's browser.
+    /// The Source / Preview switch above a Markdown or SVG file, Open in
+    /// Browser above an HTML one, with the extensions' file views after,
+    /// which open in the system's browser.
     fn render_switch(
         &self,
         views: Vec<(String, den_extension::FileView)>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let previewable = matches!(self.look, Look::Markdown | Look::Svg);
+        let html = self.look == Look::Html && !self.untitled;
         let preview = self.preview;
         let source = !self.preview;
         h_flex()
@@ -793,6 +798,19 @@ impl FilePanel {
                         .map(|b| if preview { b.primary() } else { b.ghost() })
                         .on_click(
                             cx.listener(|this, _, window, cx| this.set_preview(true, window, cx)),
+                        ),
+                )
+            })
+            .when(html, |this| {
+                this.child(
+                    Button::new("open-in-browser")
+                        .xsmall()
+                        .ghost()
+                        .label("Open in Browser")
+                        .icon(Icon::new(IconName::SquareArrowOutUpRight))
+                        .tooltip("Opens the file as saved")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| crate::browser::open_file(&this.path, cx)),
                         ),
                 )
             })
@@ -1561,7 +1579,8 @@ impl Render for FilePanel {
         let font_size = Settings::get(cx).editor_font_size;
         let previewable = matches!(self.look, Look::Markdown | Look::Svg);
         let views = self.file_views(cx);
-        let switch = (previewable || !views.is_empty())
+        let html = self.look == Look::Html && !self.untitled;
+        let switch = (previewable || html || !views.is_empty())
             .then(|| self.render_switch(views, cx).into_any_element());
         let showing_preview = self.look.binary() || (previewable && self.preview);
         let preview = showing_preview.then(|| self.render_preview(cx));

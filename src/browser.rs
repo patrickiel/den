@@ -12,6 +12,20 @@ pub fn open(url: &str, cx: &App) {
     }
 }
 
+/// Open the file at `path` in the system's browser, as it is saved.
+pub fn open_file(path: &std::path::Path, cx: &App) {
+    cx.open_url(&file_url(path));
+}
+
+/// `/home/x/a b.html` → `file:///home/x/a%20b.html`; `C:\x\a.html` →
+/// `file:///C:/x/a.html`.
+fn file_url(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path.trim_start_matches('/');
+    let encoded: Vec<String> = path.split('/').map(encode).collect();
+    format!("file:///{}", encoded.join("/"))
+}
+
 /// Turn what was typed into something to load: a URL, a host, or a web
 /// search.
 fn normalize_url(input: &str) -> String {
@@ -59,6 +73,8 @@ fn encode(text: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 (b as char).to_string()
             }
+            // A Windows drive, "C:", stays as it is.
+            b':' => ":".into(),
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -66,7 +82,7 @@ fn encode(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_url;
+    use super::{file_url, normalize_url};
 
     #[test]
     fn urls_hosts_and_searches() {
@@ -83,5 +99,17 @@ mod tests {
         );
         assert_eq!(normalize_url("about:blank"), "about:blank");
         assert_eq!(normalize_url("  "), "");
+    }
+
+    #[test]
+    fn file_urls() {
+        assert_eq!(
+            file_url(std::path::Path::new("/home/x/a b.html")),
+            "file:///home/x/a%20b.html"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new("C:\\x\\a.html")),
+            "file:///C:/x/a.html"
+        );
     }
 }
