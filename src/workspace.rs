@@ -49,7 +49,7 @@ use crate::{
     repo::{Refresh, Repo},
     scm::{ScmEvent, ScmView},
     search::{IsDirty, SearchEvent, SearchView},
-    settings::{AppState, LayoutPreset, Settings, SidebarSide, SidebarView},
+    settings::{AppState, LayoutPreset, Settings, SidebarSide, SidebarView, WindowState},
     terminal::{Launch, TerminalPanel},
 };
 use gpui_kit::component::notification::{Notification, NotificationType};
@@ -461,6 +461,9 @@ pub struct Workspace {
     _watcher: Option<watch::Watcher>,
     _watch_task: Option<Task<()>>,
     _save_task: Option<Task<()>>,
+    /// The main window as last seen settled, kept with the session.
+    window_state: Option<WindowState>,
+    _window_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     /// Tells other dens this folder is open here (see `settings::FolderLock`).
     _folder_lock: Option<crate::settings::FolderLock>,
@@ -570,6 +573,7 @@ impl Workspace {
                     this.window_activated(None, cx);
                 }
             }),
+            cx.observe_window_bounds(window, |this, window, cx| this.window_changed(window, cx)),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
             // The recent folders decide how much of the path the title shows.
             cx.observe_global::<AppState>(|this, cx| {
@@ -637,12 +641,16 @@ impl Workspace {
             _watcher: None,
             _watch_task: None,
             _save_task: None,
+            window_state: session.window,
+            _window_task: None,
             _subscriptions,
             active_file: None,
             session_name,
         };
         this.start_watching(window, cx);
         this.detect_dev_servers(cx);
+        // A window turned to this folder keeps its bounds: note them.
+        this.window_changed(window, cx);
         // Once per run, a little after start: is there a newer den, or a
         // newer version of an installed extension?
         static UPDATE_CHECKED: std::sync::atomic::AtomicBool =
@@ -2630,7 +2638,7 @@ impl Workspace {
     ) {
         let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
         if new_window {
-            crate::open_workspace(root, None, cx);
+            crate::open_workspace(root, cx);
             return;
         }
         let panes = self.tree.panes();
@@ -2861,6 +2869,7 @@ impl Workspace {
             .map(|view| view.read(cx).dump(cx))
             .collect();
         let sidebar_shown = self.sidebar_shown.clone();
+        let window_state = self.window_state;
         let root = self.root.clone();
         AppState::update(cx, |state| {
             let session = state.session_mut(&root);
@@ -2869,7 +2878,42 @@ impl Workspace {
             session.commit_message = draft;
             session.sidebar_views = sidebar_views;
             session.sidebar_shown = sidebar_shown;
+            if window_state.is_some() {
+                session.window = window_state;
+            }
         });
+    }
+
+    /// The main window moved, changed size or was maximized: noted once it
+    /// settles, as X11 tells it is maximized only after its new size. Full
+    /// screen is not noted; the window opens as it was before it.
+    fn window_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._window_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            _ = this.update_in(cx, |this, window, cx| {
+                let state = match window.window_bounds() {
+                    WindowBounds::Windowed(bounds) => WindowState {
+                        bounds: screen_rect(bounds),
+                        maximized: false,
+                    },
+                    // The size it had before, as noted: on X11 the bounds
+                    // given are the maximized ones.
+                    WindowBounds::Maximized(bounds) => WindowState {
+                        bounds: this
+                            .window_state
+                            .map_or_else(|| screen_rect(bounds), |state| state.bounds),
+                        maximized: true,
+                    },
+                    WindowBounds::Fullscreen(_) => return,
+                };
+                if this.window_state != Some(state) {
+                    this.window_state = Some(state);
+                    this.schedule_save(cx);
+                }
+            });
+        }));
     }
 
     // -- Sidebar -------------------------------------------------------------
@@ -3855,6 +3899,55 @@ fn fit(bounds: Bounds<Pixels>, area: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
 }
 
+/// A window's rectangle as kept (see `screen_rect`), at least `min` in size,
+/// on the display under its grab point (on its tab strip) and kept inside
+/// it: the window is placed on the display it names, and one whose middle
+/// is off that display would open centred on it instead. `None` when it is
+/// on no display now.
+fn place(
+    [x, y, w, h]: [f32; 4],
+    min: Size<Pixels>,
+    cx: &App,
+) -> Option<(DisplayId, Bounds<Pixels>)> {
+    let bounds = Bounds::new(
+        point(px(x), px(y)),
+        size(px(w).max(min.width), px(h).max(min.height)),
+    );
+    let display = display_at(bounds.origin + FLOAT_GRAB, cx).or_else(|| {
+        cx.displays()
+            .into_iter()
+            .find(|display| display.bounds().intersects(&bounds))
+    })?;
+    Some((display.id(), fit(bounds, display.visible_bounds())))
+}
+
+/// How the main window of `root` opens: as it was when the folder was last
+/// open (where that is still on a screen, maximized or not), else centred.
+pub(crate) fn main_window_bounds(
+    root: &Path,
+    min: Size<Pixels>,
+    cx: &App,
+) -> (WindowBounds, Option<DisplayId>) {
+    let saved = AppState::get(cx).session(root).window;
+    let placed = saved.and_then(|state| place(state.bounds, min, cx));
+    let bounds = placed.map_or_else(
+        || {
+            // Off every screen now: centred, the size it had.
+            let size = saved.map_or(size(px(1400.), px(900.)), |state| {
+                size(px(state.bounds[2]), px(state.bounds[3]))
+            });
+            Bounds::centered(None, size.max(&min), cx)
+        },
+        |(_, bounds)| bounds,
+    );
+    let bounds = if saved.is_some_and(|state| state.maximized) {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    };
+    (bounds, placed.map(|(display, _)| display))
+}
+
 /// The window of float `id`, where it was (when that is still on a screen)
 /// or centred.
 fn open_float_window(
@@ -3864,18 +3957,7 @@ fn open_float_window(
     activate: bool,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
-    // On the display under its grab point (where the pointer let go), kept
-    // inside it: the window is placed on the display it names, and one
-    // whose middle is off that display would open centred on it instead.
-    let placed = bounds.and_then(|[x, y, w, h]| {
-        let bounds = Bounds::new(point(px(x), px(y)), size(px(w.max(320.)), px(h.max(240.))));
-        let display = display_at(bounds.origin + FLOAT_GRAB, cx).or_else(|| {
-            cx.displays()
-                .into_iter()
-                .find(|display| display.bounds().intersects(&bounds))
-        })?;
-        Some((display.id(), fit(bounds, display.visible_bounds())))
-    });
+    let placed = bounds.and_then(|rect| place(rect, size(px(320.), px(240.)), cx));
     let bounds = placed.map_or_else(
         || Bounds::centered(None, size(px(960.), px(640.)), cx),
         |(_, bounds)| bounds,

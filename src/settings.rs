@@ -365,6 +365,16 @@ pub struct Session {
     /// them, and which of them it shows (extension id and view id).
     pub sidebar_views: Vec<serde_json::Value>,
     pub sidebar_shown: Option<(String, String)>,
+    /// The window as it was last, for the next time the folder opens.
+    pub window: Option<WindowState>,
+}
+
+/// A session's window: where it is and how big while not maximized (x, y,
+/// width, height, as a float keeps its rectangle), and whether it is maximized.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowState {
+    pub bounds: [f32; 4],
+    pub maximized: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

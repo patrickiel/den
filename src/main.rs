@@ -117,12 +117,14 @@ pub struct FocusGroup(pub usize);
 #[action(namespace = den, no_json)]
 pub struct OpenPreset(pub usize);
 
-/// A window on the session for `root`, at `bounds` (centred when `None`).
-pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut App) {
-    let bounds = bounds.unwrap_or_else(|| Bounds::centered(None, size(px(1400.), px(900.)), cx));
+/// A window on the session for `root`, as it was when last open there.
+pub fn open_workspace(root: PathBuf, cx: &mut App) {
+    let min = size(px(640.), px(400.));
+    let (bounds, display_id) = workspace::main_window_bounds(&root, min, cx);
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(640.), px(400.))),
+        window_bounds: Some(bounds),
+        window_min_size: Some(min),
+        display_id,
         ..crate::ui::window_options()
     };
     extensions::broadcast(
@@ -627,7 +629,7 @@ fn main() {
             }
 
             for root in roots {
-                open_workspace(root, None, cx);
+                open_workspace(root, cx);
             }
             cx.activate(true);
         });
