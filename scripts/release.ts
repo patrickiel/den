@@ -153,7 +153,7 @@ function preflight(dryRun: boolean): void {
 function changesPrompt(version: string, lastTag: string | null, log: string): string {
   const scale = readFileSync(join(ROOT, "scripts/release-scale.md"), "utf8");
   const parts = [
-    "Decide the version bump for the next release of den (a native desktop app for Windows and macOS: a project",
+    "Decide the version bump for the next release of den (a native desktop app for Windows, macOS and Linux: a project",
     "terminal with split panes, editor, explorer, search and source control) and write its release notes,",
     "following the scale below. Answer with the structured output only.",
     `\n<scale>\n${scale}\n</scale>`,

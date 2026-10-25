@@ -190,10 +190,11 @@ fn shell(setting: &str) -> String {
             "powershell.exe".into()
         }
     } else {
+        // Not /bin/sh: Ubuntu's is dash, which den has no integration for.
         let fallback = if cfg!(target_os = "macos") {
             "/bin/zsh"
         } else {
-            "/bin/sh"
+            "/bin/bash"
         };
         std::env::var("SHELL")
             .ok()

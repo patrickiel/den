@@ -6,6 +6,26 @@ use gpui_kit::*;
 /// Whether the primary modifier is the command key (macOS) rather than Ctrl.
 pub const COMMAND_KEY: bool = cfg!(target_os = "macos");
 
+/// The menu item that shows a file in the system's file manager.
+pub const REVEAL: &str = if cfg!(windows) {
+    "Reveal in File Explorer"
+} else if cfg!(target_os = "macos") {
+    "Reveal in Finder"
+} else {
+    "Reveal in File Manager"
+};
+
+/// Options for a den window, which draws its own title bar. On Linux it asks
+/// to go without the system's (X11 and KDE would add theirs above den's) and
+/// carries the id `den.desktop` names, for its icon and its place in the dock.
+pub fn window_options() -> WindowOptions {
+    WindowOptions {
+        app_id: cfg!(target_os = "linux").then(|| "den".into()),
+        window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
+        ..gpui_kit::component::TitleBar::window_options()
+    }
+}
+
 /// A label such as `New Terminal (Ctrl+Shift+T)` with its keys as the
 /// platform shows them: on macOS as its menus do, `New Terminal (⇧⌘T)`.
 pub fn key_label(label: &str) -> String {

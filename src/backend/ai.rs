@@ -468,6 +468,10 @@ fn spawn(key: &ServerKey, gpu: bool) -> Result<Server, String> {
     if key.threads > 0 {
         cmd.args(["-t", &key.threads.to_string()]);
     }
+    // Its libraries sit beside it, where Linux's loader does not look by itself.
+    if cfg!(target_os = "linux") {
+        cmd.env("LD_LIBRARY_PATH", &runtime);
+    }
     process::no_window(&mut cmd);
     let child = cmd
         .spawn()

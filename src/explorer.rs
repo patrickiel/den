@@ -331,7 +331,7 @@ impl Explorer {
             .icon(Icon::new(IconName::SquareTerminal)),
         )
         .item(
-            menu_action(&this, "Reveal in File Explorer", move |_, _, _| reveal(&p1))
+            menu_action(&this, crate::ui::REVEAL, move |_, _, cx| reveal(&p1, cx))
                 .icon(Icon::new(IconName::FolderOpen)),
         )
         .separator()
@@ -751,19 +751,19 @@ impl Render for Explorer {
     }
 }
 
-/// Show `path` selected in the system's file manager (Explorer, Finder).
-pub fn reveal(path: &Path) {
+/// Show `path` selected in the system's file manager (Explorer, Finder; on
+/// Linux the desktop's, through its portal, as gpui asks it).
+pub fn reveal(path: &Path, cx: &App) {
+    if cfg!(target_os = "linux") {
+        return cx.reveal_path(path);
+    }
     let mut cmd = if cfg!(windows) {
         let mut cmd = std::process::Command::new("explorer");
         cmd.arg(format!("/select,{}", path.display()));
         cmd
-    } else if cfg!(target_os = "macos") {
+    } else {
         let mut cmd = std::process::Command::new("open");
         cmd.arg("-R").arg(path);
-        cmd
-    } else {
-        let mut cmd = std::process::Command::new("xdg-open");
-        cmd.arg(path.parent().unwrap_or(path));
         cmd
     };
     let _ = cmd.spawn();

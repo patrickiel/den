@@ -131,11 +131,15 @@ pub fn preset(layout: &Value, root: &Path) -> Value {
 
 /// `path` relative to `root` with forward slashes, when it is inside it.
 fn relative(path: &Path, root: &Path) -> Option<String> {
+    // Linux tells paths apart by case; Windows and macOS do not.
     let key = |p: &Path| {
-        p.to_string_lossy()
-            .replace('\\', "/")
-            .trim_end_matches('/')
-            .to_lowercase()
+        let key = p.to_string_lossy().replace('\\', "/");
+        let key = key.trim_end_matches('/');
+        if cfg!(target_os = "linux") {
+            key.to_string()
+        } else {
+            key.to_lowercase()
+        }
     };
     let (full, base) = (key(path), key(root));
     if full == base {

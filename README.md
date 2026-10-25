@@ -3,7 +3,7 @@
 **Terminals, agents and files in one native window, each exactly where you want it.**
 
 [![Latest release](https://img.shields.io/github/v/release/patrickiel/den?label=release)](https://github.com/patrickiel/den/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS%20arm64-0078D6)](https://github.com/patrickiel/den/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS%20arm64%20%7C%20Linux%20x64-0078D6)](https://github.com/patrickiel/den/releases/latest)
 [![Built with GPUI](https://img.shields.io/badge/built%20with-Rust%20%2B%20GPUI-dea584)](https://www.gpui.rs)
 
 ![den with an editor, a PowerShell terminal, and Codex and Claude Code tabs in split groups](docs/images/screenshot.png)
@@ -31,6 +31,15 @@ In VS Code, terminals are squeezed into a bottom panel and a file opens wherever
 
 **macOS (Apple Silicon):** download `den_<version>_aarch64.dmg` from the [latest release](https://github.com/patrickiel/den/releases/latest) and drag den to Applications. It isn't notarized, so the first time right-click `den.app` and choose **Open** (or run `xattr -d com.apple.quarantine /Applications/den.app`).
 
+**Linux (x64; Ubuntu 22.04 or newer):** download `den_<version>_x86_64.tar.gz` from the [latest release](https://github.com/patrickiel/den/releases/latest), then:
+
+```sh
+tar -xzf den_*_x86_64.tar.gz
+./den/install.sh
+```
+
+That puts den in `~/.local/bin` and your applications menu, no root needed. It draws with Vulkan or OpenGL, so it needs the GPU's Mesa or vendor driver (Ubuntu has it), and `unzip` to install extensions.
+
 **WSL:** set the shell in Settings to `wsl`, or just open a folder under `\\wsl.localhost\`, and terminals and git run inside the distribution.
 
 ## Extensions
@@ -39,7 +48,11 @@ Extensions are Rust crates built on [`den-extension`](crates/den-extension). The
 
 ## Build from source
 
-Requires stable Rust 1.85+ (MSVC build tools on Windows, Xcode Command Line Tools on macOS).
+Requires stable Rust 1.85+ (MSVC build tools on Windows, Xcode Command Line Tools on macOS). On Ubuntu also:
+
+```sh
+sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libfreetype-dev libwayland-dev
+```
 
 ```powershell
 git clone https://github.com/patrickiel/den

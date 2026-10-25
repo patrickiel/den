@@ -31,14 +31,14 @@ This guide covers writing, testing, publishing and listing an extension for den.
 
 ## How extensions work
 
-An extension is a **Rust `cdylib`** (a DLL on Windows, a dylib on macOS), built against the [`den-extension`](../crates/den-extension) crate, plus an **`extension.json`** manifest. den loads every folder in `%APPDATA%\den\extensions\<id>\` (`~/Library/Application Support/den/extensions/<id>/` on a Mac) that holds both.
+An extension is a **Rust `cdylib`** (a DLL on Windows, a dylib on macOS, a shared object on Linux), built against the [`den-extension`](../crates/den-extension) crate, plus an **`extension.json`** manifest. den loads every folder in `%APPDATA%\den\extensions\<id>\` (`~/Library/Application Support/den/extensions/<id>/` on a Mac, `~/.config/den/extensions/<id>/` on Linux) that holds both.
 
 ```
 %APPDATA%\den\
   extensions\
     my-extension\
       extension.json      the manifest
-      my_extension.dll    the code (libmy_extension.dylib on a Mac)
+      my_extension.dll    the code (libmy_extension.dylib on a Mac, libmy_extension.so on Linux)
       README.md           shown on the extension's page (optional)
       icon.svg            shown in the Extensions view (optional)
   extensions-data\
@@ -125,7 +125,7 @@ register!(MyExtension);
 cargo build --release
 ```
 
-Copy `extension.json` and `target\release\my_extension.dll` (`target/release/libmy_extension.dylib` on a Mac) into `%APPDATA%\den\extensions\my-extension\` (`~/Library/Application Support/den/extensions/my-extension/`); the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `node scripts/sideload.ts <folder>` does the build and copy for you.
+Copy `extension.json` and `target\release\my_extension.dll` (`target/release/libmy_extension.dylib` on a Mac, `target/release/libmy_extension.so` on Linux) into `%APPDATA%\den\extensions\my-extension\` (`~/Library/Application Support/den/extensions/my-extension/`, `~/.config/den/extensions/my-extension/`); the folder button in the Extensions view opens that folder. Then restart den. In den's repository, `node scripts/sideload.ts <folder>` does the build and copy for you.
 
 **5. Try it.** Open the Extensions view (Ctrl+Shift+X): your extension shows as Running, or Failed with the reason. Press Ctrl+Alt+G, or pick *My Extension: Greet* from den's menu.
 
@@ -430,8 +430,8 @@ Publish each extension from its **own public GitHub repository**, with `extensio
    ```sh
    git tag v0.2.0; git push origin v0.2.0
    ```
-3. The workflow builds on Windows and macOS and makes a release with:
-   - `<id>-windows-x86_64.zip` and `<id>-macos-aarch64.zip`: `extension.json`, the library, and `README.md` and the icon if present;
+3. The workflow builds on Windows, macOS and Linux and makes a release with:
+   - `<id>-windows-x86_64.zip`, `<id>-macos-aarch64.zip` and `<id>-linux-x86_64.zip`: `extension.json`, the library, and `README.md` and the icon if present;
    - `extension.json` with the zips' `sha256` and `platforms` added. den reads this first.
 
 Anyone can then install the extension by typing `owner/repo` in the Extensions view. Users who installed it get the new release from its update button; for a listed extension, den also offers it a little after it starts.
@@ -461,7 +461,7 @@ Being listed isn't a security audit. Keep your source public, and have it build 
 - **The API version** (`api` in the manifest, `den_extension::API_VERSION` in code) changes only when the boundary itself breaks. den loads extensions built for its version and refuses others, with the reason.
 - **New features arrive under the same version**, as new host methods, events and manifest fields. An extension built against an older `den-extension` keeps working: it never calls the new methods, and ignores events it doesn't know.
 - **An extension that uses a new method** fails in an older den only at that call: `call` returns an error naming the method. Handle that error if you want to support older dens.
-- **Windows x86-64 and macOS arm64**: den installs `<id>-<platform>.zip` (`den_extension::PLATFORM`), so a release needs one zip per platform it supports. An extension without a zip for the user's platform fails to install with that reason.
+- **Windows x86-64, macOS arm64 and Linux x86-64**: den installs `<id>-<platform>.zip` (`den_extension::PLATFORM`), so a release needs one zip per platform it supports. An extension without a zip for the user's platform fails to install with that reason.
 
 ## What extensions can't do yet
 

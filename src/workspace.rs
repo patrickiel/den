@@ -1423,6 +1423,8 @@ impl Workspace {
             |name| name.to_string_lossy().to_string(),
         );
         let title_bar = TitleBar::new()
+            // Linux's close button (den draws it there): as the window's own close.
+            .on_close_window(cx.listener(move |this, _, _, cx| this.dock_float(id, false, cx)))
             .child(
                 h_flex()
                     .flex_1()
@@ -3000,6 +3002,13 @@ impl Workspace {
         let border = cx.theme().border;
         let separator = move || div().w(px(1.)).h(px(16.)).mx_1p5().bg(border);
         TitleBar::new()
+            // Linux's close button (den draws it there): as the window's own
+            // close, which asks about unsaved changes and saves the session.
+            .on_close_window(cx.listener(|this, _, window, cx| {
+                if this.request_close_window(window, cx) {
+                    window.remove_window();
+                }
+            }))
             // The title bar keeps room for the traffic lights on macOS; in
             // full screen they are gone with the menu bar.
             .when(crate::ui::COMMAND_KEY && window.is_fullscreen(), |this| {
@@ -3873,7 +3882,7 @@ fn open_float_window(
         window_min_size: Some(size(px(320.), px(240.))),
         display_id: placed.map(|(display, _)| display),
         focus: activate,
-        ..TitleBar::window_options()
+        ..crate::ui::window_options()
     };
     let title = window_title(&workspace.read(cx).root, cx);
     let (window, _) = gpui_kit::open_window(options, cx, move |window, cx| {

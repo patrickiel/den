@@ -159,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn an_absolute_windows_path_keeps_its_drive() {
         let text = r"at C:\code\x.rs:7";
         let (_, link) = find(

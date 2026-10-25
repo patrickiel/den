@@ -1,4 +1,4 @@
-//! den: a project terminal for Windows and macOS, on GPUI.
+//! den: a project terminal for Windows, macOS and Linux, on GPUI.
 //!
 //! See README.md for what is in it and how it is built.
 
@@ -49,7 +49,6 @@ mod workspace;
 
 use std::path::PathBuf;
 
-use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
 actions!(
@@ -124,7 +123,7 @@ pub fn open_workspace(root: PathBuf, bounds: Option<Bounds<Pixels>>, cx: &mut Ap
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(640.), px(400.))),
-        ..TitleBar::window_options()
+        ..crate::ui::window_options()
     };
     extensions::broadcast(
         den_extension::events::WORKSPACE_OPENED,
@@ -406,10 +405,12 @@ fn on_unfocused_actions(cx: &mut App) {
 
 /// Started from the Finder or the Dock, a Mac app gets the system's bare
 /// PATH: no Homebrew, no `~/.cargo/bin`, so no `claude`, `pnpm` or `rustfmt`
-/// for Source Control, Format Document and the presets. Take the login
-/// shell's PATH over, in front of den's own. Run before anything else
-/// starts: it writes the environment.
-#[cfg(target_os = "macos")]
+/// for Source Control, Format Document and the presets. Started from a Linux
+/// desktop's launcher, den gets the session's PATH, which lacks what
+/// `~/.bashrc` adds (nvm, pnpm, volta). Take the login shell's PATH over, in
+/// front of den's own. Run before anything else starts: it writes the
+/// environment.
+#[cfg(unix)]
 fn inherit_login_path() {
     use std::{
         io::Read as _,
@@ -420,19 +421,32 @@ fn inherit_login_path() {
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
     // Started from a terminal, PATH is already the shell's: nothing to do.
+    // A Linux session's PATH has more than the system folders in it anyway,
+    // so there the terminal itself tells.
     let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-    if current
-        .iter()
-        .any(|dir| !system.iter().any(|s| dir.as_os_str() == *s))
-    {
+    let from_terminal = if cfg!(target_os = "macos") {
+        current
+            .iter()
+            .any(|dir| !system.iter().any(|s| dir.as_os_str() == *s))
+    } else {
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+    };
+    if from_terminal {
         return;
     }
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".into());
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "/bin/zsh"
+            } else {
+                "/bin/bash"
+            }
+            .into()
+        });
     // An interactive login shell, as a terminal starts one, so PATH set in
-    // .zshrc counts too; markers in case the profile prints something.
+    // .zshrc or .bashrc counts too; markers in case the profile prints something.
     let fish = std::path::Path::new(&shell)
         .file_name()
         .is_some_and(|name| name == "fish");
@@ -557,7 +571,7 @@ fn wait_for_exit(pid: u32) -> bool {
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     inherit_login_path();
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     // A restart (see `restart`): once the den before has quit.

@@ -31,6 +31,11 @@ const ARCHIVE: (&str, &str) = if cfg!(windows) {
         "pdfium-mac-arm64.tgz",
         "52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40",
     )
+} else if cfg!(target_os = "linux") {
+    (
+        "pdfium-linux-x64.tgz",
+        "1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d",
+    )
 } else {
     (
         "pdfium-mac-x64.tgz",

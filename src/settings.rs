@@ -447,7 +447,13 @@ fn apply_theme(cx: &mut App) {
 
 fn session_key(root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
-    root.to_string_lossy().to_lowercase().hash(&mut hasher);
+    let path = root.to_string_lossy();
+    // Linux tells paths apart by case; Windows and macOS do not.
+    if cfg!(target_os = "linux") {
+        path.hash(&mut hasher);
+    } else {
+        path.to_lowercase().hash(&mut hasher);
+    }
     format!("{:016x}", hasher.finish())
 }
 
@@ -758,11 +764,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Windows paths, which only Windows splits into folders.
+    #[cfg(windows)]
     fn names(paths: &[&str]) -> Vec<String> {
         unique_names(&paths.iter().map(PathBuf::from).collect::<Vec<_>>())
     }
 
     #[test]
+    #[cfg(windows)]
     fn just_the_name_when_it_is_unique() {
         assert_eq!(
             names(&[r"C:\repos\den", r"C:\repos\den2"]),
@@ -771,6 +780,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn parents_until_unique() {
         assert_eq!(
             names(&[r"C:\a\x\debug", r"C:\b\x\debug", r"C:\c\target"]),

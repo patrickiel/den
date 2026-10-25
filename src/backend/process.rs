@@ -40,10 +40,30 @@ pub fn output_with_input(mut cmd: Command, stdin: Option<&str>) -> std::io::Resu
 }
 
 /// Unpack `archive` into the new folder `into` with the system tar (bsdtar on
-/// Windows 10+ and macOS reads zip too); `what` names it in the error.
+/// Windows 10+ and macOS reads zip too; Linux's GNU tar does not, so a zip
+/// goes to unzip there); `what` names it in the error.
 pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
+    let zip = archive
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    if cfg!(target_os = "linux") && zip {
+        let out = Command::new("unzip")
+            .arg("-qo")
+            .arg(archive)
+            .arg("-d")
+            .arg(into)
+            .output()
+            .map_err(|e| format!("Cannot run unzip ({e}): install it (sudo apt install unzip)"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "Unpacking {what} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        return Ok(());
+    }
     let tar = if cfg!(windows) {
         let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
         PathBuf::from(sysroot).join("System32").join("tar.exe")

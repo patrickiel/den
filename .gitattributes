@@ -1,2 +1,3 @@
-# The Mac scripts run from a Mac: a CRLF after `#!/bin/sh` would break them.
+# The Mac and Linux scripts run there: a CRLF after `#!/bin/sh` would break them.
 *.sh text eol=lf
+*.desktop text eol=lf

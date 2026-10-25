@@ -1815,8 +1815,8 @@ fn path_items(
         .icon(Icon::new(IconName::Copy)),
     )
     .item(
-        menu_action(this, "Reveal in File Explorer", move |_, _, _| {
-            crate::explorer::reveal(&reveal)
+        menu_action(this, crate::ui::REVEAL, move |_, _, cx| {
+            crate::explorer::reveal(&reveal, cx)
         })
         .icon(Icon::new(IconName::FolderOpen))
         .disabled(!on_disk),

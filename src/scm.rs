@@ -543,11 +543,9 @@ impl ScmView {
             .item(menu_action(&this, "Copy Relative Path", move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_rel.rel.clone()))
             }))
-            .item(menu_action(
-                &this,
-                "Reveal in File Explorer",
-                move |_, _, _| crate::explorer::reveal(&show.path),
-            ))
+            .item(menu_action(&this, crate::ui::REVEAL, move |_, _, cx| {
+                crate::explorer::reveal(&show.path, cx)
+            }))
     }
 
     /// The header's ⋯ menu: the rest of what Source Control does, as den's.
@@ -1980,6 +1978,8 @@ impl Render for ScmView {
                 .text_color(theme.muted_foreground)
                 .child(if cfg!(windows) {
                     "Git was not found. Install Git for Windows to use Source Control."
+                } else if cfg!(target_os = "linux") {
+                    "Git was not found. Install it (sudo apt install git) to use Source Control."
                 } else {
                     "Git was not found. Install the Xcode Command Line Tools (xcode-select --install) or Git from Homebrew to use Source Control."
                 })

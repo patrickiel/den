@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=den
+Comment=Terminals, agents and files in one native window
+Exec=__EXEC__
+Icon=den
+Terminal=false
+Categories=Development;TerminalEmulator;
+StartupWMClass=den

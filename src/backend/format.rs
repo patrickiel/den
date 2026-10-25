@@ -297,6 +297,8 @@ enum Kind {
 
 /// Whether this is an Apple Silicon Mac (the Intel build otherwise).
 const APPLE_ARM: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+/// Linux, where den is built for x86-64 only.
+const LINUX: bool = cfg!(target_os = "linux");
 
 /// dprint, which runs the plugins. On Windows the x64 build everywhere: the
 /// Prettier plugin has no Arm one, and Windows on Arm runs x64 programs.
@@ -311,6 +313,8 @@ static DPRINT: Kit = Kit {
     dir: "dprint-0.59.0",
     url: if cfg!(windows) {
         "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-pc-windows-msvc.zip"
+    } else if LINUX {
+        "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-x86_64-unknown-linux-gnu.zip"
     } else if APPLE_ARM {
         "https://github.com/dprint/dprint/releases/download/0.59.0/dprint-aarch64-apple-darwin.zip"
     } else {
@@ -318,6 +322,8 @@ static DPRINT: Kit = Kit {
     },
     sha256: if cfg!(windows) {
         "f75040d7288d3cf0a271b025dedcab589edec6b363c481790ff53850dadae6f5"
+    } else if LINUX {
+        "1705b1be1773955e882a69c29aebd3862d5b466c951f47495ad6cb423c224f86"
     } else if APPLE_ARM {
         "1888b152b3541c3690ec5291dd58bde7116e6c8beb4aa1f242187f22071df22f"
     } else {
@@ -460,6 +466,8 @@ static STYLUA: Kit = Kit {
     dir: "stylua-2.5.2",
     url: if cfg!(windows) {
         "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-windows-x86_64.zip"
+    } else if LINUX {
+        "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-linux-x86_64.zip"
     } else if APPLE_ARM {
         "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-macos-aarch64.zip"
     } else {
@@ -467,6 +475,8 @@ static STYLUA: Kit = Kit {
     },
     sha256: if cfg!(windows) {
         "e77d0ea1226b8b389b43f702240091249a96eea25857281f90ea24d0eb9eb969"
+    } else if LINUX {
+        "bcb0d855e91f102f28a370e850f8566b3b44b79e6274d806ea5246837c0fd5ab"
     } else if APPLE_ARM {
         "92ff0889e16324801bc072692974bb67f8161e62010fc90f96c62a17f81f32c7"
     } else {
@@ -489,6 +499,8 @@ static JAVA_FORMAT: Kit = Kit {
     dir: "google-java-format-1.37.0",
     url: if cfg!(windows) {
         "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_windows-x86-64.exe"
+    } else if LINUX {
+        "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_linux-x86-64"
     } else if APPLE_ARM {
         "https://github.com/google/google-java-format/releases/download/v1.37.0/google-java-format_darwin-arm64"
     } else {
@@ -496,6 +508,8 @@ static JAVA_FORMAT: Kit = Kit {
     },
     sha256: if cfg!(windows) {
         "48260bed87f6830bae44a7a27f66ce98f7d9fb245f500021bd7ae16c9e2daa06"
+    } else if LINUX {
+        "881821ffd1a52b175886c4ebeeacce2ba5b5d7326b52d32a18d384d8a783bd77"
     } else if APPLE_ARM {
         "657cf1011c8dfb7e0dac08516db02b701436e59600b961077f83b89b69cc3495"
     } else {
@@ -565,10 +579,14 @@ pub fn kits() -> &'static [&'static Kit] {
         &PSSCRIPTANALYZER,
         &DPRINT,
     ];
-    // The ones with a download for this platform (Windows and macOS).
+    // The ones with a download for this platform (Windows, macOS and x86-64 Linux).
     static OFFERED: std::sync::OnceLock<Vec<&'static Kit>> = std::sync::OnceLock::new();
     OFFERED.get_or_init(|| {
-        if cfg!(any(windows, target_os = "macos")) {
+        if cfg!(any(
+            windows,
+            target_os = "macos",
+            all(target_os = "linux", target_arch = "x86_64")
+        )) {
             KITS.iter()
                 .copied()
                 .filter(|kit| !kit.url.is_empty())

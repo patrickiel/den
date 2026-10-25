@@ -1,12 +1,12 @@
 ---
 name: release
-description: Release den — bump, notes, tag and a draft release via scripts/release.ts; GitHub Actions builds both platforms and publishes it.
+description: Release den — bump, notes, tag and a draft release via scripts/release.ts; GitHub Actions builds all three platforms and publishes it.
 argument-hint: "[major|minor|patch] [dry-run]"
 disable-model-invocation: true
 allowed-tools: Bash(node scripts/release.ts:*)
 ---
 
-Run the release script from the repo root. It does the local part (bump, notes, commit, tag, push, draft release); the `release` workflow (`.github/workflows/release.yml`) then builds and signs the Windows installer and the Mac app, adds them with `latest.json` to the release and publishes it. Don't do any of those steps by hand.
+Run the release script from the repo root. It does the local part (bump, notes, commit, tag, push, draft release); the `release` workflow (`.github/workflows/release.yml`) then builds and signs the Windows installer, the Mac app and the Linux archive, adds them with `latest.json` to the release and publishes it. Don't do any of those steps by hand.
 
 Arguments: `$ARGUMENTS`
 

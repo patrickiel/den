@@ -5,7 +5,8 @@
 //! dialog, downloaded, checked against the public key built into den, and
 //! installed silently, after which den starts again. Other dens running
 //! from the same exe are asked to quit first (they save their sessions);
-//! the installer could not replace an exe they still run.
+//! the installer could not replace an exe they still run. On Linux, where
+//! a running program can be replaced, they are left alone.
 //!
 //! The key is `packaging/updater.pub` (the public half of `~/.keys/den.key`,
 //! which scripts/release.ts signs with). While that file is empty, a build
@@ -141,7 +142,7 @@ fn verify_with(public_key: &str, bytes: &[u8], signature: &str) -> Result<(), St
         .map_err(|_| "The download's signature does not match: not installed.".to_string())
 }
 
-/// Download and check the installer (the app archive on macOS); its path.
+/// Download and check the installer (the app archive on macOS and Linux); its path.
 /// (A download is some 15 MB; the cap only guards against a wrong manifest.)
 fn download(release: &Release) -> Result<PathBuf, String> {
     let bytes = crate::backend::http::get_bytes(&release.url, 200 * 1024 * 1024)
@@ -149,6 +150,8 @@ fn download(release: &Release) -> Result<PathBuf, String> {
     verify(&bytes, &release.signature)?;
     let name = if cfg!(windows) {
         format!("den_{}_setup.exe", release.version)
+    } else if cfg!(target_os = "linux") {
+        format!("den_{}_x86_64.tar.gz", release.version)
     } else {
         format!("den_{}.app.tar.gz", release.version)
     };
@@ -165,6 +168,11 @@ fn download(release: &Release) -> Result<PathBuf, String> {
 fn close_other_instances() -> Result<(), String> {
     use std::time::{Duration, Instant};
     const PATIENCE: Duration = Duration::from_secs(20);
+    // The new binary goes over the running one there, which the others do
+    // not hinder; they go on with the old version until they start again.
+    if cfg!(target_os = "linux") {
+        return Ok(());
+    }
     let me = std::process::id();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let left = |n: usize| {
@@ -333,10 +341,11 @@ fn close_other_instances() -> Result<(), String> {
 
 /// Start what brings the new version up once this den has quit: on Windows
 /// the installer, silently (it waits for the exe, installs over it and
-/// starts den again); on macOS a shell that waits for this process to end
-/// and opens the bundle, swapped for the new one here. Nothing is lost if
-/// the start fails: on macOS the swap is undone. `Some` names the folder the
-/// new version went to when that is not where this one runs from.
+/// starts den again); on macOS and Linux a shell that waits for this
+/// process to end and starts the bundle or binary, swapped for the new one
+/// here. Nothing is lost if the start fails: there the swap is undone.
+/// `Some` names the folder the new version went to when that is not where
+/// this one runs from (macOS only).
 fn stage(download: &std::path::Path) -> Result<Option<PathBuf>, String> {
     #[cfg(windows)]
     {
@@ -346,7 +355,54 @@ fn stage(download: &std::path::Path) -> Result<Option<PathBuf>, String> {
             .map(|_| None)
             .map_err(|e| format!("Cannot start the installer: {e}"))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // The new binary goes over this one (a rename can replace a running
+        // program), from a staging folder beside it.
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let dir = exe.parent().ok_or("bad exe path")?;
+        if !writable(dir) {
+            return Err(format!(
+                "den runs from a folder it cannot write to ({}): update it by hand.",
+                dir.display()
+            ));
+        }
+        let staging = dir.join(".den-update");
+        crate::backend::process::unpack(download, &staging, "the update")?;
+        // The archive holds the folder scripts/bundle-linux.sh makes.
+        let new = staging.join("den").join("den");
+        if !new.is_file() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err("The update archive has no den.".into());
+        }
+        let old = dir.join(".den.old");
+        std::fs::rename(&exe, &old)
+            .map_err(|e| format!("Cannot replace {}: {e}", exe.display()))?;
+        let undo = || {
+            let _ = std::fs::rename(&old, &exe);
+            let _ = std::fs::remove_dir_all(&staging);
+        };
+        if let Err(err) = std::fs::rename(&new, &exe) {
+            undo();
+            return Err(format!("Cannot install the update: {err}"));
+        }
+        let started = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; rm -rf \"$1\" \"$2\"; exec \"$0\"", std::process::id()))
+            .arg(&exe)
+            .arg(&old)
+            .arg(&staging)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Err(err) = started {
+            undo();
+            return Err(format!("Cannot start the restart helper: {err}"));
+        }
+        Ok(None)
+    }
+    #[cfg(target_os = "macos")]
     {
         // The running bundle: `…/den.app/Contents/MacOS/den`.
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;

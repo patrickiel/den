@@ -753,7 +753,18 @@ fn den_commands() -> Vec<Command> {
             &[],
             &[],
         ),
-        command("den.quit", "den: Quit", Quit, &["alt-f4"], &["cmd-q"]),
+        // Linux's window manager has Alt+F4 for itself; Ctrl+Q as VS Code there.
+        command(
+            "den.quit",
+            "den: Quit",
+            Quit,
+            if cfg!(target_os = "linux") {
+                &["ctrl-q"]
+            } else {
+                &["alt-f4"]
+            },
+            &["cmd-q"],
+        ),
     ]);
     if crate::ui::COMMAND_KEY {
         list.extend([

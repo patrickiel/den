@@ -1,7 +1,7 @@
-# Builds a release for both platforms. scripts/release.ts bumps the version,
-# tags it, makes a draft release with the notes and starts this with the tag;
-# it builds and signs the Windows installer and the Mac app archive (plus a
-# disk image of the app for downloads), adds them and the updater manifest
+# Builds a release for all three platforms. scripts/release.ts bumps the
+# version, tags it, makes a draft release with the notes and starts this with
+# the tag; it builds and signs the Windows installer, the Mac app archive (plus
+# a disk image of the app for downloads) and the Linux archive, adds them and the updater manifest
 # (latest.json) to the release, and publishes it. Until then the previous release stays the latest, so updates never see
 # a half-built one.
 #
@@ -39,6 +39,9 @@ jobs:
             platform: windows-x86_64
           - os: macos-latest
             platform: darwin-aarch64
+          # The oldest supported Ubuntu: its glibc is what the build needs at least.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -55,6 +58,9 @@ jobs:
       - uses: pnpm/action-setup@v6
         with:
           version: 10
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libfreetype-dev libwayland-dev
       - run: cargo build --release
       - name: Package
         shell: pwsh
@@ -69,6 +75,11 @@ jobs:
             # NSIS wants backslashes in its File paths.
             $root = $PWD.Path
             & $makensis -V2 "-DVERSION=$version" "-DEXE=$root\target\release\den.exe" "-DOUTFILE=$root\dist\$asset" packaging\installer.nsi
+          } elseif ($IsLinux) {
+            # For people and the updater alike: unpack it and run den/install.sh.
+            $asset = "den_${version}_x86_64.tar.gz"
+            sh scripts/bundle-linux.sh
+            tar -czf "dist/$asset" -C target/release/bundle den
           } else {
             $asset = "den_${version}_aarch64.app.tar.gz"
             sh scripts/bundle-macos.sh $version
@@ -113,7 +124,7 @@ jobs:
           $platforms = [ordered]@{}
           foreach ($sig in Get-ChildItem dist/*.sig) {
             $asset = $sig.BaseName
-            $platform = if ($asset -like "*setup.exe") { "windows-x86_64" } else { "darwin-aarch64" }
+            $platform = if ($asset -like "*setup.exe") { "windows-x86_64" } elseif ($asset -like "*_x86_64.tar.gz") { "linux-x86_64" } else { "darwin-aarch64" }
             $platforms[$platform] = [ordered]@{
               signature = (Get-Content $sig -Raw).Trim()
               url = "https://github.com/$env:REPO/releases/download/$env:TAG/$asset"
