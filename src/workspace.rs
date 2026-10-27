@@ -3043,9 +3043,37 @@ impl Workspace {
             .tooltip("Layouts")
             .dropdown_menu(move |menu, _, cx| layouts_menu(this.clone(), menu, cx));
 
-        // As in den: the sidebar views on the left, the session in the middle,
-        // the layout and the workspace's split and flip, then settings, on the
-        // right. Left and right share the space equally so the middle centres.
+        // Account for the space TitleBar keeps outside its children: the
+        // traffic lights / padding on the left and caption buttons on the right.
+        let left_padding = if crate::ui::COMMAND_KEY {
+            if window.is_fullscreen() {
+                px(0.)
+            } else {
+                px(80.)
+            }
+        } else {
+            px(12.)
+        };
+        let left_inset = left_padding
+            + if window.is_fullscreen() {
+                px(12.)
+            } else {
+                px(0.)
+            };
+        let right_inset = if cfg!(windows)
+            || cfg!(target_os = "linux")
+                && matches!(window.window_decorations(), Decorations::Client { .. })
+        {
+            let controls = window.window_controls();
+            gpui_kit::component::TITLE_BAR_HEIGHT
+                * (1 + u8::from(controls.minimize) + u8::from(controls.maximize)) as f32
+        } else {
+            px(0.)
+        };
+
+        // Each side starts with the opposite inset, then shares the remaining
+        // space equally. The session centres on the whole window when it fits;
+        // the buttons' minimum widths take priority in a narrow window.
         let border = cx.theme().border;
         let separator = move || div().w(px(1.)).h(px(16.)).mx_1p5().bg(border);
         TitleBar::new()
@@ -3058,12 +3086,11 @@ impl Workspace {
             }))
             // The title bar keeps room for the traffic lights on macOS; in
             // full screen they are gone with the menu bar.
-            .when(crate::ui::COMMAND_KEY && window.is_fullscreen(), |this| {
-                this.pl_0()
-            })
+            .pl(left_padding)
             .child(
                 h_flex()
                     .flex_1()
+                    .flex_basis(right_inset)
                     .gap_1()
                     // On macOS these menus are in the menu bar (`set_menus`).
                     .when(!crate::ui::COMMAND_KEY, |this| {
@@ -3159,26 +3186,35 @@ impl Workspace {
                     .child(self.session_switcher(cx)),
             )
             .child(
-                h_flex().flex_1().justify_end().px_2().child(
-                    h_flex()
-                        .gap_1()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .children(self.extension_buttons(cx))
-                        .child(layout_button)
-                        // The root's actions, called the workspace's.
-                        .children(self.root_actions(root_node, "workspace", root_is_split, cx))
-                        .child(separator())
-                        .child(
-                            Button::new("settings")
-                                .small()
-                                .ghost()
-                                .icon(Icon::new(IconName::Settings))
-                                .tooltip(crate::keymap::with_keys("Settings", &OpenSettings, cx))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_settings(false, window, cx)
-                                })),
-                        ),
-                ),
+                h_flex()
+                    .flex_1()
+                    .flex_basis(left_inset)
+                    .justify_end()
+                    .child(
+                        h_flex()
+                            .px_2()
+                            .gap_1()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .children(self.extension_buttons(cx))
+                            .child(layout_button)
+                            // The root's actions, called the workspace's.
+                            .children(self.root_actions(root_node, "workspace", root_is_split, cx))
+                            .child(separator())
+                            .child(
+                                Button::new("settings")
+                                    .small()
+                                    .ghost()
+                                    .icon(Icon::new(IconName::Settings))
+                                    .tooltip(crate::keymap::with_keys(
+                                        "Settings",
+                                        &OpenSettings,
+                                        cx,
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_settings(false, window, cx)
+                                    })),
+                            ),
+                    ),
             )
     }
 
