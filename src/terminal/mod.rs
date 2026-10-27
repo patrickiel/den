@@ -671,7 +671,10 @@ impl TerminalPanel {
                     self.write(format(size).as_bytes());
                 }
                 TermEvent::ColorRequest(index, format) => {
-                    let rgb = colors::palette_rgb(index);
+                    let theme = cx.theme();
+                    let palette =
+                        colors::Palette::new(theme.foreground, theme.background, theme.selection);
+                    let rgb = palette.rgb(index);
                     self.write(format(rgb).as_bytes());
                 }
                 _ => {}
@@ -1328,8 +1331,88 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, GridSize, Listener, Processor, Term, is_prompt_title, is_shell, tail_text,
+        Config, GridSize, Listener, Processor, Term, TermEvent, colors, is_prompt_title, is_shell,
+        tail_text,
     };
+
+    fn test_palette(foreground: u32, background: u32, cursor: u32) -> colors::Palette {
+        colors::Palette {
+            foreground: gpui_kit::rgb(foreground).into(),
+            background: gpui_kit::rgb(background).into(),
+            cursor: gpui_kit::rgb(cursor).into(),
+            selection: gpui_kit::rgb(background).into(),
+            ansi: colors::TermColors::default().ansi,
+        }
+    }
+
+    fn color_replies(palette: &colors::Palette, bytes: &[u8]) -> Vec<String> {
+        let listener = Listener::default();
+        let mut term = Term::new(
+            Config::default(),
+            &GridSize {
+                columns: 20,
+                lines: 5,
+            },
+            listener.clone(),
+        );
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        listener
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                TermEvent::ColorRequest(index, format) => Some(format(palette.rgb(*index))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn color_queries_report_dark_and_light_terminal_themes() {
+        let query = b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07";
+        assert_eq!(
+            color_replies(&test_palette(0xcccccc, 0x1e1e1e, 0xffffff), query),
+            [
+                "\x1b]10;rgb:cccc/cccc/cccc\x07",
+                "\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\",
+                "\x1b]12;rgb:ffff/ffff/ffff\x07",
+            ]
+        );
+        assert_eq!(
+            color_replies(&test_palette(0x333333, 0xffffff, 0x000000), query),
+            [
+                "\x1b]10;rgb:3333/3333/3333\x07",
+                "\x1b]11;rgb:ffff/ffff/ffff\x1b\\",
+                "\x1b]12;rgb:0000/0000/0000\x07",
+            ]
+        );
+    }
+
+    #[test]
+    fn color_queries_report_custom_theme_and_indexed_colors() {
+        let mut palette = test_palette(0xd5d8df, 0x25282f, 0x798bc1);
+        palette.ansi[1] = gpui_kit::rgb(0x123456).into();
+        assert_eq!(
+            color_replies(
+                &palette,
+                b"\x1b]10;?;?;?\x07\x1b]4;1;?;16;?;21;?;196;?;231;?;232;?;255;?\x07",
+            ),
+            [
+                "\x1b]10;rgb:d5d5/d8d8/dfdf\x07",
+                "\x1b]11;rgb:2525/2828/2f2f\x07",
+                "\x1b]12;rgb:7979/8b8b/c1c1\x07",
+                "\x1b]4;1;rgb:1212/3434/5656\x07",
+                "\x1b]4;16;rgb:0000/0000/0000\x07",
+                "\x1b]4;21;rgb:0000/0000/ffff\x07",
+                "\x1b]4;196;rgb:ffff/0000/0000\x07",
+                "\x1b]4;231;rgb:ffff/ffff/ffff\x07",
+                "\x1b]4;232;rgb:0808/0808/0808\x07",
+                "\x1b]4;255;rgb:eeee/eeee/eeee\x07",
+            ]
+        );
+    }
 
     #[test]
     fn prompt_titles() {

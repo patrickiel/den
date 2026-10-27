@@ -55,27 +55,6 @@ fn hsla_rgb(color: Hsla) -> Rgb {
     }
 }
 
-pub fn palette_rgb(index: usize) -> Rgb {
-    let value = match index {
-        0..=15 => return hsla_rgb(palette().ansi[index]),
-        16..=231 => {
-            let i = index - 16;
-            let level = |v: usize| if v == 0 { 0 } else { 55 + v as u32 * 40 };
-            (level(i / 36) << 16) | (level((i / 6) % 6) << 8) | level(i % 6)
-        }
-        232..=255 => {
-            let v = 8 + (index as u32 - 232) * 10;
-            (v << 16) | (v << 8) | v
-        }
-        _ => 0xcccccc,
-    };
-    Rgb {
-        r: (value >> 16) as u8,
-        g: (value >> 8) as u8,
-        b: value as u8,
-    }
-}
-
 pub fn rgb_hsla(rgb: Rgb) -> Hsla {
     gpui_kit::rgb((rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32).into()
 }
@@ -102,11 +81,36 @@ impl Palette {
         }
     }
 
+    /// The colours painted by the terminal, for OSC 4/10/11/12 replies.
+    pub fn rgb(&self, index: usize) -> Rgb {
+        let value = match index {
+            0..=15 => return hsla_rgb(self.ansi[index]),
+            16..=231 => {
+                let i = index - 16;
+                let level = |v: usize| if v == 0 { 0 } else { 55 + v as u32 * 40 };
+                (level(i / 36) << 16) | (level((i / 6) % 6) << 8) | level(i % 6)
+            }
+            232..=255 => {
+                let v = 8 + (index as u32 - 232) * 10;
+                (v << 16) | (v << 8) | v
+            }
+            index if index == NamedColor::Foreground as usize => return hsla_rgb(self.foreground),
+            index if index == NamedColor::Background as usize => return hsla_rgb(self.background),
+            index if index == NamedColor::Cursor as usize => return hsla_rgb(self.cursor),
+            _ => 0xcccccc,
+        };
+        Rgb {
+            r: (value >> 16) as u8,
+            g: (value >> 8) as u8,
+            b: value as u8,
+        }
+    }
+
     fn indexed(&self, index: usize) -> Hsla {
         if index < 16 {
             self.ansi[index]
         } else {
-            rgb_hsla(palette_rgb(index))
+            rgb_hsla(self.rgb(index))
         }
     }
 
