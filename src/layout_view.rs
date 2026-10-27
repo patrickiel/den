@@ -1138,6 +1138,7 @@ impl Workspace {
                 let flash = self.flash_alpha(Flash::Tab(pane_id), window);
                 Some(
                     Tab::new()
+                        .cursor_default()
                         .when(strip_hint == Some(Some(ix)), |tab| {
                             tab.border_l_2().border_color(cx.theme().drag_border)
                         })
@@ -1477,7 +1478,7 @@ impl Workspace {
             .relative()
             .w_full()
             .flex_none()
-            .cursor_grab()
+            .cursor_default()
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.tab_menu = None))
             .on_drag(GroupDrag { node: group }, |_, _, _, cx| {
                 cx.new(|_| DragLabel("Group".into()))
