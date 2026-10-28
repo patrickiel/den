@@ -2850,7 +2850,7 @@ impl Workspace {
 
     // -- Session -------------------------------------------------------------
 
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self._save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(500))

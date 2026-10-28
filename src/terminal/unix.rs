@@ -61,6 +61,10 @@ unalias claude 2>/dev/null
 if [[ -n "$DEN_CLAUDE_HOOKS" ]]; then
   claude() { command claude --settings "$DEN_CLAUDE_HOOKS" "$@" }
 fi
+unalias codex 2>/dev/null
+if [[ -n "$DEN_CODEX_NOTIFY" ]]; then
+  codex() { command codex -c tui.notifications=true -c tui.notification_method=osc9 -c "notify=$DEN_CODEX_NOTIFY" "$@" }
+fi
 
 # Nested shells get your own files (zsh reads your .zlogin from there next).
 ZDOTDIR="$DEN_USER_ZDOTDIR"
@@ -93,6 +97,10 @@ PROMPT_COMMAND="__den_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 unalias claude 2>/dev/null
 if [ -n "$DEN_CLAUDE_HOOKS" ]; then
   claude() { command claude --settings "$DEN_CLAUDE_HOOKS" "$@"; }
+fi
+unalias codex 2>/dev/null
+if [ -n "$DEN_CODEX_NOTIFY" ]; then
+  codex() { command codex -c tui.notifications=true -c tui.notification_method=osc9 -c "notify=$DEN_CODEX_NOTIFY" "$@"; }
 fi
 
 # The tab's first command: a preset, or a session coming back.
@@ -147,6 +155,9 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
     if let Some(hooks) = agent::claude_hooks(pane) {
         cmd.env("DEN_CLAUDE_HOOKS", hooks);
     }
+    if let Some(notify) = agent::codex_notify(pane) {
+        cmd.env("DEN_CODEX_NOTIFY", notify);
+    }
     if let Some(command) = command {
         cmd.env("DEN_INIT_COMMAND", agent::inject(pane, command, true));
     }
@@ -186,6 +197,9 @@ pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>)
         // `/p` takes a Windows path with backslashes.
         cmd.env("DEN_CLAUDE_HOOKS", hooks.replace('/', "\\"));
     }
+    if let Some(notify) = agent::codex_notify(pane) {
+        cmd.env("DEN_CODEX_NOTIFY", notify);
+    }
     if let Some(command) = command {
         cmd.env("DEN_INIT_COMMAND", agent::inject(pane, command, true));
     }
@@ -193,6 +207,7 @@ pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>)
         "DEN_ZSH/p",
         "DEN_BASH/p",
         "DEN_CLAUDE_HOOKS/p",
+        "DEN_CODEX_NOTIFY",
         "DEN_INIT_COMMAND",
         "TERM",
         "COLORTERM",

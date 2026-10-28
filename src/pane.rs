@@ -18,6 +18,8 @@ use crate::workspace::Workspace;
 pub enum PaneEvent {
     /// Its title, icon or dirty mark changed: redraw the tab strip.
     Changed,
+    /// Its resumable state changed: redraw and save the workspace session.
+    SessionChanged,
     /// Open a file (a link clicked in a terminal), at a position if given.
     OpenFile {
         path: std::path::PathBuf,
@@ -139,6 +141,10 @@ impl<T: Pane> PaneHandle for Entity<T> {
             window,
             move |this, _, event: &PaneEvent, window, cx| match event {
                 PaneEvent::Changed => this.pane_changed(id, cx),
+                PaneEvent::SessionChanged => {
+                    this.pane_changed(id, cx);
+                    this.schedule_save(cx);
+                }
                 PaneEvent::OpenFile { path, line, column } => {
                     this.open_file_at(path.clone(), *line, *column, window, cx)
                 }

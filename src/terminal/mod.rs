@@ -99,20 +99,12 @@ pub fn init(cx: &mut App) {
             .filter(|dir| dir.is_dir())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let program = data["program"].as_str().map(str::to_string);
-        let agent = data["agent"]
-            .as_bool()
-            .unwrap_or(program.as_deref() == Some("claude"));
-        // A program comes back anew; Claude Code picks its conversation up
-        // again: the one its hooks named, else the folder's last.
-        let command = match data["resume"].as_str() {
-            Some(resume) => Some(resume.to_string()),
-            None => program.as_deref().map(|program| {
-                match agent::program_of(program.split_whitespace().next().unwrap_or("")).as_str() {
-                    "claude" => agent::claude_resume(Some(program), None, false),
-                    _ => program.to_string(),
-                }
-            }),
-        };
+        let agent = data["agent"].as_bool().unwrap_or_else(|| {
+            program
+                .as_deref()
+                .is_some_and(|p| agent::resume(p, None, true).is_some())
+        });
+        let command = restored_command(data);
         let history = data["scrollback"].as_str().map(str::to_string);
         let launch = Launch {
             cwd,
@@ -130,6 +122,16 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", SendText("\t".into()), context),
         KeyBinding::new("shift-tab", SendText("\x1b[Z".into()), context),
     ]);
+}
+
+/// A saved tab returns to the conversation its hooks named. Older saves
+/// without a resume command use the agent's fallback for the current folder.
+fn restored_command(data: &Value) -> Option<String> {
+    data["resume"].as_str().map(str::to_string).or_else(|| {
+        data["program"].as_str().map(|program| {
+            agent::resume(program, None, false).unwrap_or_else(|| program.to_string())
+        })
+    })
 }
 
 /// What a plain Ctrl+letter sends a terminal's program (Ctrl+W: 0x17): such
@@ -347,6 +349,9 @@ pub struct TerminalPanel {
     /// The Claude Code conversation running here, from its hooks: `None`
     /// while none runs, `Some(None)` for a new one not yet named.
     claude_session: Option<Option<String>>,
+    /// Codex's exact resume command, from its callback. Kept from launch
+    /// until another callback arrives, including an immediate second restart.
+    codex_resume: Option<String>,
     /// The last alert, so a burst (a bell and a hook) alerts once.
     last_alert: Option<std::time::Instant>,
     /// Wheel movement not yet sent as a page to a full-screen program.
@@ -397,6 +402,10 @@ impl TerminalPanel {
             None => exe_name(&shell),
         };
         let program_is_set = program.is_some() && !own_shell;
+        let codex_resume = command
+            .as_ref()
+            .filter(|command| agent::is_codex(command))
+            .cloned();
         let mut this = Self {
             focus_handle,
             cwd,
@@ -425,6 +434,7 @@ impl TerminalPanel {
             hook_id: NEXT_HOOK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             last_alert: None,
             claude_session: None,
+            codex_resume,
             program_running: program_is_set,
             wheel_lines: 0,
             focus_window: None,
@@ -605,10 +615,14 @@ impl TerminalPanel {
             self.cwd = cwd;
             // The shell's prompt is back: whatever program or Claude Code ran
             // has ended.
-            self.claude_session = None;
-            if self.program_running {
+            let had_claude = self.claude_session.take().is_some();
+            // A Codex preset keeps its last conversation even after the CLI
+            // exits; a plain shell returns as a shell after a typed Codex exits.
+            let had_codex = self.program.as_deref().is_none_or(|p| !agent::is_codex(p))
+                && self.codex_resume.take().is_some();
+            if self.program_running || had_claude || had_codex {
                 self.program_running = false;
-                cx.emit(PaneEvent::Changed);
+                cx.emit(PaneEvent::SessionChanged);
             }
         }
         for message in messages {
@@ -698,7 +712,21 @@ impl TerminalPanel {
 
     /// A hook of the agent running here reported.
     fn agent_event(&mut self, event: &agent::AgentEvent, cx: &mut Context<Self>) {
+        if event.agent == "codex" {
+            if let Some(resume) = agent::codex_notified_resume(self.program.as_deref(), &event.body)
+            {
+                if self.codex_resume.as_ref() != Some(&resume) {
+                    self.codex_resume = Some(resume);
+                    cx.emit(PaneEvent::SessionChanged);
+                }
+            }
+            if event.kind == "done" {
+                self.alert(AlertKind::Done, agent::message(&event.body), cx);
+            }
+            return;
+        }
         let session = agent::hook_field(&event.body, "session_id");
+        let previous = self.claude_session.clone();
         match event.kind.as_str() {
             "start" => {
                 // A new or cleared conversation has no transcript to resume yet.
@@ -708,10 +736,16 @@ impl TerminalPanel {
                 } else {
                     session
                 });
+                if self.claude_session != previous {
+                    cx.emit(PaneEvent::SessionChanged);
+                }
                 return;
             }
             _ if session.is_some() => self.claude_session = Some(session),
             _ => {}
+        }
+        if self.claude_session != previous {
+            cx.emit(PaneEvent::SessionChanged);
         }
         let kind = match event.kind.as_str() {
             // Not done yet: the agents report back with another turn.
@@ -1230,9 +1264,8 @@ impl Pane for TerminalPanel {
             "program": self.program,
             "agent": self.agent,
             // A shell brings its last screens back; a program redraws itself.
-            "scrollback": if self.program.as_deref().is_none_or(is_shell) && self.claude_session.is_none() { self.scrollback(500) } else { String::new() },
-            // The Claude Code conversation to bring back, as den does.
-            "resume": self.claude_session.as_ref().map(|session| agent::claude_resume(self.program.as_deref(), session.as_deref(), session.is_none())),
+            "scrollback": if self.program.as_deref().is_none_or(is_shell) && self.claude_session.is_none() && self.codex_resume.is_none() { self.scrollback(500) } else { String::new() },
+            "resume": self.codex_resume.clone().or_else(|| self.claude_session.as_ref().map(|session| agent::claude_resume(self.program.as_deref(), session.as_deref(), session.is_none()))),
         })
     }
 }
@@ -1332,8 +1365,36 @@ impl Render for TerminalPanel {
 mod tests {
     use super::{
         Config, GridSize, Listener, Processor, Term, TermEvent, colors, is_prompt_title, is_shell,
-        tail_text,
+        restored_command, tail_text,
     };
+
+    #[test]
+    fn codex_tabs_restore_their_saved_conversation_and_legacy_commands() {
+        use serde_json::json;
+        let first =
+            json!({ "program": "codex --model test", "resume": "codex --model test resume tab-1" });
+        let second = json!({ "program": "codex", "resume": "codex resume tab-2" });
+        for data in [first, second] {
+            let command = restored_command(&data).unwrap();
+            assert_eq!(command, data["resume"]);
+        }
+        assert_eq!(
+            restored_command(&json!({ "program": "codex" })).as_deref(),
+            Some("codex resume --last")
+        );
+        assert_eq!(
+            restored_command(&json!({ "program": "codex resume explicit-id" })).as_deref(),
+            Some("codex resume explicit-id")
+        );
+        assert_eq!(
+            restored_command(&json!({ "program": "codex exec 'hello'" })).as_deref(),
+            Some("codex exec 'hello'")
+        );
+        assert_eq!(
+            restored_command(&json!({ "program": "pnpm dev" })).as_deref(),
+            Some("pnpm dev")
+        );
+    }
 
     fn test_palette(foreground: u32, background: u32, cursor: u32) -> colors::Palette {
         colors::Palette {

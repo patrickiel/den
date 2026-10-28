@@ -4,8 +4,8 @@
 //!
 //! A layout preset is shareable across projects: paths inside the folder are
 //! stored relative to it, and it keeps no machine state (a terminal's
-//! scrollback, where a floating window sits) and no Claude Code
-//! conversation, so its Claude tabs start anew.
+//! scrollback, where a floating window sits) and no agent conversation,
+//! so its agent tabs start anew.
 //!
 //! Every terminal, Claude Code's too, starts in the folder or a folder inside
 //! it: one saved elsewhere (a preset from another project) or whose folder
@@ -31,15 +31,7 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
             for key in MACHINE_KEYS {
                 data.remove(*key);
             }
-            if data.get("resume").is_some_and(Value::is_string) {
-                let program = data
-                    .get("program")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let fresh = crate::backend::agent::claude_resume(program.as_deref(), None, true);
-                data.insert("program".into(), Value::String(fresh.clone()));
-                data.insert("resume".into(), Value::String(fresh));
-            }
+            clear_conversation(data);
             for key in PATH_KEYS {
                 if let Some(text) = data.get(*key).and_then(Value::as_str)
                     && let Some(rel) = relative(Path::new(text), root)
@@ -57,14 +49,20 @@ pub fn shareable(layout: &Value, root: &Path) -> Value {
     layout
 }
 
-/// Whether a pane's data is a Claude Code tab's.
-fn is_claude(data: &serde_json::Map<String, Value>) -> bool {
-    let program = data.get("program").and_then(Value::as_str).unwrap_or("");
-    crate::backend::agent::program_of(program.split_whitespace().next().unwrap_or("")) == "claude"
+/// A layout copied into another project keeps an agent's flags but never
+/// the conversation from its original project, including explicit resumes.
+fn clear_conversation(data: &mut serde_json::Map<String, Value>) {
+    let fresh = ["program", "resume"]
+        .iter()
+        .find_map(|key| crate::backend::agent::resume(data.get(*key)?.as_str()?, None, true));
+    if let Some(fresh) = fresh {
+        data.insert("program".into(), Value::String(fresh.clone()));
+        data.insert("resume".into(), Value::String(fresh));
+    }
 }
 
 /// Start terminal `data` in `root` when its folder is outside `root` or gone:
-/// the folder's terminals run in the folder. A Claude Code conversation from
+/// the folder's terminals run in the folder. An agent conversation from
 /// elsewhere is not found here, so such a tab starts anew.
 fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
     let Some(cwd) = data.get("cwd").and_then(Value::as_str).map(PathBuf::from) else {
@@ -77,19 +75,8 @@ fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
             Value::String(root.to_string_lossy().into_owned()),
         );
     }
-    if outside && is_claude(data) {
-        let program = data
-            .get("program")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        data.insert(
-            "resume".into(),
-            Value::String(crate::backend::agent::claude_resume(
-                program.as_deref(),
-                None,
-                true,
-            )),
-        );
+    if outside {
+        clear_conversation(data);
     }
 }
 
@@ -241,6 +228,53 @@ mod tests {
             preset(&full, root)["panes"]["1"]["data"]["resume"],
             "claude"
         );
+    }
+
+    #[test]
+    fn codex_tabs_keep_separate_sessions_and_presets_start_fresh() {
+        let root = crate_root();
+        let full = json!({ "panes": {
+            "1": { "kind": "Terminal", "data": { "cwd": root, "program": "codex --model test", "resume": "codex --model test resume first-id" } },
+            "2": { "kind": "Terminal", "data": { "cwd": root, "program": "codex resume old-id", "resume": "codex resume second-id" } },
+            "3": { "kind": "Terminal", "data": { "cwd": root, "program": null, "resume": "codex resume typed-id" } },
+            "4": { "kind": "Terminal", "data": { "cwd": root, "program": "codex resume explicit-id", "resume": null } }
+        }});
+        let restored = restore(full.clone(), root);
+        assert_eq!(
+            restored["panes"]["1"]["data"]["resume"],
+            "codex --model test resume first-id"
+        );
+        assert_eq!(
+            restored["panes"]["2"]["data"]["resume"],
+            "codex resume second-id"
+        );
+        assert_eq!(
+            restored["panes"]["3"]["data"]["resume"],
+            "codex resume typed-id"
+        );
+        let shared = shareable(&full, root);
+        assert_eq!(shared["panes"]["1"]["data"]["resume"], "codex --model test");
+        for id in ["2", "3", "4"] {
+            assert_eq!(shared["panes"][id]["data"]["program"], "codex");
+            assert_eq!(shared["panes"][id]["data"]["resume"], "codex");
+        }
+        let elsewhere = root.parent().unwrap();
+        let moved = restore(full, elsewhere);
+        assert_eq!(
+            moved["panes"]["1"]["data"]["resume"],
+            "codex --model test resume first-id"
+        );
+        // A tab saved outside this workspace must not bring its old conversation here.
+        let outside = json!({ "panes": { "1": { "kind": "Terminal", "data": {
+            "cwd": elsewhere, "program": "codex resume other-project", "resume": "codex resume other-project"
+        }}}});
+        let moved = restore(outside, root);
+        assert_eq!(
+            moved["panes"]["1"]["data"]["cwd"],
+            root.to_string_lossy().as_ref()
+        );
+        assert_eq!(moved["panes"]["1"]["data"]["program"], "codex");
+        assert_eq!(moved["panes"]["1"]["data"]["resume"], "codex");
     }
 
     #[test]

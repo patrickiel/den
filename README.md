@@ -15,7 +15,7 @@ In VS Code, terminals are squeezed into a bottom panel and a file opens wherever
 - **A layout you design.** Split the window any way you like, then give each area a job: terminals here, files there, agents on the right. Open a file and it lands in the files area, every time. Each project remembers its layout, and you can save your favorites as presets.
 - **Native and fast.** Written in Rust on GPUI, the GPU-rendered UI framework behind Zed. No Electron, no web view for the UI.
 - **Feels like VS Code.** The same shortcuts, the same command palette (Ctrl+Shift+P) and Quick Open (Ctrl+P), your VS Code color themes, and an Extensions view to add features.
-- **Made for coding agents.** Claude Code, Codex or any command is one click away. den marks the tab when an agent finishes or needs your input, and Claude Code sessions resume after a restart.
+- **Made for coding agents.** Claude Code, Codex or any command is one click away. den marks the tab when an agent finishes or needs your input, and Claude Code and Codex sessions resume after a restart or workspace switch.
 
 ## Also included
 
