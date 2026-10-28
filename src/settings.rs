@@ -2,7 +2,7 @@
 //!
 //! `settings.json` holds what the Settings tab edits; `state.json` holds what
 //! the app remembers by itself: layout presets, the sidebar, and per session
-//! (folder) its layout and expanded Explorer folders.
+//! (folder) its color, layout and expanded Explorer folders.
 
 use std::{
     collections::HashMap,
@@ -352,9 +352,67 @@ impl Default for SidebarState {
     }
 }
 
+/// A workspace's identity color, independent of its layout and recent-list entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceColor {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl WorkspaceColor {
+    pub const ALL: [Self; 8] = [
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Teal,
+        Self::Blue,
+        Self::Purple,
+        Self::Pink,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Pink => "Pink",
+        }
+    }
+
+    /// Keep the same hue readable as text in both light and dark menus.
+    pub fn foreground(self, dark: bool) -> Hsla {
+        let (light, dark_color) = match self {
+            Self::Red => (0xc62828, 0xf87171),
+            Self::Orange => (0xb45309, 0xfb923c),
+            Self::Yellow => (0x8a6500, 0xfacc15),
+            Self::Green => (0x237a3b, 0x4ade80),
+            Self::Teal => (0x0f766e, 0x2dd4bf),
+            Self::Blue => (0x1d4ed8, 0x60a5fa),
+            Self::Purple => (0x7e22ce, 0xc084fc),
+            Self::Pink => (0xbe185d, 0xf472b6),
+        };
+        rgb(if dark { dark_color } else { light }).into()
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
+    /// Kept with the workspace even when it leaves the recent folders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<WorkspaceColor>,
     /// A `LayoutState`, kept as JSON so a layout an older build wrote cannot
     /// spoil the rest of the file.
     pub layout: Option<serde_json::Value>,
@@ -444,6 +502,10 @@ impl AppState {
 
     pub fn session_mut(&mut self, root: &Path) -> &mut Session {
         self.sessions.entry(session_key(root)).or_default()
+    }
+
+    pub fn workspace_color(&self, root: &Path) -> Option<WorkspaceColor> {
+        self.sessions.get(&session_key(root)).and_then(|s| s.color)
     }
 }
 
@@ -792,7 +854,7 @@ pub fn mono_font(cx: &App) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_settings, session_key, strip_verbatim, unique_names, write_text};
+    use super::{AppState, WorkspaceColor, read_settings, session_key, strip_verbatim, write_text};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -867,10 +929,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn workspace_colors_survive_reload_and_recent_removal() {
+        let (first, second) = (Path::new("/projects/a/app"), Path::new("/projects/b/app"));
+        let mut state = AppState::default();
+        state.opened(first);
+        state.opened(second);
+        state.session_mut(first).color = Some(WorkspaceColor::Blue);
+        state.session_mut(second).color = Some(WorkspaceColor::Orange);
+        // Layout changes and removing a recent entry leave the workspace's color.
+        state.session_mut(first).layout = Some(serde_json::json!({ "panes": {} }));
+        state.recent.retain(|path| path != first);
+
+        let dir = std::env::temp_dir().join(format!("den-color-test-{}", std::process::id()));
+        let path = dir.join("state.json");
+        write_text(&path, &super::pretty(&state)).unwrap();
+        let mut restored: AppState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(!restored.recent.contains(&first.to_path_buf()));
+        restored.opened(first);
+        assert_eq!(restored.workspace_color(first), Some(WorkspaceColor::Blue));
+        assert_eq!(
+            restored.workspace_color(second),
+            Some(WorkspaceColor::Orange)
+        );
+
+        // Reset persists too, without changing the other workspace.
+        restored.session_mut(first).color = None;
+        write_text(&path, &super::pretty(&restored)).unwrap();
+        let restored: AppState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored.workspace_color(first), None);
+        assert_eq!(
+            restored.workspace_color(second),
+            Some(WorkspaceColor::Orange)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn older_sessions_start_without_a_workspace_color() {
+        let root = Path::new("/projects/app");
+        let old_state = serde_json::json!({
+            "recent": [root],
+            "sessions": { (session_key(root)): { "commit_message": "draft" } }
+        });
+        let restored: AppState = serde_json::from_value(old_state).unwrap();
+        assert_eq!(restored.workspace_color(root), None);
+        assert_eq!(restored.session(root).commit_message, "draft");
+    }
+
     // Windows paths, which only Windows splits into folders.
     #[cfg(windows)]
     fn names(paths: &[&str]) -> Vec<String> {
-        unique_names(&paths.iter().map(PathBuf::from).collect::<Vec<_>>())
+        super::unique_names(&paths.iter().map(PathBuf::from).collect::<Vec<_>>())
     }
 
     #[test]

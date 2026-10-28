@@ -21,6 +21,7 @@ use gpui_kit::component::{
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     resizable::resize_handle_appearance,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -51,6 +52,7 @@ use crate::{
     search::{IsDirty, SearchEvent, SearchView},
     settings::{
         AppState, LayoutPreset, Settings, SidebarSide, SidebarState, SidebarView, WindowState,
+        WorkspaceColor,
     },
     terminal::{Launch, TerminalPanel},
 };
@@ -146,6 +148,7 @@ pub fn window_title(root: &std::path::Path, cx: &App) -> String {
 fn recent_menu(
     this: WeakEntity<Workspace>,
     root: PathBuf,
+    color_for: Option<PathBuf>,
     menu: PopupMenu,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
@@ -166,17 +169,64 @@ fn recent_menu(
             SharedString::from(path.display().to_string()),
         );
         let forget = path.clone();
+        let color_path = path.clone();
+        let picker_path = path.clone();
+        let picking_color = color_for.as_ref() == Some(&path);
         let rebuild = (this.clone(), root.clone(), own.clone());
-        let item = PopupMenuItem::element(move |_, _| {
+        let item = PopupMenuItem::element(move |_, cx| {
             let full = full.clone();
             let forget = forget.clone();
+            let color_path = color_path.clone();
+            let color = AppState::get(cx)
+                .workspace_color(&color_path)
+                .map(|color| color.foreground(cx.theme().is_dark()));
+            let (color_this, color_root, color_menu) = rebuild.clone();
             let (this, root, own) = rebuild.clone();
             h_flex()
                 .id(("recent", ix))
                 .group(SharedString::from(format!("recent-{ix}")))
                 .w_full()
                 .gap_2()
-                .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                .child(
+                    div()
+                        .id(("recent-name", ix))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .when_some(color, |this, color| this.text_color(color))
+                        .child(label.clone())
+                        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)),
+                )
+                .child(
+                    h_flex()
+                        .id(("color-recent", ix))
+                        .flex_none()
+                        .size(px(16.))
+                        .justify_center()
+                        .when(!picking_color, |this| {
+                            this.invisible()
+                                .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
+                                    this.visible()
+                                })
+                        })
+                        .rounded(px(3.))
+                        .cursor_pointer()
+                        .text_color(color.unwrap_or(cx.theme().muted_foreground))
+                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                        .child(Icon::new(IconName::Palette).xsmall())
+                        .tooltip(|window, cx| Tooltip::new("Workspace color").build(window, cx))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let color_for = (!picking_color).then(|| color_path.clone());
+                            let (this, root) = (color_this.clone(), color_root.clone());
+                            _ = color_menu.update(cx, |menu, cx| {
+                                menu.rebuild(window, cx, |menu, _, cx| {
+                                    recent_menu(this, root, color_for, menu, cx)
+                                })
+                            });
+                        }),
+                )
                 // The x takes the folder off the list (its saved session stays),
                 // as in den.
                 .child(
@@ -202,16 +252,14 @@ fn recent_menu(
                             let (this, root) = (this.clone(), root.clone());
                             _ = own.update(cx, |menu, cx| {
                                 menu.rebuild(window, cx, |menu, _, cx| {
-                                    recent_menu(this, root, menu, cx)
+                                    recent_menu(this, root, None, menu, cx)
                                 })
                             });
                             window.refresh();
                         }),
                 )
-                .tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
-                })
         });
+        let picker_this = this.clone();
         // Opens the folder in a window of its own, leaving this one be.
         menu = menu.item(
             item.icon(Icon::new(IconName::Folder))
@@ -221,6 +269,18 @@ fn recent_menu(
                     });
                 }),
         );
+        if picking_color {
+            let (root, own) = (root.clone(), own.clone());
+            menu = menu.item(PopupMenuItem::element(move |_, cx| {
+                recent_color_picker(
+                    picker_path.clone(),
+                    picker_this.clone(),
+                    root.clone(),
+                    own.clone(),
+                    cx,
+                )
+            }));
+        }
     }
     let open = this.clone();
     let new_window = this;
@@ -239,6 +299,75 @@ fn recent_menu(
                     _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
                 }),
         )
+}
+
+/// A single row of distinct swatches under the folder being edited. Keeping it
+/// inside the menu also keeps choosing a color from opening the folder.
+fn recent_color_picker(
+    path: PathBuf,
+    this: WeakEntity<Workspace>,
+    root: PathBuf,
+    menu: WeakEntity<PopupMenu>,
+    cx: &App,
+) -> AnyElement {
+    let selected = AppState::get(cx).workspace_color(&path);
+    let theme = cx.theme();
+    let (dark, foreground, hover) = (theme.is_dark(), theme.foreground, theme.accent);
+    h_flex()
+        .id("workspace-color-picker")
+        .w_full()
+        .gap(px(2.))
+        .py_1()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .children(
+            std::iter::once(None)
+                .chain(WorkspaceColor::ALL.map(Some))
+                .enumerate()
+                .map(move |(ix, color)| {
+                    let (path, this, root, menu) =
+                        (path.clone(), this.clone(), root.clone(), menu.clone());
+                    div()
+                        .id(("workspace-color", ix))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.))
+                        .p(px(3.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if color == selected {
+                            foreground
+                        } else {
+                            transparent_black()
+                        })
+                        .cursor_pointer()
+                        .hover(move |this| this.bg(hover))
+                        .when_some(color, |this, color| {
+                            this.child(div().size_full().rounded_full().bg(color.foreground(dark)))
+                        })
+                        .when(color.is_none(), |this| {
+                            this.child(Icon::new(IconName::Ban).xsmall())
+                        })
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(color.map_or("Default color", WorkspaceColor::name))
+                                .build(window, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            AppState::update(cx, |state| state.session_mut(&path).color = color);
+                            let (this, root) = (this.clone(), root.clone());
+                            _ = menu.update(cx, |menu, cx| {
+                                menu.rebuild(window, cx, |menu, _, cx| {
+                                    recent_menu(this, root, None, menu, cx)
+                                })
+                            });
+                            window.refresh();
+                        })
+                }),
+        )
+        .into_any_element()
 }
 
 /// A layout preset being dragged to another place in the Layouts menu.
@@ -3656,7 +3785,9 @@ impl Workspace {
                 Some(keys) => format!("Switch session ({keys} opens a folder)"),
                 None => "Switch session".to_string(),
             })
-            .dropdown_menu(move |menu, _, cx| recent_menu(this.clone(), root.clone(), menu, cx))
+            .dropdown_menu(move |menu, _, cx| {
+                recent_menu(this.clone(), root.clone(), None, menu, cx)
+            })
     }
 
     fn render_sidebar(&self, cx: &App) -> AnyElement {
