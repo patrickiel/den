@@ -2619,6 +2619,14 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
+        // Open in another window already: that window comes to the front,
+        // and this one stays as it is.
+        if let Some(other) = crate::extensions::window_on(&root, cx)
+            && other != window.window_handle()
+        {
+            crate::focus_window(other, cx);
+            return;
+        }
         if new_window {
             crate::open_workspace(root, cx);
             return;

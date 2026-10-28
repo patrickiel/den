@@ -25,6 +25,7 @@ mod file_icon;
 mod float;
 mod git_graph;
 mod history;
+mod instance;
 mod keymap;
 mod layout;
 mod layout_view;
@@ -117,8 +118,13 @@ pub struct FocusGroup(pub usize);
 #[action(namespace = den, no_json)]
 pub struct OpenPreset(pub usize);
 
-/// A window on the session for `root`, as it was when last open there.
+/// A window on the session for `root`, as it was when last open there. With
+/// one open on it already, that window comes to the front instead.
 pub fn open_workspace(root: PathBuf, cx: &mut App) {
+    if let Some(window) = extensions::window_on(&root, cx) {
+        focus_window(window, cx);
+        return;
+    }
     let min = size(px(640.), px(400.));
     let (bounds, display_id) = workspace::main_window_bounds(&root, min, cx);
     let options = WindowOptions {
@@ -163,6 +169,12 @@ pub fn switch_workspace(root: PathBuf, window: &mut Window, cx: &mut App) {
     if let Some(workspace) = workspace {
         workspace_opened(root, workspace, window, cx);
     }
+}
+
+/// Bring `window` to the front, and den with it when another app is there.
+pub fn focus_window(window: AnyWindowHandle, cx: &mut App) {
+    cx.activate(true);
+    _ = window.update(cx, |_, window, _| window.activate_window());
 }
 
 /// A workspace now in `window`: named in the title, known to the extensions.
@@ -607,6 +619,12 @@ fn main() {
         .into_iter()
         .map(|root| settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root)))
         .collect();
+    // A folder another den has open shows there; with every one of them
+    // handed over, this den has nothing to show.
+    let roots = instance::hand_off(roots);
+    if roots.is_empty() {
+        return;
+    }
 
     gpui_kit::application()
         .with_assets(assets::Assets)
@@ -627,6 +645,9 @@ fn main() {
             if ui::COMMAND_KEY {
                 on_window_actions(cx);
             }
+            // Before any window takes a folder's lock: a den started on it
+            // meanwhile finds this one listening.
+            instance::serve(cx);
 
             for root in roots {
                 open_workspace(root, cx);

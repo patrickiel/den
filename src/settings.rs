@@ -589,29 +589,62 @@ pub fn last_folder() -> Option<PathBuf> {
 /// crashes included.
 pub struct FolderLock {
     _file: std::fs::File,
+    /// Where this den's address is noted for the others (see `instance`).
+    holder: PathBuf,
 }
 
 impl FolderLock {
-    fn file(root: &Path) -> Option<std::fs::File> {
+    fn path(root: &Path) -> Option<PathBuf> {
         let dir = data_dir().join("open");
         std::fs::create_dir_all(&dir).ok()?;
+        Some(dir.join(session_key(root)))
+    }
+
+    fn file(root: &Path) -> Option<std::fs::File> {
         std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(dir.join(session_key(root)))
+            .open(Self::path(root)?)
             .ok()
+    }
+
+    /// The file beside the lock that names the den holding it. A file of
+    /// its own: Windows lets no other process read a locked file.
+    fn holder_path(root: &Path) -> Option<PathBuf> {
+        Some(Self::path(root)?.with_extension("den"))
     }
 
     pub fn new(root: &Path) -> Option<Self> {
         let file = Self::file(root)?;
         file.try_lock().ok()?;
-        Some(Self { _file: file })
+        let holder = Self::holder_path(root)?;
+        let _ = std::fs::write(&holder, crate::instance::address());
+        Some(Self {
+            _file: file,
+            holder,
+        })
     }
 
     fn held_elsewhere(root: &Path) -> bool {
         Self::file(root)
             .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+    }
+
+    /// The address of the den that has `root` open, when one does.
+    pub fn holder(root: &Path) -> Option<String> {
+        if !Self::held_elsewhere(root) {
+            return None;
+        }
+        let address = std::fs::read_to_string(Self::holder_path(root)?).ok()?;
+        let address = address.trim();
+        (!address.is_empty()).then(|| address.to_string())
+    }
+}
+
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.holder);
     }
 }
 

@@ -602,6 +602,19 @@ pub fn window_opened(
     extensions.windows.push((root, workspace, window));
 }
 
+/// The window open on `root` in this den, if any.
+pub fn window_on(root: &Path, cx: &App) -> Option<AnyWindowHandle> {
+    if !cx.has_global::<Extensions>() {
+        return None;
+    }
+    let key = crate::repo::key(root);
+    Extensions::get(cx)
+        .windows
+        .iter()
+        .find(|(r, workspace, _)| crate::repo::key(r) == key && workspace.upgrade().is_some())
+        .map(|(_, _, handle)| *handle)
+}
+
 /// The folders of the open windows, each once.
 pub fn open_folders(cx: &App) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
