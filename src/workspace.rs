@@ -468,7 +468,7 @@ impl Workspace {
             })
         });
         let session = AppState::get(cx).session(&root);
-        let repo = cx.new(|cx| Repo::new(root.clone(), cx));
+        let repo = cx.new(|cx| Repo::new(root.clone(), !session.scm_whole_repo, cx));
         let explorer =
             cx.new(|cx| Explorer::new(root.clone(), session.expanded.clone(), repo.clone(), cx));
         let weak = cx.weak_entity();
@@ -2845,6 +2845,7 @@ impl Workspace {
         let layout = serde_json::to_value(self.dump_state(cx)).ok();
         let expanded = self.explorer.read(cx).expanded();
         let draft = self.scm.read(cx).draft(cx);
+        let scm_whole_repo = !self.repo.read(cx).scoped();
         let sidebar_views = self
             .sidebar_views
             .iter()
@@ -2858,6 +2859,7 @@ impl Workspace {
             session.layout = layout;
             session.expanded = expanded;
             session.commit_message = draft;
+            session.scm_whole_repo = scm_whole_repo;
             session.sidebar_views = sidebar_views;
             session.sidebar_shown = sidebar_shown;
             if window_state.is_some() {

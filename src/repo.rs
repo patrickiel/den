@@ -3,6 +3,10 @@
 //! after every operation), recent commits, and the operations, all run off
 //! the UI thread. A refresh reads only as much as what changed asks for
 //! ([`Refresh`]), and one asked for while another runs follows it.
+//!
+//! The root may be a folder inside the repository (a monorepo): then the
+//! status and the commits can be scoped to it ([`Repo::scoped`]), which is
+//! what the rest of den sees.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -62,6 +66,8 @@ pub enum Refresh {
 
 pub struct Repo {
     root: PathBuf,
+    /// Only what is under the root, when that is inside the repository.
+    scoped: bool,
     pub state: RepoState,
     pub commits: Arc<Vec<Commit>>,
     /// The graph through each row: the uncommitted changes first when there
@@ -113,9 +119,10 @@ struct Loaded {
 }
 
 impl Repo {
-    pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
+    pub fn new(root: PathBuf, scoped: bool, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             root,
+            scoped,
             state: RepoState::Loading,
             commits: Arc::new(Vec::new()),
             graph: Vec::new(),
@@ -147,6 +154,35 @@ impl Repo {
             RepoState::Ready { top, .. } => Some(top),
             _ => None,
         }
+    }
+
+    /// The root inside the repository, relative to its top with `/`
+    /// separators: `None` when the root is the top (or not in one).
+    pub fn subdir(&self) -> Option<String> {
+        subdir_of(self.top()?, &self.root)
+    }
+
+    /// Whether the status and the commits are limited to the root; it
+    /// matters only when the root is a [`Self::subdir`].
+    pub fn scoped(&self) -> bool {
+        self.scoped
+    }
+
+    /// Limit the status and the commits to the root, or show the whole
+    /// repository again.
+    pub fn set_scoped(&mut self, scoped: bool, cx: &mut Context<Self>) {
+        if self.scoped == scoped {
+            return;
+        }
+        self.scoped = scoped;
+        cx.notify();
+        self.refresh(cx);
+    }
+
+    /// The pathspec every git read and write is limited to: the subdir,
+    /// while scoped.
+    pub fn scope(&self) -> Option<String> {
+        self.scoped.then(|| self.subdir()).flatten()
     }
 
     pub fn status(&self) -> Option<&Status> {
@@ -200,7 +236,7 @@ impl Repo {
             .top()
             .map(Path::to_path_buf)
             .filter(|_| level < Refresh::Reload);
-        let (root, count) = (self.root.clone(), self.commit_count);
+        let (root, count, scoped) = (self.root.clone(), self.commit_count, self.scoped);
         let (default_branch, github, commits) = (
             self.default_branch.clone(),
             self.github.clone(),
@@ -218,7 +254,12 @@ impl Repo {
                             None => return Ok(None),
                         },
                     };
-                    let status = git::status(&top)?;
+                    let mut status = git::status(&top)?;
+                    let scope = scoped.then(|| subdir_of(&top, &root)).flatten();
+                    if scope.is_some() {
+                        let under = key(&root);
+                        status.files.retain(|f| under_key(&under, &f.path));
+                    }
                     let (default_branch, github) = if reload {
                         (
                             git::default_branch(&top),
@@ -234,8 +275,9 @@ impl Repo {
                     } else {
                         // The default branch found earlier may be gone: then HEAD alone.
                         let revs = git::history_revs(&status, default_branch.as_deref());
-                        let log = git::log(&top, &revs, count, 0)
-                            .or_else(|_| git::log(&top, &["HEAD".into()], count, 0));
+                        let scope = scope.as_deref();
+                        let log = git::log(&top, &revs, count, 0, scope)
+                            .or_else(|_| git::log(&top, &["HEAD".into()], count, 0, scope));
                         Arc::new(log.unwrap_or_default())
                     };
                     let (layout, uncommitted) = lay_out(&status, &commits);
@@ -347,9 +389,8 @@ impl Repo {
         self.run("Discarding…", move |top| git::discard(top, &files), cx);
     }
 
-    /// Commit what is staged; with nothing staged, everything (as den does
-    /// once "Always" was chosen).
-    /// Commit, staging every change first with `stage_all`.
+    /// Commit what is staged; with `stage_all`, every change (in the scope)
+    /// is staged first, as den does once "Always" was chosen.
     pub fn commit(
         &mut self,
         message: String,
@@ -357,11 +398,14 @@ impl Repo {
         stage_all: bool,
         cx: &mut Context<Self>,
     ) {
+        let scope = self.scope();
         self.run(
             "Committing…",
             move |top| {
                 if stage_all {
-                    git::check(top, &["add", "-A"], None)?;
+                    let mut args = vec!["add", "-A", "--"];
+                    args.extend(scope.as_deref());
+                    git::check(top, &args, None)?;
                 }
                 git::commit(top, &message, amend)
             },
@@ -436,6 +480,36 @@ impl Repo {
     }
 }
 
+/// `root` relative to `top` with `/` separators, when it is strictly inside
+/// it (compared as [`key`]s, so case does not matter where the file system
+/// ignores it).
+pub fn subdir_of(top: &Path, root: &Path) -> Option<String> {
+    let (top_key, root_key) = (key(top), key(root));
+    if root_key == top_key || !under_key(&top_key, root) {
+        return None;
+    }
+    let depth = root.components().count() - top.components().count();
+    let parts: Vec<String> = root
+        .components()
+        .rev()
+        .take(depth)
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    Some(parts.into_iter().rev().collect::<Vec<_>>().join("/"))
+}
+
+/// `path` is `dir` (given as its [`key`]) or inside it.
+fn under_key(dir: &str, path: &Path) -> bool {
+    let path = key(path);
+    match path.strip_prefix(dir) {
+        Some("") => true,
+        Some(rest) => {
+            rest.starts_with(std::path::MAIN_SEPARATOR) || dir.ends_with(std::path::MAIN_SEPARATOR)
+        }
+        None => false,
+    }
+}
+
 /// The status by path key: each changed file's letter, the folders holding
 /// changes (up to `top`), and what is ignored.
 fn index(top: &Path, status: &Status) -> Index {
@@ -506,9 +580,28 @@ fn lay_out(status: &Status, commits: &[Commit]) -> (git_graph::Layout, Option<us
 
 #[cfg(test)]
 mod tests {
-    use super::{ignored_under, index, key};
+    use super::{ignored_under, index, key, subdir_of, under_key};
     use crate::backend::git::{FileStatus, Status};
     use std::{collections::HashSet, path::Path};
+
+    #[test]
+    fn subdir_is_the_root_inside_the_top() {
+        let top = Path::new(if cfg!(windows) { r"C:\mono" } else { "/mono" });
+        let apps = top.join("apps").join("assistant");
+        assert_eq!(subdir_of(top, &apps).as_deref(), Some("apps/assistant"));
+        assert_eq!(subdir_of(top, top), None);
+        assert_eq!(subdir_of(top, top.parent().unwrap()), None);
+        // A sibling that shares the top's name as a prefix is not inside it.
+        assert_eq!(subdir_of(top, &top.with_file_name("monorepo")), None);
+        let under = key(&apps);
+        assert!(under_key(&under, &apps.join("src").join("a.rs")));
+        assert!(under_key(&under, &apps));
+        assert!(!under_key(
+            &under,
+            &top.join("apps").join("assistant2").join("x")
+        ));
+        assert!(!under_key(&under, &top.join("dotfiles").join("x")));
+    }
 
     #[test]
     fn keys_ignore_case_and_separators_on_windows() {

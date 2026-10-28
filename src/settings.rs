@@ -367,6 +367,9 @@ pub struct Session {
     pub sidebar_shown: Option<(String, String)>,
     /// The window as it was last, for the next time the folder opens.
     pub window: Option<WindowState>,
+    /// Source Control shows the whole repository, not just this folder,
+    /// when the folder is inside a larger repository (a monorepo).
+    pub scm_whole_repo: bool,
 }
 
 /// A session's window: where it is and how big while not maximized (x, y,

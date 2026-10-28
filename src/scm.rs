@@ -11,7 +11,7 @@ use std::{
 use den_extension::view::Graph;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     avatar::Avatar,
     badge::Badge,
     button::{Button, ButtonVariants as _},
@@ -244,6 +244,21 @@ impl ScmView {
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
         let message = this.read(cx).message.clone();
         message.update(cx, |message, cx| message.focus(window, cx));
+    }
+
+    /// Limit the view to the window's folder, or show the whole repository.
+    /// What a commit changed was read for the other scope: read again.
+    fn set_scoped(&mut self, scoped: bool, cx: &mut Context<Self>) {
+        self.expanded.clear();
+        self.stats.clear();
+        self.selection.clear();
+        self.selection_group = None;
+        let root = self.repo.read(cx).root().to_path_buf();
+        self.repo.update(cx, |repo, cx| repo.set_scoped(scoped, cx));
+        crate::settings::AppState::update(cx, |state| {
+            state.session_mut(&root).scm_whole_repo = !scoped;
+        });
+        cx.notify();
     }
 
     /// The draft commit message, for the session.
@@ -681,6 +696,8 @@ impl ScmView {
         let branch = repo.status().map(|s| s.branch.clone()).unwrap_or_default();
         let top = repo.top().map(|p| p.to_path_buf());
         let busy = repo.busy;
+        let subdir = repo.subdir();
+        let scoped = repo.scoped();
         let handle = self.repo.clone();
         let weak = cx.weak_entity();
 
@@ -811,6 +828,28 @@ impl ScmView {
                     .gap_1()
                     .text_sm()
                     .child(branch_button)
+                    // The window is on a folder inside the repository (a
+                    // monorepo): a switch limits everything to that folder.
+                    .when_some(subdir, |this, subdir| {
+                        let tooltip = if scoped {
+                            format!("Showing only {subdir}. Click for the whole repository.")
+                        } else {
+                            format!("Show only {subdir}")
+                        };
+                        this.child(
+                            Button::new("scope")
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Funnel))
+                                .label(subdir)
+                                .selected(scoped)
+                                .toggled(scoped)
+                                .tooltip(tooltip)
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.set_scoped(!scoped, cx)),
+                                ),
+                        )
+                    })
                     .when_some(busy, |this, busy| {
                         this.child(
                             div()
@@ -1150,6 +1189,7 @@ impl ScmView {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
             return;
         };
+        let scope = self.repo.read(cx).scope();
         enum Update {
             Status(String),
             Text(String),
@@ -1185,6 +1225,7 @@ impl ScmView {
                 }
                 commit_ai::generate(
                     &top,
+                    scope.as_deref(),
                     &config,
                     &cancel,
                     &mut |s| send(Update::Status(s)),
@@ -1316,6 +1357,7 @@ impl ScmView {
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
             return;
         };
+        let scope = self.repo.read(cx).scope();
         let parent = self
             .commit_by_hash(&hash, cx)
             .and_then(|c| c.parents.first().cloned());
@@ -1326,7 +1368,9 @@ impl ScmView {
             let files = cx
                 .background_spawn({
                     let parent = parent.clone();
-                    async move { git::commit_files(&top, &hash, parent.as_deref()) }
+                    async move {
+                        git::commit_files(&top, &hash, parent.as_deref(), scope.as_deref())
+                    }
                 })
                 .await;
             _ = this.update(cx, |this, cx| {
@@ -1352,11 +1396,12 @@ impl ScmView {
             self.stats.insert(commit.hash.clone(), None);
             let (key, hash, top) = (commit.hash.clone(), commit.hash.clone(), top.clone());
             let parent = commit.parents.first().cloned();
+            let scope = self.repo.read(cx).scope();
             cx.spawn(async move |this, cx| {
                 let stat = cx
-                    .background_spawn(
-                        async move { git::commit_stat(&top, &hash, parent.as_deref()) },
-                    )
+                    .background_spawn(async move {
+                        git::commit_stat(&top, &hash, parent.as_deref(), scope.as_deref())
+                    })
                     .await;
                 _ = this.update(cx, |this, cx| {
                     match stat {
@@ -2000,6 +2045,10 @@ impl Render for ScmView {
                 .into_any_element(),
             RepoState::Ready { status, .. } => {
                 let files = &status.files;
+                let empty = match self.repo.read(cx).scope() {
+                    Some(scope) => format!("No changes in {scope}."),
+                    None => "No changes.".to_string(),
+                };
                 // The changes and the commits scroll on their own; the
                 // commits keep their height, which their top edge drags.
                 v_flex()
@@ -2025,7 +2074,7 @@ impl Render for ScmView {
                             .children(self.render_group(Group::Staged, files, cx))
                             .children(self.render_group(Group::Changes, files, cx))
                             .when(files.is_empty(), |this| {
-                                this.child(div().px_3().py_1().text_sm().text_color(theme.muted_foreground).child("No changes."))
+                                this.child(div().px_3().py_1().text_sm().text_color(theme.muted_foreground).child(empty))
                             }),
                     )
                     .child(self.render_commits(cx))

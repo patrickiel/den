@@ -493,9 +493,17 @@ pub struct Commit {
 }
 
 /// `n` commits of `revs` (after the first `skip`), newest first with
-/// children before parents, so a graph can be laid out from them. On an
-/// unborn branch git fails: callers look at `Status::branch` first.
-pub fn log(top: &Path, revs: &[String], n: usize, skip: usize) -> Result<Vec<Commit>, Error> {
+/// children before parents, so a graph can be laid out from them. With a
+/// `pathspec` only the commits touching it, their parents rewritten to the
+/// nearest listed ones so the graph stays connected. On an unborn branch git
+/// fails: callers look at `Status::branch` first.
+pub fn log(
+    top: &Path,
+    revs: &[String],
+    n: usize,
+    skip: usize,
+    pathspec: Option<&str>,
+) -> Result<Vec<Commit>, Error> {
     let format = format!(
         "--format=%H{UNIT}%h{UNIT}%P{UNIT}%an{UNIT}%ae{UNIT}%at{UNIT}%ad{UNIT}%D{UNIT}%s{UNIT}%b{RECORD}"
     );
@@ -511,8 +519,12 @@ pub fn log(top: &Path, revs: &[String], n: usize, skip: usize) -> Result<Vec<Com
         &n,
         &skip,
     ];
+    if pathspec.is_some() {
+        args.push("--parents");
+    }
     args.extend(revs.iter().map(String::as_str));
     args.push("--");
+    args.extend(pathspec);
     let out = check(top, &args, None)?;
     Ok(parse_log(&out.stdout))
 }
@@ -740,33 +752,29 @@ pub struct CommitFile {
 }
 
 /// The files `hash` changed against its first parent `parent` (everything,
-/// for a root commit).
+/// for a root commit), under `pathspec` when given.
 pub fn commit_files(
     top: &Path,
     hash: &str,
     parent: Option<&str>,
+    pathspec: Option<&str>,
 ) -> Result<Vec<CommitFile>, Error> {
-    let out = match parent {
-        Some(parent) => check(
-            top,
-            &["diff", "--name-status", "-M", "-z", parent, hash],
-            None,
-        )?,
-        None => check(
-            top,
-            &[
-                "diff-tree",
-                "--no-commit-id",
-                "-r",
-                "-M",
-                "--root",
-                "--name-status",
-                "-z",
-                hash,
-            ],
-            None,
-        )?,
+    let mut args = match parent {
+        Some(parent) => vec!["diff", "--name-status", "-M", "-z", parent, hash],
+        None => vec![
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "-M",
+            "--root",
+            "--name-status",
+            "-z",
+            hash,
+        ],
     };
+    args.push("--");
+    args.extend(pathspec);
+    let out = check(top, &args, None)?;
     Ok(parse_name_status(&out.stdout))
 }
 
@@ -805,24 +813,28 @@ pub struct Stat {
 }
 
 /// What `hash` changed against its first parent `parent` (everything, for a
-/// root commit).
-pub fn commit_stat(top: &Path, hash: &str, parent: Option<&str>) -> Result<Stat, Error> {
-    let out = match parent {
-        Some(parent) => check(top, &["diff", "--shortstat", "-M", parent, hash], None)?,
-        None => check(
-            top,
-            &[
-                "diff-tree",
-                "--root",
-                "-r",
-                "-M",
-                "--no-commit-id",
-                "--shortstat",
-                hash,
-            ],
-            None,
-        )?,
+/// root commit), under `pathspec` when given.
+pub fn commit_stat(
+    top: &Path,
+    hash: &str,
+    parent: Option<&str>,
+    pathspec: Option<&str>,
+) -> Result<Stat, Error> {
+    let mut args = match parent {
+        Some(parent) => vec!["diff", "--shortstat", "-M", parent, hash],
+        None => vec![
+            "diff-tree",
+            "--root",
+            "-r",
+            "-M",
+            "--no-commit-id",
+            "--shortstat",
+            hash,
+        ],
     };
+    args.push("--");
+    args.extend(pathspec);
+    let out = check(top, &args, None)?;
     Ok(parse_shortstat(&out.stdout))
 }
 
@@ -1147,7 +1159,7 @@ mod tests {
         let status = super::status(&top).unwrap();
         let revs = history_revs(&status, default_branch(&top).as_deref());
         assert_eq!(revs, ["HEAD", "main"]);
-        let commits = log(&top, &revs, 10, 0).unwrap();
+        let commits = log(&top, &revs, 10, 0, None).unwrap();
         assert_eq!(commits[0].subject, "first");
         assert_eq!(commits[0].email, "t@example.com");
         assert!(commits[0].parents.is_empty());
@@ -1160,7 +1172,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            commit_stat(&top, &commits[0].hash, None).unwrap(),
+            commit_stat(&top, &commits[0].hash, None, None).unwrap(),
             Stat {
                 files: 1,
                 insertions: 1,
@@ -1184,7 +1196,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let commits = log(&top, &["HEAD".into()], 10, 0).unwrap();
+        let commits = log(&top, &["HEAD".into()], 10, 0, None).unwrap();
         let subjects: Vec<&str> = commits.iter().map(|c| c.subject.as_str()).collect();
         assert_eq!(subjects[0], "merge topic");
         assert_eq!(commits[0].parents.len(), 2);
@@ -1206,7 +1218,8 @@ mod tests {
             commit_stat(
                 &top,
                 &commits[0].hash,
-                commits[0].parents.first().map(String::as_str)
+                commits[0].parents.first().map(String::as_str),
+                None
             )
             .unwrap()
             .files,
@@ -1227,14 +1240,45 @@ mod tests {
             2
         );
         commit(&top, "names", false).unwrap();
-        let head = log(&top, &["HEAD".into()], 1, 0).unwrap().remove(0);
-        let names: Vec<String> =
-            commit_files(&top, &head.hash, head.parents.first().map(String::as_str))
-                .unwrap()
-                .into_iter()
-                .map(|f| f.rel)
-                .collect();
+        let head = log(&top, &["HEAD".into()], 1, 0, None).unwrap().remove(0);
+        let names: Vec<String> = commit_files(
+            &top,
+            &head.hash,
+            head.parents.first().map(String::as_str),
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|f| f.rel)
+        .collect();
         assert_eq!(names, ["with space.txt", "ü.txt"]);
+
+        // Scoped to a folder (a monorepo workspace): only the commits touching
+        // it, with their parents rewritten to those, and only its files.
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("s.txt"), "s").unwrap();
+        std::fs::write(dir.join("c.txt"), "c").unwrap();
+        stage(&top, &["sub/s.txt".into(), "c.txt".into()]).unwrap();
+        commit(&top, "sub and c", false).unwrap();
+        let scoped = log(&top, &["HEAD".into()], 10, 0, Some("sub")).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].subject, "sub and c");
+        assert!(scoped[0].parents.is_empty(), "{:?}", scoped[0].parents);
+        let parent = log(&top, &["HEAD".into()], 2, 0, None).unwrap()[1]
+            .hash
+            .clone();
+        let names: Vec<String> = commit_files(&top, &scoped[0].hash, Some(&parent), Some("sub"))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.rel)
+            .collect();
+        assert_eq!(names, ["sub/s.txt"]);
+        assert_eq!(
+            commit_stat(&top, &scoped[0].hash, Some(&parent), Some("sub"))
+                .unwrap()
+                .files,
+            1
+        );
         // A staged rename is unstaged as one: the old path comes back deleted,
         // the new one untracked.
         check(&top, &["mv", "with space.txt", "moved.txt"], None).unwrap();

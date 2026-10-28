@@ -79,7 +79,7 @@ struct Changes {
 
 /// The last `n` commits' messages.
 fn recent_messages(top: &Path, n: usize) -> Vec<Message> {
-    git::log(top, &["HEAD".into()], n, 0)
+    git::log(top, &["HEAD".into()], n, 0, None)
         .unwrap_or_default()
         .into_iter()
         .map(|c| Message {
@@ -304,8 +304,9 @@ fn status_word(status: char) -> &'static str {
 }
 
 /// The changed files with their line counts (`git diff --numstat` and
-/// `--name-status`, `-z` so paths come through as they are).
-fn diff_entries(top: &Path, staged: bool) -> Result<Vec<Entry>, String> {
+/// `--name-status`, `-z` so paths come through as they are), under `scope`
+/// when given.
+fn diff_entries(top: &Path, staged: bool, scope: Option<&str>) -> Result<Vec<Entry>, String> {
     let mut args = vec!["diff", "-M", "-z"];
     if staged {
         args.push("--cached");
@@ -313,6 +314,8 @@ fn diff_entries(top: &Path, staged: bool) -> Result<Vec<Entry>, String> {
     let run = |extra: &str| {
         let mut args = args.clone();
         args.push(extra);
+        args.push("--");
+        args.extend(scope);
         git::check(top, &args, None)
             .map(|o| o.stdout)
             .map_err(|e| e.to_string())
@@ -411,22 +414,23 @@ fn split_diff(text: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The changes to describe, under `scope` (a folder relative to `top`) when
+/// given: what is staged there, else everything changed there.
 fn collect_changes(
     top: &Path,
+    scope: Option<&str>,
     per_file: usize,
     max_total: usize,
     cancel: &Cancel,
     exclude: Option<&str>,
 ) -> Result<Changes, String> {
-    let staged = git::run(top, &["diff", "--cached", "--quiet"], None).is_ok_and(|o| !o.ok());
-    let mut entries = diff_entries(top, staged)?;
-    if !staged
-        && let Ok(out) = git::check(
-            top,
-            &["ls-files", "--others", "--exclude-standard", "-z"],
-            None,
-        )
-    {
+    let mut quiet = vec!["diff", "--cached", "--quiet", "--"];
+    quiet.extend(scope);
+    let staged = git::run(top, &quiet, None).is_ok_and(|o| !o.ok());
+    let mut entries = diff_entries(top, staged, scope)?;
+    let mut others = vec!["ls-files", "--others", "--exclude-standard", "-z", "--"];
+    others.extend(scope);
+    if !staged && let Ok(out) = git::check(top, &others, None) {
         for path in out.stdout.split('\0').filter(|p| !p.is_empty()) {
             entries.push(Entry {
                 path: path.to_string(),
@@ -681,6 +685,7 @@ fn is_context_error(err: &str) -> bool {
 /// it is doing; `text` gets the message so far while it streams.
 pub fn generate(
     top: &Path,
+    scope: Option<&str>,
     config: &AiConfig,
     cancel: &Cancel,
     status: &mut dyn FnMut(String),
@@ -708,7 +713,9 @@ pub fn generate(
     // on a context error, again with half the budget, then a quarter.
     let mut result = Err(String::new());
     for scale in [1.0, 0.5, 0.25] {
-        result = attempt(top, config, &style, exclude, scale, cancel, status, text);
+        result = attempt(
+            top, scope, config, &style, exclude, scale, cancel, status, text,
+        );
         match &result {
             Err(err) if *err != CANCELLED && is_context_error(err) => {
                 status("Too big for the model's context; trying smaller…".into())
@@ -722,6 +729,7 @@ pub fn generate(
 #[allow(clippy::too_many_arguments)]
 fn attempt(
     top: &Path,
+    scope: Option<&str>,
     config: &AiConfig,
     style: &str,
     exclude: Option<&str>,
@@ -740,7 +748,14 @@ fn attempt(
     let budget = scaled(ctx.saturating_sub(system_tokens + OUTPUT_TOKENS + 200)).max(2000);
     let map_budget = scaled(ctx.saturating_sub(300 + MAP_OUTPUT_TOKENS)).max(2000);
     let per_file = MAX_FILE_CHARS.min(map_budget * 9 / 10);
-    let changes = collect_changes(top, per_file, map_budget * MAX_CHUNKS, cancel, exclude)?;
+    let changes = collect_changes(
+        top,
+        scope,
+        per_file,
+        map_budget * MAX_CHUNKS,
+        cancel,
+        exclude,
+    )?;
     if changes.entries.is_empty() {
         return Err("There are no changes to describe.".into());
     }
