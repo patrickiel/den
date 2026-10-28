@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::pane::AlertKind;
 use crate::{
     CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
-    FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewTerminal,
-    NextTab, OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
+    FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewTerminal, NextTab,
+    OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
     ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight, ToggleSoftWrap,
     backend::watch,
     defaults::{Defaults, GroupDefault, Kind},
@@ -49,7 +49,9 @@ use crate::{
     repo::{Refresh, Repo},
     scm::{ScmEvent, ScmView},
     search::{IsDirty, SearchEvent, SearchView},
-    settings::{AppState, LayoutPreset, Settings, SidebarSide, SidebarView, WindowState},
+    settings::{
+        AppState, LayoutPreset, Settings, SidebarSide, SidebarState, SidebarView, WindowState,
+    },
     terminal::{Launch, TerminalPanel},
 };
 use gpui_kit::component::notification::{Notification, NotificationType};
@@ -435,6 +437,9 @@ pub struct Workspace {
     /// it shows), and which of them the sidebar shows: extension and view id.
     sidebar_views: Vec<Entity<ExtensionView>>,
     sidebar_shown: Option<(String, String)>,
+    /// This window's sidebar: shown or not, which view, how wide. Its own,
+    /// not shared with other windows; kept with the session.
+    sidebar: SidebarState,
     repo: Entity<Repo>,
     /// The project's dev servers, likeliest first (`backend::dev_server`);
     /// the first is the tab strips' button.
@@ -617,6 +622,10 @@ impl Workspace {
             extensions,
             sidebar_views,
             sidebar_shown: session.sidebar_shown.clone(),
+            sidebar: session
+                .sidebar
+                .clone()
+                .unwrap_or_else(|| AppState::get(cx).sidebar.clone()),
             repo,
             dev_servers: Vec::new(),
             _dev_server_task: None,
@@ -2234,7 +2243,7 @@ impl Workspace {
     /// What the sidebar shows here: the Explorer in place of an extension
     /// view this window doesn't have.
     fn sidebar_view(&self, cx: &App) -> SidebarView {
-        match AppState::get(cx).sidebar.view {
+        match self.sidebar.view {
             SidebarView::Extension if self.shown_sidebar_view(cx).is_none() => {
                 SidebarView::Explorer
             }
@@ -2267,11 +2276,9 @@ impl Workspace {
             self.sidebar_views.push(entity);
         }
         self.sidebar_shown = Some((id, view));
+        self.sidebar.visible = true;
+        self.sidebar.view = SidebarView::Extension;
         self.schedule_save(cx);
-        AppState::update(cx, |state| {
-            state.sidebar.visible = true;
-            state.sidebar.view = SidebarView::Extension;
-        });
         if let Some(view) = self.shown_sidebar_view(cx) {
             view.focus_handle(cx).focus(window, cx);
         }
@@ -2287,11 +2294,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let showing = AppState::get(cx).sidebar.visible
+        let showing = self.sidebar.visible
             && self.sidebar_view(cx) == SidebarView::Extension
             && self.sidebar_shown.as_ref() == Some(&(id.clone(), view.clone()));
         if showing {
-            AppState::update(cx, |state| state.sidebar.visible = false);
+            self.sidebar.visible = false;
+            self.schedule_save(cx);
             cx.notify();
         } else {
             self.show_sidebar_view(id, view, window, cx);
@@ -2405,10 +2413,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        AppState::update(cx, |state| {
-            state.sidebar.visible = true;
-            state.sidebar.view = SidebarView::Explorer;
-        });
+        self.sidebar.visible = true;
+        self.sidebar.view = SidebarView::Explorer;
+        self.schedule_save(cx);
         self.explorer
             .update(cx, |explorer, cx| explorer.show_path(&path, cx));
         let focus = self.explorer.focus_handle(cx);
@@ -2860,10 +2867,14 @@ impl Workspace {
             .map(|view| view.read(cx).dump(cx))
             .collect();
         let sidebar_shown = self.sidebar_shown.clone();
+        let sidebar = self.sidebar.clone();
         let window_state = self.window_state;
         let root = self.root.clone();
         AppState::update(cx, |state| {
+            // The next folder opened for the first time starts like this one.
+            state.sidebar = sidebar.clone();
             let session = state.session_mut(&root);
+            session.sidebar = Some(sidebar);
             session.layout = layout;
             session.expanded = expanded;
             session.commit_message = draft;
@@ -2914,25 +2925,23 @@ impl Workspace {
     /// is already showing.
     fn toggle_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
         let shown = self.sidebar_view(cx);
-        AppState::update(cx, |state| {
-            let sidebar = &mut state.sidebar;
-            if sidebar.visible && shown == view {
-                sidebar.visible = false;
-            } else {
-                sidebar.visible = true;
-                sidebar.view = view;
-            }
-        });
+        let sidebar = &mut self.sidebar;
+        if sidebar.visible && shown == view {
+            sidebar.visible = false;
+        } else {
+            sidebar.visible = true;
+            sidebar.view = view;
+        }
+        self.schedule_save(cx);
         cx.notify();
     }
 
     /// Ctrl+B: show or hide the sidebar; hidden, the keyboard goes back to
     /// the active tab.
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let visible = AppState::update(cx, |state| {
-            state.sidebar.visible = !state.sidebar.visible;
-            state.sidebar.visible
-        });
+        self.sidebar.visible = !self.sidebar.visible;
+        let visible = self.sidebar.visible;
+        self.schedule_save(cx);
         if !visible && let Some(pane) = self.tree.active_tab(self.active_group) {
             self.focus_pane(pane, window, cx);
         }
@@ -2943,18 +2952,15 @@ impl Workspace {
     /// has focus. (Search and Source Control keep focus in their inputs, so a
     /// second press there just focuses the input again.)
     fn focus_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
-        let sidebar = AppState::get(cx).sidebar.clone();
-        let focused = sidebar.visible
+        let focused = self.sidebar.visible
             && self.sidebar_view(cx) == view
             && view == SidebarView::Explorer
             && self.explorer.focus_handle(cx).contains_focused(window, cx);
         if focused {
-            AppState::update(cx, |state| state.sidebar.visible = false);
+            self.sidebar.visible = false;
         } else {
-            AppState::update(cx, |state| {
-                state.sidebar.visible = true;
-                state.sidebar.view = view;
-            });
+            self.sidebar.visible = true;
+            self.sidebar.view = view;
             match view {
                 SidebarView::Explorer => self.explorer.focus_handle(cx).focus(window, cx),
                 SidebarView::Search => SearchView::focus(&self.search, window, cx),
@@ -2966,6 +2972,7 @@ impl Workspace {
                 },
             }
         }
+        self.schedule_save(cx);
         cx.notify();
     }
 
@@ -2974,8 +2981,7 @@ impl Workspace {
     /// A title-bar button for each sidebar view of the extensions running,
     /// after den's own.
     fn sidebar_view_buttons(&self, cx: &mut Context<Self>) -> Vec<Button> {
-        let shown = (AppState::get(cx).sidebar.visible
-            && self.sidebar_view(cx) == SidebarView::Extension)
+        let shown = (self.sidebar.visible && self.sidebar_view(cx) == SidebarView::Extension)
             .then(|| self.sidebar_shown.clone())
             .flatten();
         let views: Vec<(String, den_extension::View)> = crate::extensions::Extensions::get(cx)
@@ -3005,7 +3011,7 @@ impl Workspace {
     }
 
     fn render_title_bar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sidebar = AppState::get(cx).sidebar.clone();
+        let sidebar = self.sidebar.clone();
         let shown = self.sidebar_view(cx);
         let root_node = self.tree.root.id();
         let root_is_split = !self.tree.root.is_group();
@@ -3726,9 +3732,9 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &NewTerminal, window, cx| {
                 this.open_terminal(None, None, false, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &OpenDevServer, window, cx| {
-                this.open_dev_server(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &OpenDevServer, window, cx| this.open_dev_server(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &NewAgent, window, cx| this.open_agent(window, cx)))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
                 this.split(this.active_group, Side::Right, cx)
@@ -4023,7 +4029,7 @@ impl Render for Workspace {
         self.settle_overlays();
         self.settle_full_screen(None, window);
         self.report_active_file(cx);
-        let sidebar = AppState::get(cx).sidebar.clone();
+        let sidebar = self.sidebar.clone();
         let side = Settings::get(cx).sidebar_position;
         let groups = self.render_layout(&self.tree.root, None, window, cx);
 
@@ -4047,7 +4053,7 @@ impl Render for Workspace {
                 .id("body")
                 .size_full()
                 .on_drag_move::<std::rc::Rc<SidebarResize>>(cx.listener(
-                    move |_, event: &DragMoveEvent<std::rc::Rc<SidebarResize>>, _, cx| {
+                    move |this, event: &DragMoveEvent<std::rc::Rc<SidebarResize>>, _, cx| {
                         let (bounds, at) = (event.bounds, event.event.position.x);
                         let width = if left {
                             at - bounds.left()
@@ -4055,7 +4061,8 @@ impl Render for Workspace {
                             bounds.right() - at
                         };
                         let width = width.as_f32().clamp(SIDEBAR_MIN, SIDEBAR_MAX);
-                        AppState::update(cx, |s| s.sidebar.width = width);
+                        this.sidebar.width = width;
+                        this.schedule_save(cx);
                         cx.notify();
                     },
                 ));
@@ -4095,10 +4102,9 @@ impl Render for Workspace {
                 this.focus_view(SidebarView::Search, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReplaceInFiles, window, cx| {
-                AppState::update(cx, |state| {
-                    state.sidebar.visible = true;
-                    state.sidebar.view = SidebarView::Search;
-                });
+                this.sidebar.visible = true;
+                this.sidebar.view = SidebarView::Search;
+                this.schedule_save(cx);
                 SearchView::set_query(&this.search, "", true, window, cx);
                 SearchView::focus(&this.search, window, cx);
                 cx.notify();

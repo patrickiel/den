@@ -365,6 +365,11 @@ pub struct Session {
     /// them, and which of them it shows (extension id and view id).
     pub sidebar_views: Vec<serde_json::Value>,
     pub sidebar_shown: Option<(String, String)>,
+    /// The sidebar as this folder's window last had it: shown or not, which
+    /// view, how wide. Each window keeps its own, so switching the view in
+    /// one leaves the others alone; a folder opened for the first time
+    /// starts from `AppState::sidebar`.
+    pub sidebar: Option<SidebarState>,
     /// The window as it was last, for the next time the folder opens.
     pub window: Option<WindowState>,
     /// Source Control shows the whole repository, not just this folder,
@@ -389,6 +394,8 @@ pub struct LayoutPreset {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppState {
+    /// The sidebar as last changed in any window: what a folder opened for
+    /// the first time starts with (each session then keeps its own).
     pub sidebar: SidebarState,
     pub presets: Vec<LayoutPreset>,
     /// Folders opened before, last first, for the session switcher.
