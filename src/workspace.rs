@@ -164,76 +164,58 @@ fn recent_menu(
             SharedString::from(path.display().to_string()),
         );
         let forget = path.clone();
-        let elsewhere = (this.clone(), path.clone());
         let rebuild = (this.clone(), root.clone(), own.clone());
         let item = PopupMenuItem::element(move |_, _| {
             let full = full.clone();
             let forget = forget.clone();
-            let (open, path) = elsewhere.clone();
             let (this, root, own) = rebuild.clone();
-            let row_button = |id: &'static str, icon: IconName| {
-                div()
-                    .id((id, ix))
-                    .flex_none()
-                    .invisible()
-                    .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
-                        this.visible()
-                    })
-                    .rounded(px(3.))
-                    .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                    .child(Icon::new(icon).xsmall())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            };
             h_flex()
                 .id(("recent", ix))
                 .group(SharedString::from(format!("recent-{ix}")))
                 .w_full()
                 .gap_2()
                 .child(div().flex_1().min_w_0().truncate().child(label.clone()))
-                // Opens the folder in a window of its own, leaving this one be.
-                .child(
-                    row_button("open-recent-elsewhere", IconName::AppWindow)
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("Open in New Window")
-                                .build(window, cx)
-                        })
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            _ = open.update(cx, |this, cx| {
-                                this.open_session(path.clone(), true, window, cx)
-                            });
-                            window.dispatch_action(Box::new(gpui_kit::base::actions::Cancel), cx);
-                        }),
-                )
                 // The x takes the folder off the list (its saved session stays),
                 // as in den.
                 .child(
-                    row_button("forget-recent", IconName::X).on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        let forget = forget.clone();
-                        AppState::update(cx, |state| {
-                            let key = crate::repo::key(&forget);
-                            state.recent.retain(|p| crate::repo::key(p) != key);
-                        });
-                        sync_jump_list(cx);
-                        let (this, root) = (this.clone(), root.clone());
-                        _ = own.update(cx, |menu, cx| {
-                            menu.rebuild(window, cx, |menu, _, cx| {
-                                recent_menu(this, root, menu, cx)
-                            })
-                        });
-                        window.refresh();
-                    }),
+                    div()
+                        .id(("forget-recent", ix))
+                        .flex_none()
+                        .invisible()
+                        .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
+                            this.visible()
+                        })
+                        .rounded(px(3.))
+                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                        .child(Icon::new(IconName::X).xsmall())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let forget = forget.clone();
+                            AppState::update(cx, |state| {
+                                let key = crate::repo::key(&forget);
+                                state.recent.retain(|p| crate::repo::key(p) != key);
+                            });
+                            sync_jump_list(cx);
+                            let (this, root) = (this.clone(), root.clone());
+                            _ = own.update(cx, |menu, cx| {
+                                menu.rebuild(window, cx, |menu, _, cx| {
+                                    recent_menu(this, root, menu, cx)
+                                })
+                            });
+                            window.refresh();
+                        }),
                 )
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(window, cx)
                 })
         });
+        // Opens the folder in a window of its own, leaving this one be.
         menu = menu.item(
             item.icon(Icon::new(IconName::Folder))
                 .on_click(move |_, window, cx| {
                     _ = this.update(cx, |this, cx| {
-                        this.open_session(path.clone(), false, window, cx)
+                        this.open_session(path.clone(), true, window, cx)
                     });
                 }),
         );
