@@ -2,7 +2,8 @@
 Type=Application
 Name=den
 Comment=Terminals, agents and files in one native window
-Exec=__EXEC__
+Exec=__EXEC__ %F
+MimeType=inode/directory;
 Icon=den
 Terminal=false
 Categories=Development;TerminalEmulator;
