@@ -602,8 +602,11 @@ pub fn window_opened(
     extensions.windows.push((root, workspace, window));
 }
 
-/// The window open on `root` in this den, if any.
-pub fn window_on(root: &Path, cx: &App) -> Option<AnyWindowHandle> {
+/// The window with a tab on `root` in this den, and that tab, if any.
+pub fn workspace_on(
+    root: &Path,
+    cx: &App,
+) -> Option<(AnyWindowHandle, WeakEntity<crate::workspace::Workspace>)> {
     if !cx.has_global::<Extensions>() {
         return None;
     }
@@ -612,18 +615,7 @@ pub fn window_on(root: &Path, cx: &App) -> Option<AnyWindowHandle> {
         .windows
         .iter()
         .find(|(r, workspace, _)| crate::repo::key(r) == key && workspace.upgrade().is_some())
-        .map(|(_, _, handle)| *handle)
-}
-
-/// The folders of the open windows, each once.
-pub fn open_folders(cx: &App) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    for (root, workspace, _) in &Extensions::get(cx).windows {
-        if workspace.upgrade().is_some() && !roots.contains(root) {
-            roots.push(root.clone());
-        }
-    }
-    roots
+        .map(|(_, workspace, handle)| (*handle, workspace.clone()))
 }
 
 /// Run `f` on the workspace of the window on `root`, logged when there is none.
@@ -651,6 +643,12 @@ fn in_window(
         return;
     };
     _ = handle.update(cx, |_, window, cx| {
+        // Its tab in front: what the extension does there is to be seen.
+        if let Some(frame) = crate::frame::Frame::of(window, cx) {
+            frame.update(cx, |frame, cx| {
+                frame.activate_entity(workspace.entity_id(), window, cx)
+            });
+        }
         _ = workspace.update(cx, |workspace, cx| f(workspace, window, cx));
     });
 }

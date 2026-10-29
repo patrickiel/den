@@ -1,13 +1,14 @@
-//! One den per folder. A den started on a folder another den has open hands
-//! the folder to that den, which brings its window to the front, and does
-//! not open a window of its own.
+//! One den. A den started on a folder while another runs hands the folder
+//! to that den, which shows it as a tab (the tab it has on it already, or a
+//! new one in the window in front), and does not open a window of its own.
 //!
 //! Each den listens on an address of its own while it runs (a Unix socket
-//! under the data folder, a named pipe on Windows), and notes that address
-//! beside each folder's lock (see `settings::FolderLock`). A den starting on
-//! a locked folder reads the address there, sends the folder, and waits for
-//! the answer. Without one (the other den is gone, or does not answer) it
-//! opens the folder itself, as it would have without this.
+//! under the data folder, a named pipe on Windows), notes it as the running
+//! den's (`instance_file`), and beside each folder's lock (see
+//! `settings::FolderLock`). A den starting sends each folder to the den
+//! holding its lock, else to the running den, and waits for the answer.
+//! Without one (the other den is gone, or does not answer) it opens the
+//! folder itself, as it would have without this.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -45,17 +46,29 @@ fn socket_dir() -> PathBuf {
     crate::settings::data_dir().join("open")
 }
 
-/// The roots among `roots` no other den has open: the others are handed to
-/// their den, which shows them. Run before the app starts, so a den with
-/// nothing left to open opens no window at all.
+/// Where the running den notes its address, for the dens started after it.
+fn instance_file() -> PathBuf {
+    crate::settings::data_dir().join("open").join("den")
+}
+
+/// The address of the den running, as last noted (it may be gone).
+fn running() -> Option<String> {
+    let address = std::fs::read_to_string(instance_file()).ok()?;
+    let address = address.trim();
+    (!address.is_empty()).then(|| address.to_string())
+}
+
+/// The roots among `roots` no other den takes: the others are handed to
+/// the den that has them open, else to the den running, which shows them.
+/// Run before the app starts, so a den with nothing left to open opens no
+/// window at all.
 pub fn hand_off(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let running = running();
     roots
         .into_iter()
         .filter(|root| {
-            let Some(address) = crate::settings::FolderLock::holder(root) else {
-                return true;
-            };
-            !send(&address, root)
+            let address = crate::settings::FolderLock::holder(root).or_else(|| running.clone());
+            !address.is_some_and(|address| send(&address, root))
         })
         .collect()
 }
@@ -102,6 +115,7 @@ pub fn serve(cx: &mut App) {
     let Some(listener) = Listener::bind() else {
         return;
     };
+    let _ = std::fs::write(instance_file(), address());
     std::thread::Builder::new()
         .name("den-instance".into())
         .spawn(move || {
@@ -130,8 +144,12 @@ pub fn serve(cx: &mut App) {
         }
     })
     .detach();
-    #[cfg(not(windows))]
     cx.on_app_quit(|_| {
+        // The note of the running den, when it is still this one's.
+        if running().as_deref() == Some(address().as_str()) {
+            let _ = std::fs::remove_file(instance_file());
+        }
+        #[cfg(not(windows))]
         let _ = std::fs::remove_file(address());
         async {}
     })

@@ -443,6 +443,14 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
+/// A window's workspace tabs: their folders in order, and the active one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenWindow {
+    pub roots: Vec<PathBuf>,
+    pub active: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LayoutPreset {
     pub name: String,
@@ -460,6 +468,10 @@ pub struct AppState {
     pub recent: Vec<PathBuf>,
     /// Keyed by a hash of the session folder.
     pub sessions: HashMap<String, Session>,
+    /// The folders each window had open as tabs, in their order, and which
+    /// was in front, for the next start without a folder named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<OpenWindow>,
     /// The view last picked for Markdown and SVG files: preview, not source.
     pub preview_markdown: bool,
     pub preview_svg: bool,
@@ -653,6 +665,35 @@ pub fn last_folder() -> Option<PathBuf> {
         .cloned()
 }
 
+/// The windows as they were when den last quit, read before the app starts:
+/// each one's folders that still exist and no other den has open, with the
+/// active one kept where it is in the list (or first, once it is gone).
+/// Windows with no folder left are dropped.
+pub fn saved_windows() -> Vec<OpenWindow> {
+    let Some(state) = read_json::<AppState>("state.json") else {
+        return Vec::new();
+    };
+    state
+        .windows
+        .into_iter()
+        .filter_map(|window| {
+            let active = window.roots.get(window.active).cloned();
+            let roots: Vec<PathBuf> = window
+                .roots
+                .into_iter()
+                .filter(|p| p.is_dir() && !FolderLock::held_elsewhere(p))
+                .collect();
+            if roots.is_empty() {
+                return None;
+            }
+            let active = active
+                .and_then(|root| roots.iter().position(|p| p == &root))
+                .unwrap_or(0);
+            Some(OpenWindow { roots, active })
+        })
+        .collect()
+}
+
 /// A lock on a file for a folder, held while a window has the folder open,
 /// so another den starting knows. The system lets it go when den quits,
 /// crashes included.
@@ -695,7 +736,7 @@ impl FolderLock {
         })
     }
 
-    fn held_elsewhere(root: &Path) -> bool {
+    pub(crate) fn held_elsewhere(root: &Path) -> bool {
         Self::file(root)
             .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
     }
@@ -965,6 +1006,24 @@ mod tests {
             Some(WorkspaceColor::Orange)
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_windows_round_trip_and_older_state_has_none() {
+        let mut state = AppState::default();
+        state.windows.push(super::OpenWindow {
+            roots: vec![PathBuf::from("/projects/a"), PathBuf::from("/projects/b")],
+            active: 1,
+        });
+        let text = serde_json::to_string(&state).unwrap();
+        let back: AppState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.windows, state.windows);
+        let older: AppState = serde_json::from_str("{}").unwrap();
+        assert!(older.windows.is_empty());
+        // A window with one tab but no active index saved starts on it.
+        let partial: AppState =
+            serde_json::from_str(r#"{"windows":[{"roots":["/projects/a"]}]}"#).unwrap();
+        assert_eq!(partial.windows[0].active, 0);
     }
 
     #[test]

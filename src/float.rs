@@ -56,6 +56,22 @@ impl FloatWindow {
         }
     }
 
+    /// The floating window that is `window`'s root view, if one is.
+    pub fn of(window: &Window, cx: &App) -> Option<Entity<Self>> {
+        let view = window
+            .root::<gpui_kit::base::Root>()
+            .flatten()?
+            .read(cx)
+            .view()
+            .clone();
+        view.downcast::<Self>().ok()
+    }
+
+    /// The main window of the workspace this floats from.
+    pub fn main_window(&self, cx: &App) -> Option<AnyWindowHandle> {
+        Some(self.workspace.upgrade()?.read(cx).main_window())
+    }
+
     /// The focus handle of this window's active tab.
     pub fn focus(&self, cx: &App) -> Option<FocusHandle> {
         self.workspace

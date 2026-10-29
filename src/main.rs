@@ -23,6 +23,7 @@ mod extensions;
 mod extensions_view;
 mod file_icon;
 mod float;
+mod frame;
 mod git_graph;
 mod history;
 mod instance;
@@ -100,6 +101,10 @@ actions!(
         ToggleFullScreen,
         NavigateBack,
         NavigateForward,
+        NextWorkspace,
+        PrevWorkspace,
+        CloseWorkspace,
+        MoveWorkspaceToNewWindow,
     ]
 );
 
@@ -118,74 +123,73 @@ pub struct FocusGroup(pub usize);
 #[action(namespace = den, no_json)]
 pub struct OpenPreset(pub usize);
 
-/// A window on the session for `root`, as it was when last open there. With
-/// one open on it already, that window comes to the front instead.
+/// Bring the workspace tab at this place to the front, counted from 1.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, Action)]
+#[action(namespace = den, no_json)]
+pub struct OpenWorkspace(pub usize);
+
+/// Show the session for `root`: its tab, wherever one is open on it; else
+/// a new tab in the window in front (the one last in front, when none is),
+/// or a window of its own when there is none.
 pub fn open_workspace(root: PathBuf, cx: &mut App) {
-    if let Some(window) = extensions::window_on(&root, cx) {
-        focus_window(window, cx);
+    // Out of whatever update this is called from (a menu, a key, a folder
+    // dropped): the window is taken for the tab.
+    cx.defer(move |cx| {
+        if show_workspace(&root, cx) {
+            return;
+        }
+        match frame::target_window(cx) {
+            Some(window) => {
+                _ = window.update(cx, |_, window, cx| {
+                    if let Some(frame) = frame::Frame::of(window, cx) {
+                        frame.update(cx, |frame, cx| frame.add(root, window, cx));
+                    }
+                    window.activate_window();
+                });
+            }
+            None => open_in_new_window(vec![root], 0, cx),
+        }
+    });
+}
+
+/// Bring the tab on `root` to the front, and its window with it, when one
+/// is open; false when none is.
+fn show_workspace(root: &std::path::Path, cx: &mut App) -> bool {
+    let Some((window, workspace)) = extensions::workspace_on(root, cx) else {
+        return false;
+    };
+    cx.activate(true);
+    _ = window.update(cx, |_, window, cx| {
+        window.activate_window();
+        if let Some(frame) = frame::Frame::of(window, cx) {
+            frame.update(cx, |frame, cx| {
+                frame.activate_entity(workspace.entity_id(), window, cx)
+            });
+        }
+    });
+    true
+}
+
+/// A window with a tab on each of `roots`, the one at `active` in front,
+/// placed as the first folder's window was when it was last open.
+pub fn open_in_new_window(roots: Vec<PathBuf>, active: usize, cx: &mut App) {
+    let Some(first) = roots.first() else {
         return;
-    }
+    };
     let min = size(px(640.), px(400.));
-    let (bounds, display_id) = workspace::main_window_bounds(&root, min, cx);
+    let (bounds, display_id) = workspace::main_window_bounds(first, min, cx);
     let options = WindowOptions {
         window_bounds: Some(bounds),
         window_min_size: Some(min),
         display_id,
         ..crate::ui::window_options()
     };
-    extensions::broadcast(
-        den_extension::events::WORKSPACE_OPENED,
-        serde_json::json!({ "root": root }),
-        cx,
-    );
-    let Ok((window, workspace)) = gpui_kit::open_window(options, cx, {
-        let root = root.clone();
-        move |window, cx| cx.new(|cx| workspace::Workspace::new(root, window, cx))
+    let Ok((window, _)) = gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| frame::Frame::new(roots, active, window, cx))
     }) else {
         return;
     };
-    window
-        .update(cx, |_, window, cx| {
-            window.activate_window();
-            workspace_opened(root, workspace, window, cx);
-        })
-        .ok();
-}
-
-/// Turn `window` to the session for `root` in its place: the window stays as
-/// it is (its bounds, maximised or not), only its content changes.
-pub fn switch_workspace(root: PathBuf, window: &mut Window, cx: &mut App) {
-    extensions::broadcast(
-        den_extension::events::WORKSPACE_OPENED,
-        serde_json::json!({ "root": root }),
-        cx,
-    );
-    let mut workspace = None;
-    window.replace_root(cx, |window, cx| {
-        let view = cx.new(|cx| workspace::Workspace::new(root.clone(), window, cx));
-        workspace = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
-    });
-    if let Some(workspace) = workspace {
-        workspace_opened(root, workspace, window, cx);
-    }
-}
-
-/// Bring `window` to the front, and den with it when another app is there.
-pub fn focus_window(window: AnyWindowHandle, cx: &mut App) {
-    cx.activate(true);
     _ = window.update(cx, |_, window, _| window.activate_window());
-}
-
-/// A workspace now in `window`: named in the title, known to the extensions.
-fn workspace_opened(
-    root: PathBuf,
-    workspace: Entity<workspace::Workspace>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    window.set_window_title(&workspace::window_title(&root, cx));
-    extensions::window_opened(root, workspace.downgrade(), window.window_handle(), cx);
 }
 
 /// The folder to open with none given. Started from a shell, that shell's
@@ -193,18 +197,25 @@ fn workspace_opened(
 /// install folder), or a desktop launcher or the Dock (which start it in the
 /// home folder or `/`, with no terminal), the folder last open.
 fn start_folder() -> PathBuf {
+    if !started_from_shell()
+        && let Some(last) = settings::last_folder()
+    {
+        return last;
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Whether den was started from a shell (see [`start_folder`]).
+fn started_from_shell() -> bool {
     let cwd = std::env::current_dir().ok();
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(PathBuf::from));
-    let from_shell = match (&cwd, &exe_dir) {
+    let own_folder = match (&cwd, &exe_dir) {
         (Some(cwd), Some(exe_dir)) => repo::key(cwd) != repo::key(exe_dir),
         (cwd, _) => cwd.is_some(),
-    } && (cfg!(windows) || std::io::IsTerminal::is_terminal(&std::io::stdin()));
-    if !from_shell && let Some(last) = settings::last_folder() {
-        return last;
-    }
-    cwd.unwrap_or_else(|| PathBuf::from("."))
+    };
+    own_folder && (cfg!(windows) || std::io::IsTerminal::is_terminal(&std::io::stdin()))
 }
 
 /// The menu bar on macOS, which stands for the title bar's menu button
@@ -290,6 +301,10 @@ pub(crate) fn set_menus(cx: &mut App) {
                 MenuItem::action("Back", NavigateBack),
                 MenuItem::action("Forward", NavigateForward),
                 MenuItem::separator(),
+                MenuItem::action("Next Workspace", NextWorkspace),
+                MenuItem::action("Previous Workspace", PrevWorkspace),
+                MenuItem::action("Close Workspace", CloseWorkspace),
+                MenuItem::separator(),
                 MenuItem::action("Word Wrap", ToggleSoftWrap),
             ],
         ),
@@ -325,6 +340,8 @@ pub(crate) fn set_menus(cx: &mut App) {
         vec![
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
+            MenuItem::separator(),
+            MenuItem::action("Move Workspace to New Window", MoveWorkspaceToNewWindow),
         ],
     ));
     cx.set_menus(menus);
@@ -411,6 +428,11 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<OpenTab>,
         forward::<FocusGroup>,
         forward::<OpenPreset>,
+        forward::<NextWorkspace>,
+        forward::<PrevWorkspace>,
+        forward::<CloseWorkspace>,
+        forward::<MoveWorkspaceToNewWindow>,
+        forward::<OpenWorkspace>,
         forward::<extensions::RunCommand>,
     ];
     for register in forwarded {
@@ -520,15 +542,15 @@ fn inherit_login_path() {
     }
 }
 
-/// Quit and start again on the folders open now, as updated extensions need.
-/// The new den waits for this one to be gone, sessions saved and extensions
-/// unloaded, before it applies the updates.
+/// Quit and start again on the windows open now, as updated extensions need.
+/// The new den waits for this one to be gone, sessions and windows saved
+/// and extensions unloaded, before it applies the updates.
 pub fn restart(cx: &mut App) {
     let started = std::env::current_exe().and_then(|exe| {
         std::process::Command::new(exe)
             .arg("--wait-for")
             .arg(std::process::id().to_string())
-            .args(extensions::open_folders(cx))
+            .arg("--restore")
             .spawn()
     });
     match started {
@@ -597,32 +619,69 @@ fn main() {
         }
         args.drain(..2);
     }
-    let roots: Vec<PathBuf> = match args.first() {
+    // A restart comes back to the windows as they were.
+    let restore = args.first().is_some_and(|arg| arg == "--restore");
+    if restore {
+        args.remove(0);
+    }
+    // What opens: each window's folders, as its tabs, and the one in front.
+    let saved = || -> Vec<(Vec<PathBuf>, usize)> {
+        settings::saved_windows()
+            .into_iter()
+            .map(|window| (window.roots, window.active))
+            .collect()
+    };
+    let windows: Vec<(Vec<PathBuf>, usize)> = match args.first() {
         // The jump list's New Window task (see `workspace::sync_jump_list`).
         Some(arg) if arg == "--dock-action" => {
-            vec![settings::last_folder().unwrap_or_else(start_folder)]
+            vec![(
+                vec![settings::last_folder().unwrap_or_else(start_folder)],
+                0,
+            )]
         }
-        Some(_) => args
-            .into_iter()
-            // Explorer's "Open with den" on a drive passes "C:\", whose trailing
-            // backslash escapes the closing quote: the folder arrives as C:".
-            .map(
-                |arg| match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
-                    Some(drive) => PathBuf::from(format!("{drive}\\")),
-                    None => PathBuf::from(arg),
-                },
-            )
-            .collect(),
-        None => vec![start_folder()],
+        Some(_) => {
+            let roots = args
+                .into_iter()
+                // Explorer's "Open with den" on a drive passes "C:\", whose trailing
+                // backslash escapes the closing quote: the folder arrives as C:".
+                .map(
+                    |arg| match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
+                        Some(drive) => PathBuf::from(format!("{drive}\\")),
+                        None => PathBuf::from(arg),
+                    },
+                )
+                .collect();
+            vec![(roots, 0)]
+        }
+        // Started from a launcher, or again after an update: the windows
+        // last open; from a shell, that shell's folder.
+        None if restore || !started_from_shell() => match saved() {
+            windows if windows.is_empty() => vec![(vec![start_folder()], 0)],
+            windows => windows,
+        },
+        None => vec![(vec![start_folder()], 0)],
     };
-    let roots: Vec<PathBuf> = roots
-        .into_iter()
-        .map(|root| settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root)))
-        .collect();
     // A folder another den has open shows there; with every one of them
     // handed over, this den has nothing to show.
-    let roots = instance::hand_off(roots);
-    if roots.is_empty() {
+    let windows: Vec<(Vec<PathBuf>, usize)> = windows
+        .into_iter()
+        .filter_map(|(roots, active)| {
+            let roots: Vec<PathBuf> = roots
+                .into_iter()
+                .map(|root| settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root)))
+                .collect();
+            let front = roots.get(active).cloned();
+            let roots = instance::hand_off(roots);
+            if roots.is_empty() {
+                return None;
+            }
+            let active = front
+                .and_then(|front| roots.iter().position(|root| *root == front))
+                .unwrap_or(0);
+            Some((roots, active))
+        })
+        .collect();
+    if windows.is_empty() {
         return;
     }
 
@@ -648,9 +707,11 @@ fn main() {
             // Before any window takes a folder's lock: a den started on it
             // meanwhile finds this one listening.
             instance::serve(cx);
+            frame::Frames::init(cx);
 
-            for root in roots {
-                open_workspace(root, cx);
+            // The window last in front last, so it is in front again.
+            for (roots, active) in windows.into_iter().rev() {
+                open_in_new_window(roots, active, cx);
             }
             cx.activate(true);
         });

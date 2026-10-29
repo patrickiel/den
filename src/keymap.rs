@@ -594,7 +594,46 @@ fn den_commands() -> Vec<Command> {
                 "ctrl-pageup",
             ],
         ),
+        // The workspace tabs in the title bar.
+        command(
+            "den.nextWorkspace",
+            "View: Next Workspace",
+            NextWorkspace,
+            &["ctrl-alt-pagedown"],
+            &["ctrl-alt-pagedown"],
+        ),
+        command(
+            "den.previousWorkspace",
+            "View: Previous Workspace",
+            PrevWorkspace,
+            &["ctrl-alt-pageup"],
+            &["ctrl-alt-pageup"],
+        ),
+        command(
+            "den.closeWorkspace",
+            "View: Close Workspace",
+            CloseWorkspace,
+            &["ctrl-k ctrl-w"],
+            &["cmd-k cmd-w"],
+        ),
+        command(
+            "den.moveWorkspaceToNewWindow",
+            "View: Move Workspace to New Window",
+            MoveWorkspaceToNewWindow,
+            &[],
+            &[],
+        ),
     ];
+    for n in 1..=9 {
+        let keys = format!("ctrl-alt-{n}");
+        list.push(command(
+            &format!("den.openWorkspace{n}"),
+            &format!("View: Open Workspace {n}"),
+            OpenWorkspace(n),
+            &[&keys],
+            &[&keys],
+        ));
+    }
     for n in 1..=9 {
         let (windows, mac) = (format!("alt-{n}"), format!("ctrl-{n}"));
         list.push(command(

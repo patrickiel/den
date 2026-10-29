@@ -532,7 +532,7 @@ impl ExtensionView {
         // the editor's font is as wide as its characters.
         let mut seen = HashMap::new();
         let mut measure_text = |text, f: Font, size: Pixels, mono: bool| {
-            text_width(text_system, &mut seen, text, f, size, mono)
+            crate::ui::text_width(text_system, &mut seen, text, f, size, mono)
         };
         let mut widest =
             content
@@ -1023,7 +1023,9 @@ impl ExtensionView {
                                             } else {
                                                 this.picked = Some(diff.clone());
                                                 if let Some((view, ..)) = &this.diffs {
-                                                    view.update(cx, |view, cx| view.reveal(&diff, cx));
+                                                    view.update(cx, |view, cx| {
+                                                        view.reveal(&diff, cx)
+                                                    });
                                                 }
                                                 cx.notify();
                                             }
@@ -1143,40 +1145,6 @@ impl ExtensionView {
             .child(span.text.clone())
             .into_any_element()
     }
-}
-
-/// How wide `text` is drawn, measured once per text, font and size in `seen`.
-fn text_width<'a>(
-    text_system: &WindowTextSystem,
-    seen: &mut HashMap<(&'a str, Font, Pixels), Pixels>,
-    text: &'a str,
-    font: Font,
-    size: Pixels,
-    mono: bool,
-) -> Pixels {
-    if text.is_empty() {
-        return px(0.);
-    }
-    if mono {
-        let id = text_system.resolve_font(&font);
-        let advance = text_system
-            .advance(id, size, 'm')
-            .map_or(size * 0.6, |a| a.width);
-        return advance * text.chars().count() as f32;
-    }
-    *seen.entry((text, font.clone(), size)).or_insert_with(|| {
-        let run = TextRun {
-            len: text.len(),
-            font,
-            color: black(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        text_system
-            .shape_line(text.to_string().into(), size, &[run], None)
-            .width
-    })
 }
 
 /// A column of graphs is as wide as its widest graph; `None` for one without.

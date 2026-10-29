@@ -21,7 +21,6 @@ use gpui_kit::component::{
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     resizable::resize_handle_appearance,
-    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -52,7 +51,6 @@ use crate::{
     search::{IsDirty, SearchEvent, SearchView},
     settings::{
         AppState, LayoutPreset, Settings, SidebarSide, SidebarState, SidebarView, WindowState,
-        WorkspaceColor,
     },
     terminal::{Launch, TerminalPanel},
 };
@@ -142,232 +140,6 @@ fn session_name(root: &std::path::Path, cx: &App) -> String {
 /// The OS window title for `root`, as the taskbar and window switcher show it.
 pub fn window_title(root: &std::path::Path, cx: &App) -> String {
     format!("den - {}", session_name(root, cx))
-}
-
-/// The session switcher's menu, from the recent folders as they are now.
-fn recent_menu(
-    this: WeakEntity<Workspace>,
-    root: PathBuf,
-    color_for: Option<PathBuf>,
-    menu: PopupMenu,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let (names, recent) = recent_names(&root, cx);
-    let own = cx.weak_entity();
-    let mut menu = menu
-        .label("RECENT FOLDERS")
-        .max_h(px(480.))
-        .scrollable(true);
-    if recent.is_empty() {
-        menu = menu.item(PopupMenuItem::new("No other folders yet").disabled(true));
-    }
-    for (ix, (path, label)) in recent.iter().zip(names.iter().skip(1)).enumerate() {
-        let this = this.clone();
-        let path = path.clone();
-        let (label, full) = (
-            SharedString::from(label.clone()),
-            SharedString::from(path.display().to_string()),
-        );
-        let forget = path.clone();
-        let color_path = path.clone();
-        let picker_path = path.clone();
-        let picking_color = color_for.as_ref() == Some(&path);
-        let rebuild = (this.clone(), root.clone(), own.clone());
-        let item = PopupMenuItem::element(move |_, cx| {
-            let full = full.clone();
-            let forget = forget.clone();
-            let color_path = color_path.clone();
-            let color = AppState::get(cx)
-                .workspace_color(&color_path)
-                .map(|color| color.foreground(cx.theme().is_dark()));
-            let (color_this, color_root, color_menu) = rebuild.clone();
-            let (this, root, own) = rebuild.clone();
-            h_flex()
-                .id(("recent", ix))
-                .group(SharedString::from(format!("recent-{ix}")))
-                .w_full()
-                .gap_2()
-                .child(
-                    div()
-                        .id(("recent-name", ix))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when_some(color, |this, color| this.text_color(color))
-                        .child(label.clone())
-                        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)),
-                )
-                .child(
-                    h_flex()
-                        .id(("color-recent", ix))
-                        .flex_none()
-                        .size(px(16.))
-                        .justify_center()
-                        .when(!picking_color, |this| {
-                            this.invisible()
-                                .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
-                                    this.visible()
-                                })
-                        })
-                        .rounded(px(3.))
-                        .cursor_pointer()
-                        .text_color(color.unwrap_or(cx.theme().muted_foreground))
-                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                        .child(Icon::new(IconName::Palette).xsmall())
-                        .tooltip(|window, cx| Tooltip::new("Workspace color").build(window, cx))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            let color_for = (!picking_color).then(|| color_path.clone());
-                            let (this, root) = (color_this.clone(), color_root.clone());
-                            _ = color_menu.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    recent_menu(this, root, color_for, menu, cx)
-                                })
-                            });
-                        }),
-                )
-                // The x takes the folder off the list (its saved session stays),
-                // as in den.
-                .child(
-                    div()
-                        .id(("forget-recent", ix))
-                        .flex_none()
-                        .invisible()
-                        .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
-                            this.visible()
-                        })
-                        .rounded(px(3.))
-                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                        .child(Icon::new(IconName::X).xsmall())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            let forget = forget.clone();
-                            AppState::update(cx, |state| {
-                                let key = crate::repo::key(&forget);
-                                state.recent.retain(|p| crate::repo::key(p) != key);
-                            });
-                            sync_jump_list(cx);
-                            let (this, root) = (this.clone(), root.clone());
-                            _ = own.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    recent_menu(this, root, None, menu, cx)
-                                })
-                            });
-                            window.refresh();
-                        }),
-                )
-        });
-        let picker_this = this.clone();
-        // Opens the folder in a window of its own, leaving this one be.
-        menu = menu.item(
-            item.icon(Icon::new(IconName::Folder))
-                .on_click(move |_, window, cx| {
-                    _ = this.update(cx, |this, cx| {
-                        this.open_session(path.clone(), true, window, cx)
-                    });
-                }),
-        );
-        if picking_color {
-            let (root, own) = (root.clone(), own.clone());
-            menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                recent_color_picker(
-                    picker_path.clone(),
-                    picker_this.clone(),
-                    root.clone(),
-                    own.clone(),
-                    cx,
-                )
-            }));
-        }
-    }
-    let open = this.clone();
-    let new_window = this;
-    menu.separator()
-        .item(
-            PopupMenuItem::new("Open Folder…")
-                .icon(Icon::new(IconName::FolderOpen))
-                .on_click(move |_, window, cx| {
-                    _ = open.update(cx, |this, cx| this.prompt_open_folder(false, window, cx));
-                }),
-        )
-        .item(
-            PopupMenuItem::new("Open Folder in New Window…")
-                .icon(Icon::new(IconName::AppWindow))
-                .on_click(move |_, window, cx| {
-                    _ = new_window.update(cx, |this, cx| this.prompt_open_folder(true, window, cx));
-                }),
-        )
-}
-
-/// A single row of distinct swatches under the folder being edited. Keeping it
-/// inside the menu also keeps choosing a color from opening the folder.
-fn recent_color_picker(
-    path: PathBuf,
-    this: WeakEntity<Workspace>,
-    root: PathBuf,
-    menu: WeakEntity<PopupMenu>,
-    cx: &App,
-) -> AnyElement {
-    let selected = AppState::get(cx).workspace_color(&path);
-    let theme = cx.theme();
-    let (dark, foreground, hover) = (theme.is_dark(), theme.foreground, theme.accent);
-    h_flex()
-        .id("workspace-color-picker")
-        .w_full()
-        .gap(px(2.))
-        .py_1()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| cx.stop_propagation())
-        .children(
-            std::iter::once(None)
-                .chain(WorkspaceColor::ALL.map(Some))
-                .enumerate()
-                .map(move |(ix, color)| {
-                    let (path, this, root, menu) =
-                        (path.clone(), this.clone(), root.clone(), menu.clone());
-                    div()
-                        .id(("workspace-color", ix))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(24.))
-                        .p(px(3.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(if color == selected {
-                            foreground
-                        } else {
-                            transparent_black()
-                        })
-                        .cursor_pointer()
-                        .hover(move |this| this.bg(hover))
-                        .when_some(color, |this, color| {
-                            this.child(div().size_full().rounded_full().bg(color.foreground(dark)))
-                        })
-                        .when(color.is_none(), |this| {
-                            this.child(Icon::new(IconName::Ban).xsmall())
-                        })
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(color.map_or("Default color", WorkspaceColor::name))
-                                .build(window, cx)
-                        })
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            AppState::update(cx, |state| state.session_mut(&path).color = color);
-                            let (this, root) = (this.clone(), root.clone());
-                            _ = menu.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    recent_menu(this, root, None, menu, cx)
-                                })
-                            });
-                            window.refresh();
-                        })
-                }),
-        )
-        .into_any_element()
 }
 
 /// A layout preset being dragged to another place in the Layouts menu.
@@ -588,19 +360,22 @@ pub struct Workspace {
     /// The folder's name in the title bar (see [`session_name`]), kept up
     /// with the recent folders.
     session_name: String,
+    /// The window's tabs, which this workspace is one of (`frame.rs`).
+    frame: WeakEntity<crate::frame::Frame>,
+    /// Behind another tab: not drawn, and its alerts are as in a window in
+    /// the background.
+    hidden: bool,
 }
 
 impl Workspace {
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        root: PathBuf,
+        frame: WeakEntity<crate::frame::Frame>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         AppState::update(cx, |state| state.opened(&root));
         sync_jump_list(cx);
-        // Closing the window saves the session, asking first about unsaved changes.
-        let weak = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            weak.upgrade().is_none_or(|this| {
-                this.update(cx, |this, cx| this.request_close_window(window, cx))
-            })
-        });
         let session = AppState::get(cx).session(&root);
         let repo = cx.new(|cx| Repo::new(root.clone(), !session.scm_whole_repo, cx));
         let explorer =
@@ -682,13 +457,6 @@ impl Workspace {
                     }
                 },
             ),
-            // Coming back to the window, git may have changed underneath.
-            cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() {
-                    this.repo.update(cx, |repo, cx| repo.refresh(cx));
-                    this.window_activated(None, cx);
-                }
-            }),
             cx.observe_window_bounds(window, |this, window, cx| this.window_changed(window, cx)),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
             // The recent folders decide how much of the path the title shows.
@@ -766,6 +534,9 @@ impl Workspace {
             _subscriptions,
             active_file: None,
             session_name,
+            frame,
+            // Shown once its frame brings it to the front.
+            hidden: true,
         };
         this.start_watching(window, cx);
         this.detect_dev_servers(cx);
@@ -793,12 +564,48 @@ impl Workspace {
         if let Err(err) = loaded {
             eprintln!("den: the saved layout could not be read, starting fresh: {err}");
         }
-        // The active tab takes the keyboard from the start: the keys and the
-        // menu bar reach the workspace through the focused element (nothing
-        // focused, macOS shows the menu bar's items disabled).
-        let focus = this.action_target(cx);
-        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        // The frame gives the keyboard to the active tab when it brings the
+        // workspace to the front.
         this
+    }
+
+    /// The window this workspace is a tab of.
+    pub(crate) fn main_window(&self) -> AnyWindowHandle {
+        self.window
+    }
+
+    /// Behind another tab, or in front.
+    pub(crate) fn set_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.hidden != hidden {
+            self.hidden = hidden;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
+    /// Whether a tab's program wanted the user while they looked elsewhere.
+    pub(crate) fn has_attention(&self) -> bool {
+        !self.attention.is_empty()
+    }
+
+    /// In front again (its tab, or its window): git may have changed
+    /// underneath, and the active group's tab has been seen.
+    pub(crate) fn came_forward(&mut self, cx: &mut Context<Self>) {
+        self.repo.update(cx, |repo, cx| repo.refresh(cx));
+        self.window_activated(None, cx);
+    }
+
+    /// Out of Toggle Full Screen in the main window, as when another tab
+    /// comes in front of this one.
+    pub(crate) fn leave_full_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((group, _)) = self.full_screen
+            && self.tree.float_of(group).is_none()
+        {
+            self.toggle_full_screen(group, window, cx);
+        }
     }
 
     /// Where the main window's actions go when nothing in it has the focus:
@@ -1122,7 +929,7 @@ impl Workspace {
                 .update(cx, |_, window, _| window.is_window_active())
                 .unwrap_or(false)
         };
-        if focused && self.tree.active_tab(self.active_group) == Some(pane) {
+        if focused && !self.hidden && self.tree.active_tab(self.active_group) == Some(pane) {
             return;
         }
         if settings.notify_tab {
@@ -1161,6 +968,7 @@ impl Workspace {
             .filter(|text| !text.is_empty())
             .collect();
             let this = cx.weak_entity();
+            let (frame, id) = (self.frame.clone(), cx.entity_id());
             let note = Notification::new()
                 .title(format!("{name} {status}"))
                 .message(body.join(" — "))
@@ -1170,6 +978,8 @@ impl Workspace {
                     NotificationType::Warning
                 })
                 .on_click(move |_, window, cx| {
+                    // Its tab first, when another is in front.
+                    _ = frame.update(cx, |frame, cx| frame.activate_entity(id, window, cx));
                     _ = this.update(cx, |this, cx| this.show_pane(pane, true, window, cx));
                 });
             crate::toast::push(window, note, cx);
@@ -2625,28 +2435,38 @@ impl Workspace {
     // -- Sessions and windows ---------------------------------------------
 
     /// Files with unsaved changes in this window.
-    /// Close this window: at once, saving the session, when nothing is
-    /// unsaved; else after asking (false then: the window stays for now).
-    pub(crate) fn request_close_window(
+    /// Close this tab: at once, saving the session, when nothing is
+    /// unsaved; else after asking. With `reopen`, its folder then opens in
+    /// a window of its own.
+    pub(crate) fn request_close_tab(
         &mut self,
+        reopen: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
         let dirty = self.dirty_panes(cx);
-        if dirty.is_empty() {
-            self.save_session(cx);
-            return true;
-        }
         self.confirm_discard(
             dirty,
-            |this, window, cx| {
+            move |this, window, cx| {
                 this.save_session(cx);
-                window.remove_window();
+                let (id, reopen) = (cx.entity_id(), reopen.clone());
+                _ = this
+                    .frame
+                    .update(cx, |frame, cx| frame.remove(id, reopen, window, cx));
             },
             window,
             cx,
         );
-        false
+    }
+
+    /// The names of the tabs with unsaved changes, for the question before
+    /// closing.
+    pub(crate) fn dirty_labels(&self, cx: &App) -> Vec<SharedString> {
+        self.dirty_panes(cx)
+            .iter()
+            .filter_map(|id| self.panes.get(id))
+            .map(|pane| pane.label(cx))
+            .collect()
     }
 
     fn dirty_panes(&self, cx: &App) -> Vec<PaneId> {
@@ -2676,14 +2496,7 @@ impl Workspace {
         }
         let this = cx.weak_entity();
         let then = std::rc::Rc::new(then);
-        let what = match dirty.as_slice() {
-            [one] => format!("{one} has unsaved changes. Discard them?"),
-            many => format!(
-                "{} files have unsaved changes: {}. Discard them?",
-                many.len(),
-                many.join(", ")
-            ),
-        };
+        let what = discard_question(&dirty);
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let then = then.clone();
@@ -2746,44 +2559,18 @@ impl Workspace {
         );
     }
 
-    /// Open `root` as a session: in this window (saving this one first), or a new one.
-    fn open_session(
-        &mut self,
-        root: PathBuf,
-        new_window: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Open `root` as a tab here, or in a window of its own; one open
+    /// already, wherever it is, comes to the front instead.
+    fn open_session(&mut self, root: PathBuf, new_window: bool, cx: &mut Context<Self>) {
         let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
-        // Open in another window already: that window comes to the front,
-        // and this one stays as it is.
-        if let Some(other) = crate::extensions::window_on(&root, cx)
-            && other != window.window_handle()
-        {
-            crate::focus_window(other, cx);
-            return;
-        }
-        if new_window {
+        if new_window && crate::extensions::workspace_on(&root, cx).is_none() {
+            crate::open_in_new_window(vec![root], 0, cx);
+        } else {
             crate::open_workspace(root, cx);
-            return;
         }
-        let panes = self.tree.panes();
-        self.confirm_discard(
-            panes,
-            move |this, window, cx| {
-                this.save_session(cx);
-                // Once this workspace is out of its update: the switch drops it.
-                let root = root.clone();
-                window.defer(cx, move |window, cx| {
-                    crate::switch_workspace(root, window, cx)
-                });
-            },
-            window,
-            cx,
-        );
     }
 
-    fn prompt_open_folder(
+    pub(crate) fn prompt_open_folder(
         &mut self,
         new_window: bool,
         window: &mut Window,
@@ -2805,9 +2592,7 @@ impl Workspace {
             else {
                 return;
             };
-            _ = this.update_in(cx, |this, window, cx| {
-                this.open_session(path, new_window, window, cx)
-            });
+            _ = this.update_in(cx, |this, _, cx| this.open_session(path, new_window, cx));
         })
         .detach();
     }
@@ -2985,7 +2770,7 @@ impl Workspace {
         }));
     }
 
-    fn save_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn save_session(&mut self, cx: &mut Context<Self>) {
         let layout = serde_json::to_value(self.dump_state(cx)).ok();
         let expanded = self.explorer.read(cx).expanded();
         let draft = self.scm.read(cx).draft(cx);
@@ -3181,43 +2966,27 @@ impl Workspace {
         } else {
             px(12.)
         };
-        let left_inset = left_padding
-            + if window.is_fullscreen() {
-                px(12.)
-            } else {
-                px(0.)
-            };
-        let right_inset = if cfg!(windows)
-            || cfg!(target_os = "linux")
-                && matches!(window.window_decorations(), Decorations::Client { .. })
-        {
-            let controls = window.window_controls();
-            gpui_kit::component::TITLE_BAR_HEIGHT
-                * (1 + u8::from(controls.minimize) + u8::from(controls.maximize)) as f32
-        } else {
-            px(0.)
-        };
-
-        // Each side starts with the opposite inset, then shares the remaining
-        // space equally. The session centres on the whole window when it fits;
-        // the buttons' minimum widths take priority in a narrow window.
+        // The sides take what they need; the tabs get the rest, and centre
+        // themselves on the whole window within it (`Frame::render_tabs`).
         let border = cx.theme().border;
         let separator = move || div().w(px(1.)).h(px(16.)).mx_1p5().bg(border);
+        let frame = self.frame.clone();
         TitleBar::new()
             // Linux's close button (den draws it there): as the window's own
-            // close, which asks about unsaved changes and saves the session.
-            .on_close_window(cx.listener(|this, _, window, cx| {
-                if this.request_close_window(window, cx) {
-                    window.remove_window();
-                }
-            }))
+            // close, which asks about unsaved changes and saves the sessions.
+            .on_close_window(move |_, window, cx| {
+                _ = frame.update(cx, |frame, cx| {
+                    if frame.request_close_window(window, cx) {
+                        window.remove_window();
+                    }
+                });
+            })
             // The title bar keeps room for the traffic lights on macOS; in
             // full screen they are gone with the menu bar.
             .pl(left_padding)
             .child(
                 h_flex()
-                    .flex_1()
-                    .flex_basis(right_inset)
+                    .flex_none()
                     .gap_1()
                     // On macOS these menus are in the menu bar (`set_menus`).
                     .when(!crate::ui::COMMAND_KEY, |this| {
@@ -3308,40 +3077,38 @@ impl Workspace {
             )
             .child(
                 div()
-                    .flex_none()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.session_switcher(cx)),
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .children(self.frame.upgrade().map(|frame| {
+                        frame.update(cx, |frame, cx| {
+                            frame.render_tabs(self.has_attention(), window, cx)
+                        })
+                    })),
             )
             .child(
-                h_flex()
-                    .flex_1()
-                    .flex_basis(left_inset)
-                    .justify_end()
-                    .child(
-                        h_flex()
-                            .px_2()
-                            .gap_1()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .children(self.extension_buttons(cx))
-                            .child(layout_button)
-                            // The root's actions, called the workspace's.
-                            .children(self.root_actions(root_node, "workspace", root_is_split, cx))
-                            .child(separator())
-                            .child(
-                                Button::new("settings")
-                                    .small()
-                                    .ghost()
-                                    .icon(Icon::new(IconName::Settings))
-                                    .tooltip(crate::keymap::with_keys(
-                                        "Settings",
-                                        &OpenSettings,
-                                        cx,
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_settings(false, window, cx)
-                                    })),
-                            ),
-                    ),
+                h_flex().flex_none().child(
+                    h_flex()
+                        .px_2()
+                        .gap_1()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(self.extension_buttons(cx))
+                        .child(layout_button)
+                        // The root's actions, called the workspace's.
+                        .children(self.root_actions(root_node, "workspace", root_is_split, cx))
+                        .child(separator())
+                        .child(
+                            Button::new("settings")
+                                .small()
+                                .ghost()
+                                .icon(Icon::new(IconName::Settings))
+                                .tooltip(crate::keymap::with_keys("Settings", &OpenSettings, cx))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings(false, window, cx)
+                                })),
+                        ),
+                ),
             )
     }
 
@@ -3481,6 +3248,7 @@ impl Workspace {
     /// den's menus, under one button: each item runs the action its chord does.
     fn app_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.weak_entity();
+        let exit_frame = self.frame.clone();
         Button::new("app-menu")
             .ghost()
             .small()
@@ -3756,37 +3524,17 @@ impl Workspace {
                     cx,
                 ))
                 .separator()
-                .item(item(
-                    &this,
-                    "Exit",
-                    &crate::Quit,
-                    |this, window, cx| {
-                        if this.request_close_window(window, cx) {
-                            window.remove_window();
-                        }
-                    },
-                    cx,
-                ))
-            })
-    }
-
-    /// The session name in the title bar, as den's: the folders opened before,
-    /// and opening another.
-    fn session_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self.session_name.clone();
-        let this = cx.weak_entity();
-        let root = self.root.clone();
-        Button::new("session")
-            .ghost()
-            .small()
-            .label(name)
-            .dropdown_caret(true)
-            .tooltip(match crate::keymap::keys_for(&OpenFolder, cx) {
-                Some(keys) => format!("Switch session ({keys} opens a folder)"),
-                None => "Switch session".to_string(),
-            })
-            .dropdown_menu(move |menu, _, cx| {
-                recent_menu(this.clone(), root.clone(), None, menu, cx)
+                .item({
+                    let frame = exit_frame.clone();
+                    PopupMenuItem::new(crate::keymap::menu_label("Exit", &crate::Quit, cx))
+                        .on_click(move |_, window, cx| {
+                            _ = frame.update(cx, |frame, cx| {
+                                if frame.request_close_window(window, cx) {
+                                    window.remove_window();
+                                }
+                            });
+                        })
+                })
             })
     }
 
@@ -3820,7 +3568,7 @@ impl Workspace {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 for path in paths.paths() {
                     if path.is_dir() {
-                        this.open_session(path.clone(), false, window, cx);
+                        this.open_session(path.clone(), false, cx);
                         return;
                     }
                     this.open_file(path.clone(), false, window, cx);
@@ -3931,6 +3679,19 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &crate::QuickOpen, window, cx| {
                 this.quick_open(false, window, cx)
             }))
+    }
+}
+
+/// The question before discarding the changes of `dirty` (the names of the
+/// tabs with unsaved changes).
+pub(crate) fn discard_question(dirty: &[SharedString]) -> String {
+    match dirty {
+        [one] => format!("{one} has unsaved changes. Discard them?"),
+        many => format!(
+            "{} files have unsaved changes: {}. Discard them?",
+            many.len(),
+            many.join(", ")
+        ),
     }
 }
 
@@ -4293,8 +4054,14 @@ pub(crate) fn action_target(window: &Window, cx: &App) -> Option<FocusHandle> {
         .read(cx)
         .view()
         .clone();
-    match view.downcast::<Workspace>() {
-        Ok(workspace) => Some(workspace.read(cx).action_target(cx)),
+    match view.downcast::<crate::frame::Frame>() {
+        Ok(frame) => Some(
+            frame
+                .read(cx)
+                .active_workspace()?
+                .read(cx)
+                .action_target(cx),
+        ),
         Err(view) => view
             .downcast::<crate::float::FloatWindow>()
             .ok()?

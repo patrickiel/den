@@ -67,7 +67,54 @@ pub fn preview(choice: ThemeChoice, color_theme: &str, cx: &mut App) {
         }
     };
     Theme::update(cx, |t| t.apply_config(&config));
+    ensure_bold_face(cx);
     cx.refresh_windows();
+}
+
+/// Families with a bold face of their own, in GPUI's order of preference.
+const FAMILIES_WITH_BOLD: &[&str] = &[
+    "Adwaita Sans",
+    "Cantarell",
+    "Noto Sans",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Segoe UI",
+    "Helvetica",
+    "Arial",
+];
+
+/// GPUI draws a variable font (one file for every weight, as Ubuntu's
+/// since 24.04) at its regular weight only, so bold and semibold text would
+/// look plain. When the UI family it settled on has no bold face, name one
+/// that has.
+fn ensure_bold_face(cx: &mut App) {
+    let family = Theme::global(cx).font_family.clone();
+    if has_bold_face(&family, cx) {
+        return;
+    }
+    let installed = cx.text_system().all_font_names();
+    let Some(replacement) = FAMILIES_WITH_BOLD
+        .iter()
+        .copied()
+        .filter(|family| installed.iter().any(|name| name == family))
+        .find(|family| has_bold_face(family, cx))
+    else {
+        return;
+    };
+    eprintln!("den: UI font {family:?} has no bold face; drawing the UI in {replacement:?}");
+    Theme::update(cx, |t| t.font_family = replacement.into());
+}
+
+/// Whether GPUI has a bold face for `family`, rather than drawing its bold
+/// text with the regular one.
+fn has_bold_face(family: &str, cx: &App) -> bool {
+    let text_system = cx.text_system();
+    let regular = font(family);
+    let bold = Font {
+        weight: FontWeight::BOLD,
+        ..regular.clone()
+    };
+    text_system.resolve_font(&regular) != text_system.resolve_font(&bold)
 }
 
 // -- Files -------------------------------------------------------------------

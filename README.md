@@ -13,6 +13,7 @@
 In VS Code, terminals are squeezed into a bottom panel and a file opens wherever focus happens to be, often right on top of what you were working on. den lets you decide where everything goes.
 
 - **A layout you design.** Split the window any way you like, then give each area a job: terminals here, files there, agents on the right. Open a file and it lands in the files area, every time. Each project remembers its layout, and you can save your favorites as presets.
+- **Several projects in one window.** Each folder is a tab in the title bar, with its own layout, sidebar and terminals; agents keep running in the tabs behind. Move a tab to a window of its own for a second monitor.
 - **Native and fast.** Written in Rust on GPUI, the GPU-rendered UI framework behind Zed. No Electron, no web view for the UI.
 - **Feels like VS Code.** The same shortcuts, the same command palette (Ctrl+Shift+P) and Quick Open (Ctrl+P), your VS Code color themes, and an Extensions view to add features.
 - **Made for coding agents.** Claude Code, Codex or any command is one click away. den marks the tab when an agent finishes or needs your input, and Claude Code and Codex sessions resume after a restart or workspace switch.

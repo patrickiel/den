@@ -99,6 +99,40 @@ pub fn menu_action<V: 'static>(
     })
 }
 
+/// How wide `text` is drawn, measured once per text, font and size in `seen`.
+pub(crate) fn text_width<'a>(
+    text_system: &WindowTextSystem,
+    seen: &mut std::collections::HashMap<(&'a str, Font, Pixels), Pixels>,
+    text: &'a str,
+    font: Font,
+    size: Pixels,
+    mono: bool,
+) -> Pixels {
+    if text.is_empty() {
+        return px(0.);
+    }
+    if mono {
+        let id = text_system.resolve_font(&font);
+        let advance = text_system
+            .advance(id, size, 'm')
+            .map_or(size * 0.6, |a| a.width);
+        return advance * text.chars().count() as f32;
+    }
+    *seen.entry((text, font.clone(), size)).or_insert_with(|| {
+        let run = TextRun {
+            len: text.len(),
+            font,
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        text_system
+            .shape_line(text.to_string().into(), size, &[run], None)
+            .width
+    })
+}
+
 /// A Lucide icon by name, when den has it (each name is looked up once).
 pub fn lucide_icon(name: &str, cx: &App) -> Option<Icon> {
     thread_local! {
