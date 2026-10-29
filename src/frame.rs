@@ -31,10 +31,13 @@ const TAB_HEIGHT: f32 = 26.;
 /// The most a label gets before it is cut short.
 const LABEL_MAX: f32 = 200.;
 const LABEL_SIZE: f32 = 13.;
-/// A tab's room besides its label: its padding and outline, and the close
-/// button when Settings show one.
-const TAB_PADDING: f32 = 16. + 2.;
-const CLOSE_ROOM: f32 = 20.;
+/// A tab's room besides its label: its padding and outline, a pixel of
+/// slack for the label's box, and the close button when Settings show one.
+const TAB_PADDING: f32 = 16. + 2. + 1.;
+/// The close button, given a width of its own, plus the gap before it. (No
+/// negative margin on it: that makes the tab's box collapse to its padding
+/// when the row is laid out from `TabRow::prepaint`.)
+const CLOSE_ROOM: f32 = 20. + 6.;
 const TAB_GAP: f32 = 4.;
 /// The menu button at the end of the tabs, and the gap before it.
 const MENU_ROOM: f32 = 28. + 4.;
@@ -128,9 +131,11 @@ impl Element for TabRow {
                 frame.render_row(&self.tabs, &self.widths, available, cx)
             })
             .ok()?;
+        // At their full width: under a min-content constraint a label that
+        // may truncate shrinks to nothing next to its close button.
         let size = row.layout_as_root(
             size(
-                AvailableSpace::MinContent,
+                AvailableSpace::MaxContent,
                 AvailableSpace::Definite(bounds.size.height),
             ),
             window,
@@ -165,6 +170,9 @@ impl Element for TabRow {
 struct Tab {
     root: PathBuf,
     label: String,
+    /// The label's width as drawn (capped), so its box is never left to the
+    /// flex layout, which would shrink it to nothing beside the close button.
+    text: Pixels,
     color: Option<Hsla>,
     /// A program in it wanted the user.
     attention: bool,
@@ -550,24 +558,29 @@ impl Frame {
             weight: FontWeight::BOLD,
             ..font.clone()
         };
-        let widths: Vec<Pixels> = labels
+        let texts: Vec<Pixels> = labels
             .iter()
             .enumerate()
             .map(|(ix, label)| {
                 let font = if ix == self.active { &bold } else { &font };
-                let text = self.label_width(label, font, window).min(px(LABEL_MAX));
-                text + px(TAB_PADDING) + px(if close_buttons { CLOSE_ROOM } else { 0. })
+                self.label_width(label, font, window).min(px(LABEL_MAX))
             })
+            .collect();
+        let widths: Vec<Pixels> = texts
+            .iter()
+            .map(|text| *text + px(TAB_PADDING) + px(if close_buttons { CLOSE_ROOM } else { 0. }))
             .collect();
         let frame = cx.weak_entity();
         let tabs = roots
             .into_iter()
             .zip(labels)
+            .zip(texts)
             .zip(colors)
             .zip(attention)
-            .map(|(((root, label), color), attention)| Tab {
+            .map(|((((root, label), text), color), attention)| Tab {
                 root,
                 label,
+                text,
                 color,
                 attention,
                 close_button: close_buttons,
@@ -645,6 +658,7 @@ impl Frame {
         let Tab {
             root,
             label,
+            text,
             color,
             attention,
             close_button,
@@ -665,6 +679,12 @@ impl Frame {
         let frame = cx.weak_entity();
         let drag_label = label.clone();
         let menu_root = root.clone();
+        // The close button paints its icon in the theme's colour unless told
+        // otherwise: on a filled tab it takes the tab's text colour.
+        let close_color = match (active, color) {
+            (true, Some(color)) => Some(on(color)),
+            _ => None,
+        };
         let tab = div()
             .id(("workspace-tab", ix))
             .group(group.clone())
@@ -695,7 +715,8 @@ impl Frame {
             })
             .child(
                 div()
-                    .max_w(px(LABEL_MAX))
+                    .flex_none()
+                    .w(text + px(1.))
                     .truncate()
                     .when(active, |name| name.font_weight(FontWeight::BOLD))
                     .child(label.clone()),
@@ -706,8 +727,10 @@ impl Frame {
                         .icon(IconName::X)
                         .xsmall()
                         .ghost()
-                        .mr(-px(4.))
+                        .flex_none()
+                        .w(px(20.))
                         .tab_stop(false)
+                        .when_some(close_color, |button, color| button.text_color(color))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_entity(id, window, cx);
