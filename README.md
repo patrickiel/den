@@ -49,10 +49,10 @@ Extensions are Rust crates built on [`den-extension`](crates/den-extension). The
 
 ## Build from source
 
-Requires stable Rust 1.85+ (MSVC build tools on Windows, Xcode Command Line Tools on macOS). On Ubuntu also:
+Requires stable Rust 1.89+ and CMake (MSVC build tools on Windows, Xcode Command Line Tools on macOS). On Ubuntu also:
 
 ```sh
-sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libfreetype-dev libwayland-dev
+sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libfreetype-dev libwayland-dev libasound2-dev cmake
 ```
 
 ```powershell

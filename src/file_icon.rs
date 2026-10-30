@@ -105,6 +105,14 @@ fn lookup(name: &str, light: bool) -> (String, Option<String>) {
         id = section("fileExtensions", &name[i + 1..]);
         at = name[i + 1..].find('.').map(|j| i + 1 + j);
     }
+    // Seti's audio icon, for the audio files it has none for (m4a, opus…).
+    if id.is_none()
+        && name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| crate::backend::audio::EXTENSIONS.contains(&ext))
+    {
+        id = section("fileExtensions", "mp3");
+    }
     if id.is_none()
         && let Some(language) = name.rsplit_once('.').and_then(|(_, ext)| language_of(ext))
     {

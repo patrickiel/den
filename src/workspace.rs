@@ -1890,6 +1890,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // No text to compare: the file itself, as it is now.
+        if !staged && crate::panels::is_media(&path) && path.is_file() {
+            return self.open_file(path, false, window, cx);
+        }
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
             return;
         };

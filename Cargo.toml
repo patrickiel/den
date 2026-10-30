@@ -44,6 +44,11 @@ minisign-verify = "0.2"
 libloading = "0.8"
 # PDF tabs: PDFium, bound at run time to the library den downloads (`pdf.rs`).
 pdfium-render = { version = "0.9.4", default-features = false, features = ["pdfium_latest"] }
+# Audio tabs: decoded by Symphonia (Opus by libopus, which it lacks),
+# played through the system's output by cpal (`backend::audio`).
+symphonia = { version = "0.6.1", default-features = false, features = ["all-codecs", "all-formats", "all-meta"] }
+symphonia-adapter-libopus = "0.3.0"
+cpal = "0.18.2"
 # The version gpui builds; its frames carry a PDF's drawn pages.
 image = { version = "0.25", default-features = false }
 den-extension = { path = "crates/den-extension" }

@@ -68,7 +68,7 @@ pub const SOUNDS: &[(&str, &str, &[Note])] = &[
 const RATE: u32 = 44_100;
 
 /// The sound as 16-bit mono PCM in a WAV file, at `volume` (0..100).
-fn render(notes: &[Note], volume: u32) -> Vec<u8> {
+pub(crate) fn render(notes: &[Note], volume: u32) -> Vec<u8> {
     let length = notes
         .iter()
         .map(|&(_, at, dur, ..)| at + dur + 0.05)

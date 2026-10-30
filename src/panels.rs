@@ -95,12 +95,14 @@ enum Look {
     Image,
     /// Its pages, drawn by den (`pdf.rs`), never as text.
     Pdf,
+    /// Played by den (`audio.rs`), never shown as text.
+    Audio,
 }
 
 impl Look {
     /// Shown only, never read as text, edited or saved.
     fn binary(self) -> bool {
-        matches!(self, Look::Image | Look::Pdf)
+        matches!(self, Look::Image | Look::Pdf | Look::Audio)
     }
 
     fn of(path: &Path) -> Self {
@@ -116,9 +118,16 @@ impl Look {
             "html" | "htm" | "xhtml" => Look::Html,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" => Look::Image,
             "pdf" => Look::Pdf,
+            ext if crate::backend::audio::EXTENSIONS.contains(&ext) => Look::Audio,
             _ => Look::Text,
         }
     }
+}
+
+/// A picture, PDF or audio file: shown or played by its tab, never read as
+/// text, so not compared as text either.
+pub fn is_media(path: &Path) -> bool {
+    Look::of(path).binary()
 }
 
 pub struct FilePanel {
@@ -135,6 +144,8 @@ pub struct FilePanel {
     find: Option<PreviewFind>,
     /// A PDF's pages.
     pdf: Option<Entity<crate::pdf::PdfView>>,
+    /// An audio file's player.
+    audio: Option<Entity<crate::audio::AudioView>>,
     /// The last SVG preview and the text it was made from.
     svg: Option<(SharedString, Arc<Image>)>,
     /// The encoding the file was read in and is saved in.
@@ -296,6 +307,8 @@ impl FilePanel {
 
         let pdf =
             (look == Look::Pdf).then(|| cx.new(|cx| crate::pdf::PdfView::new(path.clone(), cx)));
+        let audio = (look == Look::Audio)
+            .then(|| cx.new(|cx| crate::audio::AudioView::new(path.clone(), cx)));
 
         cx.defer_in(window, |this, _, cx| this.refresh_git_base(cx));
         Self {
@@ -306,6 +319,7 @@ impl FilePanel {
             markdown,
             find: None,
             pdf,
+            audio,
             svg: None,
             encoding,
             indent,
@@ -427,6 +441,9 @@ impl FilePanel {
     pub fn reload_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pdf) = &self.pdf {
             pdf.update(cx, |pdf, cx| pdf.reload(cx));
+        }
+        if let Some(audio) = &self.audio {
+            audio.update(cx, |audio, cx| audio.reload(cx));
         }
         if self.look.binary() || self.untitled {
             return cx.notify();
@@ -673,6 +690,9 @@ impl Focusable for FilePanel {
         if let Some(pdf) = &self.pdf {
             return pdf.focus_handle(cx);
         }
+        if let Some(audio) = &self.audio {
+            return audio.focus_handle(cx);
+        }
         match &self.markdown {
             Some(markdown) if self.preview => markdown.read(cx).focus_handle().clone(),
             _ => self.editor.focus_handle(cx),
@@ -693,6 +713,7 @@ impl Pane for FilePanel {
     fn icon(&self, _: &App) -> IconName {
         match self.look {
             Look::Image | Look::Svg => IconName::Image,
+            Look::Audio => IconName::Music,
             _ => IconName::FileCode,
         }
     }
@@ -739,11 +760,11 @@ impl FilePanel {
         cx.notify();
     }
 
-    /// The file views the extensions offer for this file; none for a PDF,
-    /// which has no source to switch to.
+    /// The file views the extensions offer for this file; none for a PDF or
+    /// an audio file, which have no source to switch to.
     fn file_views(&self, cx: &App) -> Vec<(String, den_extension::FileView)> {
         match cx.try_global::<crate::extensions::Extensions>() {
-            Some(extensions) if !self.untitled && self.pdf.is_none() => {
+            Some(extensions) if !self.untitled && self.pdf.is_none() && self.audio.is_none() => {
                 extensions.file_views_for(&self.path)
             }
             _ => Vec::new(),
@@ -884,6 +905,10 @@ impl FilePanel {
             (Look::Pdf, _) => div()
                 .size_full()
                 .children(self.pdf.clone())
+                .into_any_element(),
+            (Look::Audio, _) => div()
+                .size_full()
+                .children(self.audio.clone())
                 .into_any_element(),
             _ => picture(img(self.path.clone()), cx),
         }

@@ -224,6 +224,11 @@ pub(crate) fn load_sides(
     staged: bool,
     commit: Option<&CommitRevs>,
 ) -> Result<(String, String), String> {
+    if crate::panels::is_media(path) {
+        return Err(
+            "Not a text file, so there are no lines to compare. Open File shows it.".into(),
+        );
+    }
     let side = |rev: &str, rel: &str| {
         git::show_in(top, rev, rel)
             .map(Option::unwrap_or_default)
