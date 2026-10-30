@@ -666,9 +666,10 @@ impl Frame {
         let id = self.workspaces[ix].entity_id();
         let active = ix == self.active;
         let theme = cx.theme();
-        let (radius, tab_active_fg, tab_fg, hover, warning) = (
+        let (radius, tab_active_fg, title_bar, tab_fg, hover, warning) = (
             theme.radius,
             theme.tab_active_foreground,
+            theme.title_bar,
             theme.tab_foreground,
             theme.secondary_hover,
             theme.warning,
@@ -683,6 +684,7 @@ impl Frame {
         // otherwise: on a filled tab it takes the tab's text colour.
         let close_color = match (active, color) {
             (true, Some(color)) => Some(on(color)),
+            (true, None) => Some(title_bar),
             _ => None,
         };
         let tab = div()
@@ -703,11 +705,9 @@ impl Frame {
             // in it behind.
             .map(|tab| match (active, color) {
                 (true, Some(color)) => tab.bg(color).text_color(on(color)),
-                // The theme's active-tab colour is near the title bar's:
-                // a tint of the text colour stands out on it in both modes.
-                (true, None) => tab
-                    .bg(tab_active_fg.opacity(0.18))
-                    .text_color(tab_active_fg),
+                // Without one, filled the same way with the theme's own
+                // colours swapped: the text colour behind the title bar's.
+                (true, None) => tab.bg(tab_active_fg).text_color(title_bar),
                 (false, Some(color)) => tab
                     .text_color(color.opacity(0.85))
                     .hover(move |tab| tab.bg(color.opacity(0.12))),
