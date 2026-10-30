@@ -2,8 +2,8 @@
 //! running extensions, downloads.
 
 pub mod agent;
-pub mod audio;
 pub mod ai;
+pub mod audio;
 pub mod avatars;
 pub mod commit_ai;
 pub mod dev_server;

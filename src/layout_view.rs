@@ -1267,9 +1267,9 @@ impl Workspace {
                         &crate::OpenDevServer,
                         cx,
                     ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_dev_server(window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_dev_server(window, cx)),
+                    )
                     .into_any_element(),
             );
         }

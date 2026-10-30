@@ -186,10 +186,16 @@ mod tests {
     #[test]
     fn opening_and_reading_a_file_change_nothing() {
         use notify::event::{AccessKind, AccessMode, CreateKind, EventKind, ModifyKind};
-        assert!(!changes(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
+        assert!(!changes(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
         assert!(!changes(&EventKind::Access(AccessKind::Read)));
-        assert!(!changes(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
-        assert!(changes(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
+        assert!(!changes(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(changes(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
         assert!(changes(&EventKind::Modify(ModifyKind::Any)));
         assert!(changes(&EventKind::Create(CreateKind::File)));
     }

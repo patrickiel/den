@@ -2840,8 +2840,8 @@ impl Workspace {
     // -- Sidebar -------------------------------------------------------------
 
     /// The title-bar buttons: show a view, or hide the sidebar when that view
-    /// is already showing.
-    fn toggle_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+    /// is already showing. Search opens into its input, ready to type.
+    fn toggle_view(&mut self, view: SidebarView, window: &mut Window, cx: &mut Context<Self>) {
         let shown = self.sidebar_view(cx);
         let sidebar = &mut self.sidebar;
         if sidebar.visible && shown == view {
@@ -2849,6 +2849,9 @@ impl Workspace {
         } else {
             sidebar.visible = true;
             sidebar.view = view;
+            if view == SidebarView::Search {
+                SearchView::focus(&self.search, window, cx);
+            }
         }
         self.schedule_save(cx);
         cx.notify();
@@ -2949,7 +2952,9 @@ impl Workspace {
                 // Highlighted, not filled: the primary colour is the change count's.
                 .ghost()
                 .selected(active)
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_view(view, cx)))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.toggle_view(view, window, cx)),
+                )
         };
 
         let layout_button = Button::new("layouts")
@@ -3386,28 +3391,28 @@ impl Workspace {
                         this,
                         "Explorer",
                         &FocusExplorer,
-                        |this, _, cx| this.toggle_view(SidebarView::Explorer, cx),
+                        |this, window, cx| this.toggle_view(SidebarView::Explorer, window, cx),
                         cx,
                     ))
                     .item(item(
                         this,
                         "Search",
                         &FocusSearch,
-                        |this, _, cx| this.toggle_view(SidebarView::Search, cx),
+                        |this, window, cx| this.toggle_view(SidebarView::Search, window, cx),
                         cx,
                     ))
                     .item(item(
                         this,
                         "Source Control",
                         &FocusScm,
-                        |this, _, cx| this.toggle_view(SidebarView::Scm, cx),
+                        |this, window, cx| this.toggle_view(SidebarView::Scm, window, cx),
                         cx,
                     ))
                     .item(item(
                         this,
                         "Extensions",
                         &FocusExtensions,
-                        |this, _, cx| this.toggle_view(SidebarView::Extensions, cx),
+                        |this, window, cx| this.toggle_view(SidebarView::Extensions, window, cx),
                         cx,
                     ))
                     .separator()
