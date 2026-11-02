@@ -161,6 +161,8 @@ pub struct FilePanel {
     /// Lines that differ from `git_base`.
     marks: Vec<(usize, crate::dirty_diff::Mark)>,
     editor: Entity<EditorState>,
+    /// The path over the tab, as VS Code's breadcrumbs.
+    breadcrumbs: Entity<crate::breadcrumbs::Breadcrumbs>,
     /// The text as last read or saved; the tab is dirty while the buffer differs.
     saved: SharedString,
     dirty: bool,
@@ -255,6 +257,7 @@ impl FilePanel {
 
         let markdown =
             (look == Look::Markdown).then(|| cx.new(|cx| TextViewState::markdown(&text, cx)));
+        let breadcrumbs = cx.new(|cx| crate::breadcrumbs::Breadcrumbs::new(Some(path.clone()), cx));
 
         let mut _subscriptions = vec![
             cx.subscribe(&editor, |this, editor, event: &InputEvent, cx| {
@@ -292,6 +295,13 @@ impl FilePanel {
             }),
             // An extension offering file views, or no longer.
             cx.observe_global::<crate::extensions::Extensions>(|_, cx| cx.notify()),
+            cx.subscribe(&breadcrumbs, |_, _, event, cx| match event {
+                crate::breadcrumbs::BreadcrumbsEvent::Open(path) => cx.emit(PaneEvent::OpenFile {
+                    path: path.clone(),
+                    line: None,
+                    column: None,
+                }),
+            }),
         ];
         if let Some(markdown) = &markdown {
             // The preview's text changed under an open Find: search it again.
@@ -328,6 +338,7 @@ impl FilePanel {
             git_base: None,
             marks: Vec::new(),
             editor,
+            breadcrumbs,
             saved: text.into(),
             dirty: false,
             error,
@@ -339,6 +350,12 @@ impl FilePanel {
     /// The file on disk; none while untitled.
     pub fn path(&self) -> Option<&Path> {
         (!self.untitled).then_some(self.path.as_path())
+    }
+
+    /// The session root the breadcrumbs start under.
+    pub fn set_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.breadcrumbs
+            .update(cx, |breadcrumbs, cx| breadcrumbs.set_root(root, cx));
     }
 
     /// An untitled tab's name (`Untitled-1`).
@@ -782,9 +799,10 @@ impl FilePanel {
         });
     }
 
-    /// The Source / Preview switch above a Markdown or SVG file, Open in
-    /// Browser above an HTML one, with the extensions' file views after,
-    /// which open in the system's browser.
+    /// The Source / Preview switch of a Markdown or SVG file, Open in
+    /// Browser of an HTML one, with the extensions' file views after, which
+    /// open in the system's browser: at the right end of the bar over the
+    /// tab.
     fn render_switch(
         &self,
         views: Vec<(String, den_extension::FileView)>,
@@ -796,12 +814,7 @@ impl FilePanel {
         let source = !self.preview;
         h_flex()
             .flex_none()
-            .justify_end()
-            .px_2()
-            .py_1()
             .gap_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .child(
                 Button::new("source")
                     .xsmall()
@@ -1607,6 +1620,30 @@ impl Render for FilePanel {
         let html = self.look == Look::Html && !self.untitled;
         let switch = (previewable || html || !views.is_empty())
             .then(|| self.render_switch(views, cx).into_any_element());
+        let crumbs = Settings::get(cx).breadcrumbs && !self.untitled;
+        if crumbs {
+            // Save As names an untitled tab's file.
+            let path = self.path().map(Path::to_path_buf);
+            self.breadcrumbs
+                .update(cx, |breadcrumbs, cx| breadcrumbs.set_path(path, cx));
+        }
+        // The breadcrumbs, the switch at the right end.
+        let bar = (crumbs || switch.is_some()).then(|| {
+            h_flex()
+                .flex_none()
+                .w_full()
+                .min_h(px(28.))
+                .px_2()
+                .py_0p5()
+                .gap_2()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .map(|this| match crumbs {
+                    true => this.child(self.breadcrumbs.clone()),
+                    false => this.child(div().flex_1()),
+                })
+                .children(switch)
+        });
         let showing_preview = self.look.binary() || (previewable && self.preview);
         let preview = showing_preview.then(|| self.render_preview(cx));
         v_flex()
@@ -1617,7 +1654,7 @@ impl Render for FilePanel {
                     this.prompt_go_to_line(window, cx)
                 }))
             })
-            .children(switch)
+            .children(bar)
             .when_some(self.error.clone(), |this, error| {
                 this.child(
                     div()
@@ -2809,6 +2846,7 @@ impl Render for SettingsPanel {
                         .child(setting_row("Font size", "Text size in file and terminal tabs, in pixels.", font_size, cx))
                         .child(toggle("Line numbers", "Show line numbers in the gutter.", "line-numbers", settings.line_numbers, |s, v| s.line_numbers = v, cx))
                         .child(toggle("Soft wrap", "Wrap long lines at the edge of the editor.", "soft-wrap", settings.soft_wrap, |s, v| s.soft_wrap = v, cx))
+                        .child(toggle("Breadcrumbs", "Show the file's path over a file tab; each part opens a list of its folder.", "breadcrumbs", settings.breadcrumbs, |s, v| s.breadcrumbs = v, cx))
                         .child(toggle(
                             "Format on save",
                             format!(

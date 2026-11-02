@@ -691,6 +691,10 @@ impl Workspace {
     }
 
     fn track(&mut self, id: PaneId, pane: PaneRef, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(file) = pane.view().downcast::<FilePanel>() {
+            let root = self.root.clone();
+            file.update(cx, |file, cx| file.set_root(root, cx));
+        }
         let focused = cx.on_focus_in(&pane.focus_handle(cx), window, move |this, _, _| {
             this.shown.retain(|p| *p != id);
             this.shown.push(id);

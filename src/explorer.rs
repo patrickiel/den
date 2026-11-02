@@ -34,10 +34,10 @@ pub enum ExplorerEvent {
 }
 
 #[derive(Clone)]
-struct Entry {
-    path: PathBuf,
-    name: SharedString,
-    is_dir: bool,
+pub(crate) struct Entry {
+    pub(crate) path: PathBuf,
+    pub(crate) name: SharedString,
+    pub(crate) is_dir: bool,
 }
 
 struct Row {
@@ -65,6 +65,34 @@ impl Focusable for Explorer {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// A folder's entries as the Explorer lists them: folders first, then by
+/// name regardless of case, `.git` left out.
+pub(crate) fn read_dir(dir: &Path) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|item| {
+            let name = item.file_name().to_string_lossy().to_string();
+            if name == ".git" {
+                return None;
+            }
+            let is_dir = item.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            Some(Entry {
+                path: item.path(),
+                name: name.into(),
+                is_dir,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    entries
 }
 
 impl Explorer {
@@ -101,28 +129,7 @@ impl Explorer {
         if let Some(entries) = self.children.get(dir) {
             return entries.clone();
         }
-        let mut entries: Vec<Entry> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|item| {
-                let name = item.file_name().to_string_lossy().to_string();
-                if name == ".git" {
-                    return None;
-                }
-                let is_dir = item.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-                Some(Entry {
-                    path: item.path(),
-                    name: name.into(),
-                    is_dir,
-                })
-            })
-            .collect();
-        entries.sort_by(|a, b| {
-            b.is_dir
-                .cmp(&a.is_dir)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
+        let entries = read_dir(dir);
         self.children.insert(dir.to_path_buf(), entries.clone());
         entries
     }

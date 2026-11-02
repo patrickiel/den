@@ -128,6 +128,8 @@ pub struct Settings {
     pub editor_font_size: f32,
     pub line_numbers: bool,
     pub soft_wrap: bool,
+    /// The file's path over a file tab, each part a dropdown of its folder.
+    pub breadcrumbs: bool,
     /// The shell for new terminals; empty for the automatic choice.
     pub shell: String,
     /// Lines a terminal keeps above the screen.
@@ -241,6 +243,7 @@ impl Default for Settings {
             editor_font_size: 14.,
             line_numbers: true,
             soft_wrap: false,
+            breadcrumbs: true,
             shell: String::new(),
             scrollback: 10_000,
             tab_close_button: true,

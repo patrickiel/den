@@ -10,6 +10,7 @@
 mod assets;
 mod audio;
 mod backend;
+mod breadcrumbs;
 mod browser;
 mod defaults;
 mod diff;
