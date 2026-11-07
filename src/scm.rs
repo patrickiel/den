@@ -281,6 +281,8 @@ impl ScmView {
             return cx.notify();
         }
         let message = self.message.read(cx).value().to_string();
+        let outside = self.repo.read(cx).staged_outside_scope();
+        let scope = self.repo.read(cx).scope().unwrap_or_default();
         let Some(status) = self.repo.read(cx).status() else {
             return;
         };
@@ -294,6 +296,18 @@ impl ScmView {
         }
         if message.trim().is_empty() && !amend {
             crate::toast::push(window, "Type a commit message first.", cx);
+            return;
+        }
+        // The folder filter narrows what shows, but a commit takes the whole
+        // index: it must not carry another folder's files along unasked.
+        if outside > 0 {
+            crate::toast::push(
+                window,
+                format!(
+                    "Staged files outside {scope} would go into this commit. Unstage them under Staged Changes, or turn off the {scope} filter to commit everything staged."
+                ),
+                cx,
+            );
             return;
         }
         let staged = status.files.iter().any(FileStatus::staged);
@@ -366,12 +380,17 @@ impl ScmView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.repo.update(cx, |repo, cx| {
-            repo.commit(message, amend, stage_all, cx);
+        let started = self.repo.update(cx, |repo, cx| {
+            repo.commit(message, amend, stage_all, cx)?;
             if push {
                 repo.push_after_commit(cx);
             }
+            Ok::<_, &'static str>(())
         });
+        // Not started: the message stays in the box for when it can be.
+        if let Err(why) = started {
+            return crate::toast::push(window, why, cx);
+        }
         self.message
             .update(cx, |input, cx| input.set_value("", window, cx));
     }
@@ -472,14 +491,21 @@ impl ScmView {
         plain
     }
 
-    fn stage_or_unstage(&mut self, files: Vec<FileStatus>, group: Group, cx: &mut Context<Self>) {
-        self.repo.update(cx, |repo, cx| {
+    fn stage_or_unstage(
+        &mut self,
+        files: Vec<FileStatus>,
+        group: Group,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let started = self.repo.update(cx, |repo, cx| {
             if group == Group::Staged {
                 repo.unstage(files, cx)
             } else {
                 repo.stage(files, cx)
             }
         });
+        report(started, window, cx);
     }
 
     /// Add the files to the repository's .gitignore, as den does.
@@ -529,12 +555,14 @@ impl ScmView {
             .separator();
         let (t1, t2, t3) = (targets.clone(), targets.clone(), targets);
         menu = match group {
-            Group::Staged => menu.item(menu_action(&this, "Unstage Changes", move |v, _, cx| {
-                v.stage_or_unstage(t1.clone(), group, cx)
-            })),
+            Group::Staged => menu.item(menu_action(
+                &this,
+                "Unstage Changes",
+                move |v, window, cx| v.stage_or_unstage(t1.clone(), group, window, cx),
+            )),
             Group::Changes => menu
-                .item(menu_action(&this, "Stage Changes", move |v, _, cx| {
-                    v.stage_or_unstage(t1.clone(), group, cx)
+                .item(menu_action(&this, "Stage Changes", move |v, window, cx| {
+                    v.stage_or_unstage(t1.clone(), group, window, cx)
                 }))
                 .item(menu_action(
                     &this,
@@ -547,7 +575,7 @@ impl ScmView {
             Group::Merge => menu.item(menu_action(
                 &this,
                 "Stage (accept as resolved)",
-                move |v, _, cx| v.stage_or_unstage(t1.clone(), group, cx),
+                move |v, window, cx| v.stage_or_unstage(t1.clone(), group, window, cx),
             )),
         };
         let (copy, copy_rel, show) = (file.clone(), file.clone(), file);
@@ -588,14 +616,18 @@ impl ScmView {
             v.commit(false, true, window, cx)
         }))
         .separator()
-        .item(menu_action(&this, "Stage All Changes", |v, _, cx| {
+        .item(menu_action(&this, "Stage All Changes", |v, window, cx| {
             let files = v.files_in(Group::Changes, cx);
-            v.repo.update(cx, |repo, cx| repo.stage(files, cx));
+            v.stage_or_unstage(files, Group::Changes, window, cx);
         }))
-        .item(menu_action(&this, "Unstage All Changes", |v, _, cx| {
-            let files = v.files_in(Group::Staged, cx);
-            v.repo.update(cx, |repo, cx| repo.unstage(files, cx));
-        }))
+        .item(menu_action(
+            &this,
+            "Unstage All Changes",
+            |v, window, cx| {
+                let files = v.files_in(Group::Staged, cx);
+                v.stage_or_unstage(files, Group::Staged, window, cx);
+            },
+        ))
         .item(menu_action(
             &this,
             "Discard All Changes",
@@ -626,7 +658,7 @@ impl ScmView {
             return;
         };
         match event.keystroke.key.as_str() {
-            "space" => self.stage_or_unstage(files, group, cx),
+            "space" => self.stage_or_unstage(files, group, window, cx),
             "delete" if group == Group::Changes => self.confirm_discard(files, window, cx),
             _ => return,
         }
@@ -656,8 +688,12 @@ impl ScmView {
                 .title("Discard Changes")
                 .description(what.clone())
                 .show_cancel(true)
-                .on_ok(move |_, _, cx| {
-                    repo.update(cx, |repo, cx| repo.discard(files.clone(), cx));
+                .on_ok(move |_, window, cx| {
+                    report(
+                        repo.update(cx, |repo, cx| repo.discard(files.clone(), cx)),
+                        window,
+                        cx,
+                    );
                     true
                 })
         });
@@ -675,12 +711,16 @@ impl ScmView {
                     .title("Create Branch")
                     .show_cancel(true)
                     .child(Input::new(&input))
-                    .on_ok(move |_, _, cx| {
+                    .on_ok(move |_, window, cx| {
                         let name = input.read(cx).value().trim().to_string();
                         if name.is_empty() {
                             return false;
                         }
-                        repo.update(cx, |repo, cx| repo.create_branch(name, cx));
+                        report(
+                            repo.update(cx, |repo, cx| repo.create_branch(name, cx)),
+                            window,
+                            cx,
+                        );
                         true
                     })
             }
@@ -725,9 +765,13 @@ impl ScmView {
                         branch.name.clone()
                     };
                     menu = menu.item(PopupMenuItem::new(label).checked(branch.current).on_click(
-                        move |_, _, cx| {
+                        move |_, window, cx| {
                             let branch = branch.clone();
-                            handle.update(cx, |repo, cx| repo.switch(branch, cx));
+                            report(
+                                handle.update(cx, |repo, cx| repo.switch(branch, cx)),
+                                window,
+                                cx,
+                            );
                         },
                     ));
                 }
@@ -744,7 +788,7 @@ impl ScmView {
         let action = |id: &'static str,
                       icon: IconName,
                       tooltip: &'static str,
-                      f: fn(&mut Repo, &mut Context<Repo>),
+                      f: fn(&mut Repo, &mut Context<Repo>) -> Result<(), &'static str>,
                       cx: &mut Context<Self>| {
             let repo = self.repo.clone();
             Button::new(id)
@@ -752,7 +796,9 @@ impl ScmView {
                 .xsmall()
                 .icon(Icon::new(icon))
                 .tooltip(tooltip)
-                .on_click(cx.listener(move |_, _, _, cx| repo.update(cx, |repo, cx| f(repo, cx))))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    report(repo.update(cx, |repo, cx| f(repo, cx)), window, cx)
+                }))
         };
         let push_tooltip = if branch.upstream.is_some() {
             "Push"
@@ -804,7 +850,10 @@ impl ScmView {
                                 "refresh",
                                 IconName::RotateCw,
                                 "Refresh",
-                                |r, cx| r.reload(cx),
+                                |r, cx| {
+                                    r.reload(cx);
+                                    Ok(())
+                                },
                                 cx,
                             ))
                             .child({
@@ -944,9 +993,9 @@ impl ScmView {
                         IconName::Plus
                     }))
                     .tooltip(if staged { "Unstage All" } else { "Stage All" })
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         let files = this.files_in(group, cx);
-                        this.stage_or_unstage(files, group, cx);
+                        this.stage_or_unstage(files, group, window, cx);
                     }))
             });
 
@@ -1053,9 +1102,9 @@ impl ScmView {
                         } else {
                             "Stage Changes"
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             let files = this.targets(&rel, group, cx);
-                            this.stage_or_unstage(files, group, cx);
+                            this.stage_or_unstage(files, group, window, cx);
                         }))
                 });
             list = list.child(
@@ -2009,11 +2058,53 @@ pub fn letter_color(letter: char, cx: &App) -> Hsla {
     }
 }
 
+impl ScmView {
+    /// A message under the header, dismissed by its button: the last
+    /// failure in the danger colour, or what a pull that worked still needs
+    /// the user to see.
+    fn render_banner(
+        &self,
+        id: &'static str,
+        text: String,
+        color: Hsla,
+        dismiss: fn(&mut Repo, &mut Context<Repo>),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .mx_2()
+            .mb_1()
+            .p_2()
+            .gap_2()
+            .items_start()
+            .rounded(px(4.))
+            .border_1()
+            .border_color(color)
+            .bg(color.opacity(0.12))
+            .text_xs()
+            .child(div().flex_1().min_w_0().child(text))
+            .child(
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::X))
+                    .on_click(cx.listener(move |this, _, _, cx| this.repo.update(cx, dismiss))),
+            )
+    }
+}
+
+/// Show why an operation did not start, when it did not.
+fn report(started: Result<(), &'static str>, window: &mut Window, cx: &mut App) {
+    if let Err(why) = started {
+        crate::toast::push(window, why, cx);
+    }
+}
+
 impl Render for ScmView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let state = self.repo.read(cx).state.clone();
         let error = self.repo.read(cx).error.clone();
+        let notice = self.repo.read(cx).notice.clone();
 
         let body: AnyElement = match &state {
             RepoState::Loading => div().px_3().text_sm().text_color(theme.muted_foreground).child("Reading the repository…").into_any_element(),
@@ -2087,29 +2178,10 @@ impl Render for ScmView {
             .size_full()
             .child(self.render_header(cx))
             .when_some(error, |this, error| {
-                this.child(
-                    h_flex()
-                        .mx_2()
-                        .mb_1()
-                        .p_2()
-                        .gap_2()
-                        .items_start()
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme.danger)
-                        .bg(theme.danger.opacity(0.12))
-                        .text_xs()
-                        .child(div().flex_1().min_w_0().child(error))
-                        .child(
-                            Button::new("dismiss-error")
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(IconName::X))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.repo.update(cx, |repo, cx| repo.clear_error(cx))
-                                })),
-                        ),
-                )
+                this.child(self.render_banner("dismiss-error", error, theme.danger, Repo::clear_error, cx))
+            })
+            .when_some(notice, |this, notice| {
+                this.child(self.render_banner("dismiss-notice", notice, theme.info, Repo::clear_notice, cx))
             })
             .when(ready, |this| {
                 this.child(

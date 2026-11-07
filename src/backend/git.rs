@@ -98,17 +98,18 @@ pub fn check(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, E
     if out.ok() {
         Ok(out)
     } else {
-        let message = if out.stderr.trim().is_empty() {
-            out.stdout.trim()
-        } else {
-            out.stderr.trim()
-        };
-        Err(Error::Failed(format!(
-            "git {}: {}",
-            args.join(" "),
-            message
-        )))
+        Err(failure(args, &out))
     }
+}
+
+/// A failed run as an error carrying git's message.
+fn failure(args: &[&str], out: &Output) -> Error {
+    let message = if out.stderr.trim().is_empty() {
+        out.stdout.trim()
+    } else {
+        out.stderr.trim()
+    };
+    Error::Failed(format!("git {}: {}", args.join(" "), message))
 }
 
 // ---------------------------------------------------------------------------
@@ -375,14 +376,186 @@ pub fn fetch(top: &Path) -> Result<(), Error> {
     check(top, &["fetch"], None).map(drop)
 }
 
-pub fn pull(top: &Path) -> Result<(), Error> {
-    check(top, &["pull"], None).map(drop)
+/// Pull: fetch, then bring in what the upstream has (see [`integrate`]).
+/// `Ok(Some(_))` is a pull that worked but left something for the user to
+/// see. A branch with no commits of its own only moves forward, which is
+/// safe even over commits it once dropped.
+pub fn pull(top: &Path) -> Result<Option<String>, Error> {
+    check(top, &["fetch"], None)?;
+    if !commits_in(top, "@{u}..HEAD").is_empty() {
+        stop_on_rewrite(top, "pull")?;
+    }
+    integrate(top)
+}
+
+/// The commits in a revision range; none when it can't be read, as without
+/// an upstream.
+fn commits_in(top: &Path, range: &str) -> Vec<String> {
+    run(top, &["rev-list", range], None)
+        .ok()
+        .filter(Output::ok)
+        .map(|out| out.stdout.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Commits that only the upstream has were on this branch before: the branch
+/// was amended or reset after pushing, rather than the remote moving on.
+/// Integrating would bring the old commits back, or drop the amended ones.
+/// `None` when the branches diverged and the reflog, disabled or expired,
+/// cannot tell.
+fn rewrote_pushed_commits(top: &Path) -> Option<bool> {
+    let upstream_only: HashSet<String> = commits_in(top, "HEAD..@{u}").into_iter().collect();
+    if upstream_only.is_empty() {
+        return Some(false);
+    }
+    let branch = run(top, &["symbolic-ref", "-q", "HEAD"], None)
+        .ok()
+        .filter(Output::ok)?;
+    let reflog = run(
+        top,
+        &["reflog", "show", "--format=%H", branch.stdout.trim()],
+        None,
+    )
+    .ok()
+    .filter(Output::ok)
+    .map(|out| out.stdout)
+    .unwrap_or_default();
+    if reflog.trim().is_empty() {
+        return commits_in(top, "@{u}..HEAD").is_empty().then_some(false);
+    }
+    Some(reflog.lines().any(|c| upstream_only.contains(c)))
+}
+
+/// Stops with an explanation when the commits only the upstream has may be
+/// ones this branch rewrote after pushing, or when that cannot be told.
+fn stop_on_rewrite(top: &Path, action: &str) -> Result<(), Error> {
+    match rewrote_pushed_commits(top) {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::Failed(format!(
+            "Did not {action}: the remote has commits that were changed here after pushing (by an amend, a reset or a rebase), \
+             so pulling would bring the old ones back. In a terminal, git pull --rebase keeps both versions; \
+             git push --force-with-lease replaces the remote's, once you are sure they are not another machine's work."
+        ))),
+        None => Err(Error::Failed(format!(
+            "Did not {action}: this branch and the remote both have commits the other lacks, and without a reflog \
+             it cannot be told whether the remote's were pushed from here and changed since. \
+             Reconcile them in a terminal: git pull --rebase keeps both."
+        ))),
+    }
+}
+
+/// The outcome of what followed [`integrate`], keeping its note: on a
+/// failure the note goes in front of the error, since it still applies.
+fn with_note(done: Result<(), Error>, note: Option<String>) -> Result<Option<String>, Error> {
+    match (done, note) {
+        (Ok(()), note) => Ok(note),
+        (Err(err), None) => Err(err),
+        (Err(err), Some(note)) => Err(Error::Failed(format!("{note}\n{err}"))),
+    }
+}
+
+/// Bring the upstream's commits into the branch, for one shared between
+/// machines: by a rebase, or a merge when `pull.rebase` is false (as
+/// `git pull` would, without fetching again). Uncommitted changes are set
+/// aside and put back, wherever they are in the repository: a folder filter
+/// may hide them from the user.
+///
+/// A conflict is rolled back, since Source Control cannot continue a rebase
+/// or a merge. `Ok(Some(_))` is a pull that worked but whose put-back
+/// conflicted, with what the user should do about it.
+fn integrate(top: &Path) -> Result<Option<String>, Error> {
+    // A rebase detaches HEAD and a merge leaves MERGE_HEAD: on a branch with
+    // neither, whatever is in progress after a failure is ours to abort.
+    let ours = run(top, &["symbolic-ref", "-q", "HEAD"], None)?.ok() && !merging(top)?;
+    let rebase = run(top, &["config", "--get", "pull.rebase"], None)?
+        .stdout
+        .trim()
+        != "false";
+    let (args, abort, by_hand): (&[&str], &[&str], &str) = if rebase {
+        (
+            &["rebase", "--autostash", "@{u}"],
+            &["rebase", "--abort"],
+            "git pull --rebase --autostash",
+        )
+    } else {
+        (
+            &["merge", "--no-edit", "--autostash", "@{u}"],
+            &["merge", "--abort"],
+            "git pull --no-rebase --autostash",
+        )
+    };
+    let out = run(top, args, None)?;
+    if !out.ok() {
+        let conflicts = unmerged(top);
+        if ours && run(top, abort, None)?.ok() {
+            return Err(Error::Failed(if conflicts.is_empty() {
+                format!("{} Nothing was changed.", failure(args, &out))
+            } else {
+                format!(
+                    "Could not pull: your commits and the incoming ones both change {}. \
+                     Nothing was changed. To resolve it, run {by_hand} in a terminal.",
+                    conflicts.join(", ")
+                )
+            }));
+        }
+        return Err(failure(args, &out));
+    }
+    let put_back_conflicted = [&out.stdout, &out.stderr]
+        .iter()
+        .any(|text| text.contains("Applying autostash resulted in conflicts"));
+    Ok(put_back_conflicted.then(|| {
+        format!(
+            "Pulled, but your uncommitted changes conflict with it in {}. \
+             Resolve them under Merge Changes. A copy stays in the stash: git stash drop removes it afterwards.",
+            unmerged(top).join(", ")
+        )
+    }))
+}
+
+/// A merge is in progress.
+fn merging(top: &Path) -> Result<bool, Error> {
+    Ok(run(top, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], None)?.ok())
+}
+
+/// The files with conflicts, relative to the top level.
+fn unmerged(top: &Path) -> Vec<String> {
+    run(top, &["diff", "--name-only", "--diff-filter=U", "-z"], None)
+        .map(|out| {
+            out.stdout
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The push was refused only because the remote has commits this branch
+/// lacks, as when another machine pushed first.
+fn rejected_as_behind(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("[rejected]")
+            && (line.contains("(fetch first)") || line.contains("(non-fast-forward)"))
+    })
 }
 
 /// Push, publishing the branch to the first remote when it has no upstream.
-pub fn push(top: &Path, branch: &Branch) -> Result<(), Error> {
+/// When the remote moved on, its commits are brought in and the push tried
+/// again, never forced; `Ok(Some(_))` is what that left for the user to
+/// see. When the branch rewrote what it had pushed, it stops.
+pub fn push(top: &Path, branch: &Branch) -> Result<Option<String>, Error> {
     if branch.upstream.is_some() {
-        return check(top, &["push"], None).map(drop);
+        let out = run(top, &["push"], None)?;
+        if out.ok() {
+            return Ok(None);
+        }
+        if !rejected_as_behind(&out.stderr) {
+            return Err(failure(&["push"], &out));
+        }
+        check(top, &["fetch"], None)?;
+        stop_on_rewrite(top, "push")?;
+        let note = integrate(top)?;
+        return with_note(check(top, &["push"], None).map(drop), note);
     }
     let remotes = check(top, &["remote"], None)?;
     let remote = remotes
@@ -392,7 +565,7 @@ pub fn push(top: &Path, branch: &Branch) -> Result<(), Error> {
         .find(|r| !r.is_empty())
         .ok_or_else(|| Error::Failed("This repository has no remote to publish to.".into()))?
         .to_string();
-    check(top, &["push", "-u", &remote, &branch.head], None).map(drop)
+    check(top, &["push", "-u", &remote, &branch.head], None).map(|_| None)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1140,12 +1313,7 @@ mod tests {
             return;
         }; // no git here
         assert!(out.ok());
-        for args in [
-            ["config", "user.email", "t@example.com"],
-            ["config", "user.name", "Test"],
-        ] {
-            check(&dir, &args, None).unwrap();
-        }
+        configure(&dir);
         std::fs::write(dir.join("a.txt"), "one").unwrap();
         let top = toplevel(&dir).unwrap().unwrap();
         let status = status(&top).unwrap();
@@ -1325,5 +1493,472 @@ mod tests {
         assert_eq!(show_in(&dir.join("sub"), "", "./a.txt"), Ok(None));
         assert_eq!(show_in(&top, "no-such-rev", "a.txt"), Ok(None));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two machines' clones of one repository, `apps/x/f` and `apps/y/g` in it.
+    struct Machines {
+        dir: PathBuf,
+        here: PathBuf,
+        other: PathBuf,
+    }
+
+    impl Machines {
+        fn new(name: &str) -> Option<Self> {
+            let dir =
+                std::env::temp_dir().join(format!("den-git-sync-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // No git here: skip. A git that fails is a failure.
+            let init = run(&dir, &["init", "-q", "--bare", "-b", "main", "r.git"], None).ok()?;
+            assert!(init.ok(), "{}", init.stderr);
+            let machines = Self {
+                here: dir.join("here"),
+                other: dir.join("other"),
+                dir,
+            };
+            check(&machines.dir, &["clone", "-q", "r.git", "here"], None).unwrap();
+            configure(&machines.here);
+            write(&machines.here, "apps/x/f", "one\n");
+            write(&machines.here, "apps/y/g", "one\n");
+            commit_all(&machines.here, "init");
+            check(
+                &machines.here,
+                &["push", "-q", "-u", "origin", "HEAD:main"],
+                None,
+            )
+            .unwrap();
+            check(&machines.dir, &["clone", "-q", "r.git", "other"], None).unwrap();
+            configure(&machines.other);
+            Some(machines)
+        }
+
+        /// The other machine pushes a change of `rel`.
+        fn other_pushes(&self, rel: &str, text: &str) {
+            write(&self.other, rel, text);
+            commit_all(&self.other, "from the other machine");
+            check(&self.other, &["push", "-q"], None).unwrap();
+        }
+
+        /// The branch here, as the panel reads it.
+        fn branch(&self) -> Branch {
+            status(&self.here).unwrap().branch
+        }
+    }
+
+    impl Drop for Machines {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+
+    /// An identity, and the developer's global config and hooks kept out:
+    /// a signing key, `push.default`, or a hooks folder would change what
+    /// the tests see.
+    fn configure(repo: &Path) {
+        for (key, value) in [
+            ("user.email", "t@example.com"),
+            ("user.name", "Test"),
+            ("commit.gpgsign", "false"),
+            ("tag.gpgsign", "false"),
+            ("push.default", "simple"),
+            ("merge.ff", "true"),
+            ("core.hooksPath", "no-hooks"),
+        ] {
+            check(repo, &["config", key, value], None).unwrap();
+        }
+    }
+
+    fn write(repo: &Path, rel: &str, text: &str) {
+        let path = repo.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn read(repo: &Path, rel: &str) -> String {
+        std::fs::read_to_string(repo.join(rel)).unwrap()
+    }
+
+    fn commit_all(repo: &Path, message: &str) {
+        check(repo, &["add", "-A"], None).unwrap();
+        check(repo, &["commit", "-q", "-m", message], None).unwrap();
+    }
+
+    fn head(repo: &Path) -> String {
+        check(repo, &["rev-parse", "HEAD"], None).unwrap().stdout
+    }
+
+    #[test]
+    fn push_takes_in_what_another_machine_pushed() {
+        let Some(m) = Machines::new("push") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/y/g", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        // Not fetched: the panel shows only "1 ahead".
+        assert_eq!((m.branch().ahead, m.branch().behind), (1, 0));
+
+        push(&m.here, &m.branch()).unwrap();
+
+        check(&m.here, &["fetch", "-q"], None).unwrap();
+        assert_eq!((m.branch().ahead, m.branch().behind), (0, 0));
+        assert_eq!(read(&m.here, "apps/x/f"), "one\nother\n");
+        assert_eq!(read(&m.here, "apps/y/g"), "one\nhere\n");
+    }
+
+    #[test]
+    fn pull_reconciles_diverged_branches_around_changes_in_other_folders() {
+        let Some(m) = Machines::new("pull") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/y/g", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        // Dirty outside the folder the panel may be filtered to.
+        write(&m.here, "apps/y/h", "tracked\n");
+        commit_all(&m.here, "another");
+        write(&m.here, "apps/y/h", "tracked\ndirty\n");
+
+        pull(&m.here).unwrap();
+
+        assert_eq!(read(&m.here, "apps/x/f"), "one\nother\n");
+        assert_eq!(read(&m.here, "apps/y/h"), "tracked\ndirty\n");
+        assert_eq!(m.branch().behind, 0);
+        assert!(
+            check(&m.here, &["stash", "list"], None)
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_conflicting_rebase_is_rolled_back() {
+        let Some(m) = Machines::new("conflict") else {
+            return;
+        };
+        check(&m.here, &["config", "pull.rebase", "true"], None).unwrap();
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/x/f", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        write(&m.here, "apps/y/g", "one\ndirty\n");
+        let before = head(&m.here);
+
+        let Err(Error::Failed(message)) = push(&m.here, &m.branch()) else {
+            panic!("a conflicting push must fail");
+        };
+
+        assert!(message.contains("apps/x/f"), "{message}");
+        assert!(message.contains("Nothing was changed"), "{message}");
+        assert_eq!(head(&m.here), before);
+        assert_eq!(m.branch().head, "main");
+        // Only what it fetched moved: still not forced over the other machine.
+        assert_eq!((m.branch().ahead, m.branch().behind), (1, 1));
+        assert_eq!(read(&m.here, "apps/y/g"), "one\ndirty\n");
+        assert!(!status(&m.here).unwrap().files.iter().any(|f| f.conflict));
+    }
+
+    #[test]
+    fn a_conflicting_merge_is_rolled_back() {
+        let Some(m) = Machines::new("merge-conflict") else {
+            return;
+        };
+        check(&m.here, &["config", "pull.rebase", "false"], None).unwrap();
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/x/f", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        write(&m.here, "apps/y/g", "one\ndirty\n");
+        let before = head(&m.here);
+
+        let Err(Error::Failed(message)) = pull(&m.here) else {
+            panic!("a conflicting pull must fail");
+        };
+
+        assert!(message.contains("apps/x/f"), "{message}");
+        assert!(message.contains("Nothing was changed"), "{message}");
+        assert!(message.contains("--no-rebase"), "{message}");
+        assert_eq!(head(&m.here), before);
+        assert!(!merging(&m.here).unwrap());
+        assert_eq!(read(&m.here, "apps/y/g"), "one\ndirty\n");
+        assert!(!status(&m.here).unwrap().files.iter().any(|f| f.conflict));
+    }
+
+    #[test]
+    fn a_merge_brings_in_the_upstream_when_the_config_asks_for_one() {
+        let Some(m) = Machines::new("merge") else {
+            return;
+        };
+        check(&m.here, &["config", "pull.rebase", "false"], None).unwrap();
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/y/g", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        write(&m.here, "apps/y/g", "one\nhere\ndirty\n");
+
+        assert_eq!(pull(&m.here), Ok(None));
+
+        assert_eq!(read(&m.here, "apps/x/f"), "one\nother\n");
+        assert_eq!(read(&m.here, "apps/y/g"), "one\nhere\ndirty\n");
+        // Its own commit and the merge commit.
+        assert_eq!((m.branch().ahead, m.branch().behind), (2, 0));
+        let parents = check(&m.here, &["rev-list", "--parents", "-n", "1", "HEAD"], None).unwrap();
+        assert_eq!(
+            parents.stdout.split_whitespace().count(),
+            3,
+            "a merge commit"
+        );
+    }
+
+    #[test]
+    fn a_user_merge_in_progress_is_left_alone() {
+        let Some(m) = Machines::new("own-merge") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/x/f", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        check(&m.here, &["fetch", "-q"], None).unwrap();
+        assert!(!run(&m.here, &["merge", "origin/main"], None).unwrap().ok());
+
+        assert!(pull(&m.here).is_err());
+
+        assert!(merging(&m.here).unwrap());
+    }
+
+    #[test]
+    fn uncommitted_changes_that_conflict_are_reported_and_kept() {
+        let Some(m) = Machines::new("put-back") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/x/f", "one\ndirty\n");
+
+        let Ok(Some(message)) = pull(&m.here) else {
+            panic!("the conflict must be reported");
+        };
+
+        assert!(message.starts_with("Pulled, but"), "{message}");
+        assert!(message.contains("apps/x/f"), "{message}");
+        assert_eq!(m.branch().behind, 0, "the pull itself went through");
+        assert!(status(&m.here).unwrap().files.iter().any(|f| f.conflict));
+        assert!(
+            !check(&m.here, &["stash", "list"], None)
+                .unwrap()
+                .stdout
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_rebase_the_user_started_is_left_alone() {
+        let Some(m) = Machines::new("own-rebase") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/x/f", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        check(&m.here, &["fetch", "-q"], None).unwrap();
+        assert!(!run(&m.here, &["rebase", "origin/main"], None).unwrap().ok());
+
+        assert!(pull(&m.here).is_err());
+
+        let status = check(&m.here, &["status"], None).unwrap().stdout;
+        assert!(status.contains("rebase in progress"), "{status}");
+    }
+
+    /// `m` with a commit here that is pushed.
+    fn pushed_commit(m: &Machines) {
+        write(&m.here, "apps/y/g", "one\npushed\n");
+        commit_all(&m.here, "pushed");
+        check(&m.here, &["push", "-q"], None).unwrap();
+    }
+
+    fn amend(repo: &Path, message: &str) {
+        check(repo, &["commit", "-q", "--amend", "-m", message], None).unwrap();
+    }
+
+    fn subject(repo: &Path) -> String {
+        log(repo, &["HEAD".into()], 1, 0, None).unwrap()[0]
+            .subject
+            .clone()
+    }
+
+    fn upstream(repo: &Path) -> String {
+        check(repo, &["rev-parse", "@{u}"], None).unwrap().stdout
+    }
+
+    /// Stopped with the explanation, the branch and the remote as they were.
+    fn assert_stopped(
+        m: &Machines,
+        result: Result<Option<String>, Error>,
+        remote: &str,
+        here: &str,
+    ) {
+        let Err(Error::Failed(message)) = result else {
+            panic!("rewritten history must stop it");
+        };
+        assert!(message.contains("force-with-lease"), "{message}");
+        assert_eq!(head(&m.here), here);
+        assert_eq!(upstream(&m.here), remote);
+    }
+
+    #[test]
+    fn push_does_not_undo_an_amend_of_a_pushed_commit() {
+        let Some(m) = Machines::new("amend") else {
+            return;
+        };
+        pushed_commit(&m);
+        let remote = upstream(&m.here);
+        amend(&m.here, "amended");
+        let here = head(&m.here);
+
+        assert_stopped(&m, push(&m.here, &m.branch()), &remote, &here);
+        assert_eq!(subject(&m.here), "amended");
+    }
+
+    #[test]
+    fn push_stops_on_an_amend_even_when_the_remote_moved_too() {
+        let Some(m) = Machines::new("amend-moved") else {
+            return;
+        };
+        pushed_commit(&m);
+        check(&m.other, &["pull", "-q"], None).unwrap();
+        m.other_pushes("apps/x/f", "one\nother\n");
+        amend(&m.here, "amended");
+        let here = head(&m.here);
+
+        let result = push(&m.here, &m.branch());
+
+        assert_stopped(&m, result, &upstream(&m.other), &here);
+    }
+
+    #[test]
+    fn pull_does_not_undo_an_amend_of_a_pushed_commit() {
+        let Some(m) = Machines::new("pull-amend") else {
+            return;
+        };
+        pushed_commit(&m);
+        let remote = upstream(&m.here);
+        amend(&m.here, "amended");
+        let here = head(&m.here);
+
+        assert_stopped(&m, pull(&m.here), &remote, &here);
+    }
+
+    #[test]
+    fn a_dropped_pushed_commit_stops_a_push_but_not_a_pull() {
+        let Some(m) = Machines::new("reset") else {
+            return;
+        };
+        pushed_commit(&m);
+        let remote = upstream(&m.here);
+        check(&m.here, &["reset", "-q", "--hard", "HEAD~1"], None).unwrap();
+        let here = head(&m.here);
+
+        assert_stopped(&m, push(&m.here, &m.branch()), &remote, &here);
+
+        pull(&m.here).unwrap();
+        assert_eq!(head(&m.here), remote);
+    }
+
+    /// Without a reflog, a rewrite cannot be told from the remote moving on:
+    /// diverged branches are left to the user, a branch that only lags is
+    /// still brought forward.
+    #[test]
+    fn without_a_reflog_diverged_branches_are_left_to_the_user() {
+        let Some(m) = Machines::new("no-reflog") else {
+            return;
+        };
+        check(&m.here, &["config", "core.logAllRefUpdates", "false"], None).unwrap();
+        pushed_commit(&m);
+        let remote = upstream(&m.here);
+        amend(&m.here, "amended");
+        check(
+            &m.here,
+            &["reflog", "expire", "--expire=now", "--all"],
+            None,
+        )
+        .unwrap();
+        let here = head(&m.here);
+
+        let Err(Error::Failed(message)) = push(&m.here, &m.branch()) else {
+            panic!("diverged history must stop it");
+        };
+        assert!(message.contains("reflog"), "{message}");
+        assert_eq!(head(&m.here), here);
+        assert_eq!(upstream(&m.here), remote);
+
+        check(&m.here, &["reset", "-q", "--hard", "HEAD~1"], None).unwrap();
+        push(&m.here, &m.branch()).unwrap();
+        assert_eq!(head(&m.here), remote);
+    }
+
+    #[test]
+    fn push_integrates_what_was_fetched_earlier() {
+        let Some(m) = Machines::new("fetched") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/y/g", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        check(&m.here, &["fetch", "-q"], None).unwrap();
+        assert_eq!((m.branch().ahead, m.branch().behind), (1, 1));
+
+        push(&m.here, &m.branch()).unwrap();
+
+        assert_eq!((m.branch().ahead, m.branch().behind), (0, 0));
+    }
+
+    #[test]
+    fn push_integrates_around_an_amend_that_was_never_pushed() {
+        let Some(m) = Machines::new("local-amend") else {
+            return;
+        };
+        m.other_pushes("apps/x/f", "one\nother\n");
+        write(&m.here, "apps/y/g", "one\nhere\n");
+        commit_all(&m.here, "from here");
+        amend(&m.here, "amended");
+
+        push(&m.here, &m.branch()).unwrap();
+
+        // The amended commit went up, not the one it replaced, whether the
+        // config rebased or merged.
+        let subjects: Vec<String> = log(&m.here, &["HEAD".into()], 10, 0, None)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.subject)
+            .collect();
+        assert!(subjects.iter().any(|s| s == "amended"), "{subjects:?}");
+        assert!(!subjects.iter().any(|s| s == "from here"), "{subjects:?}");
+        assert_eq!((m.branch().ahead, m.branch().behind), (0, 0));
+    }
+
+    #[test]
+    fn a_note_survives_whatever_followed_it() {
+        let note = || Some("note".to_string());
+        let failed = || Err(Error::Failed("failed".into()));
+        assert_eq!(with_note(Ok(()), None), Ok(None));
+        assert_eq!(
+            with_note(failed(), None),
+            Err(Error::Failed("failed".into()))
+        );
+        assert_eq!(with_note(Ok(()), note()), Ok(note()));
+        assert_eq!(
+            with_note(failed(), note()),
+            Err(Error::Failed("note\nfailed".into()))
+        );
+    }
+
+    #[test]
+    fn only_a_push_that_is_behind_counts_as_rejected_for_that() {
+        assert!(rejected_as_behind(
+            " ! [rejected]        main -> main (fetch first)\n"
+        ));
+        assert!(rejected_as_behind(
+            " ! [rejected]        main -> main (non-fast-forward)\n"
+        ));
+        assert!(!rejected_as_behind(
+            " ! [remote rejected] main -> main (protected branch)\n"
+        ));
+        assert!(!rejected_as_behind("fatal: Authentication failed\n"));
     }
 }

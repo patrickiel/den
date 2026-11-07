@@ -83,12 +83,18 @@ pub struct Repo {
     default_branch: Option<String>,
     /// The last operation's failure, with git's message.
     pub error: Option<String>,
+    /// What the last operation, though it worked, needs the user to see: a
+    /// pull whose uncommitted changes conflicted when put back.
+    pub notice: Option<String>,
     /// What runs now ("Committing…"), for the view to show.
     pub busy: Option<&'static str>,
     index: Index,
     commit_count: usize,
     /// Push once the running operation (a commit) is done.
     push_next: bool,
+    /// A pull or push runs, which may rebase with the uncommitted changes
+    /// set aside: nothing else may touch the repository until it is done.
+    syncing: bool,
     /// A refresh runs; `again` is the one asked for meanwhile, run after it.
     refreshing: bool,
     again: Option<Refresh>,
@@ -131,10 +137,12 @@ impl Repo {
             github: None,
             default_branch: None,
             error: None,
+            notice: None,
             busy: None,
             index: Index::default(),
             commit_count: 50,
             push_next: false,
+            syncing: false,
             refreshing: false,
             again: None,
             _refresh: None,
@@ -257,8 +265,7 @@ impl Repo {
                     let mut status = git::status(&top)?;
                     let scope = scoped.then(|| subdir_of(&top, &root)).flatten();
                     if scope.is_some() {
-                        let under = key(&root);
-                        status.files.retain(|f| under_key(&under, &f.path));
+                        scope_to(&mut status.files, &key(&root));
                     }
                     let (default_branch, github) = if reload {
                         (
@@ -338,12 +345,54 @@ impl Repo {
         ignored_under(&self.index.ignored, self.top(), path)
     }
 
+    /// The staged files outside the folder filter, which the next commit
+    /// would take along.
+    pub fn staged_outside_scope(&self) -> usize {
+        match self.status() {
+            Some(status) if self.scope().is_some() => staged_outside(&status.files, &self.root),
+            _ => 0,
+        }
+    }
+
     /// Run an operation on the repository, then refresh. Its failure shows
-    /// in the view with git's message; it never opens a dialog.
+    /// in the view with git's message; it never opens a dialog. While a pull
+    /// or push runs it does not start: a commit in the middle of a rebase
+    /// would land on the wrong commit. The `Err` says so, for the view to
+    /// show.
     pub fn run(
         &mut self,
         label: &'static str,
         op: impl FnOnce(&Path) -> Result<(), Error> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if self.syncing {
+            return Err("Wait for the pull or push to finish first.");
+        }
+        self.start(label, move |top| op(top).map(|()| None), cx);
+        Ok(())
+    }
+
+    /// Pull or push, once nothing else runs: unlike the other operations it
+    /// may rewrite the working tree for a while, and it may end with a
+    /// notice for the user.
+    fn sync(
+        &mut self,
+        label: &'static str,
+        op: impl FnOnce(&Path) -> Result<Option<String>, Error> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if self.busy.is_some() {
+            return Err("Wait for the running operation to finish first.");
+        }
+        self.syncing = self.top().is_some();
+        self.start(label, op, cx);
+        Ok(())
+    }
+
+    fn start(
+        &mut self,
+        label: &'static str,
+        op: impl FnOnce(&Path) -> Result<Option<String>, Error> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         let Some(top) = self.top().map(Path::to_path_buf) else {
@@ -351,6 +400,7 @@ impl Repo {
         };
         self.busy = Some(label);
         self.error = None;
+        self.notice = None;
         cx.notify();
         self._operation = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -359,34 +409,49 @@ impl Repo {
                 .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
+                this.syncing = false;
                 match result {
                     Err(err) => {
                         this.error = Some(err.to_string());
                         this.push_next = false;
                     }
-                    Ok(()) if std::mem::take(&mut this.push_next) => {
-                        this.push(cx);
-                        return;
+                    Ok(notice) => {
+                        this.notice = notice;
+                        if std::mem::take(&mut this.push_next) {
+                            _ = this.push(cx);
+                            return;
+                        }
                     }
-                    Ok(()) => {}
                 }
                 this.refresh(cx);
             });
         }));
     }
 
-    pub fn stage(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
+    pub fn stage(
+        &mut self,
+        files: Vec<FileStatus>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let rels = paths_of(files);
-        self.run("Staging…", move |top| git::stage(top, &rels), cx);
+        self.run("Staging…", move |top| git::stage(top, &rels), cx)
     }
 
-    pub fn unstage(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
+    pub fn unstage(
+        &mut self,
+        files: Vec<FileStatus>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let rels = paths_of(files);
-        self.run("Unstaging…", move |top| git::unstage(top, &rels), cx);
+        self.run("Unstaging…", move |top| git::unstage(top, &rels), cx)
     }
 
-    pub fn discard(&mut self, files: Vec<FileStatus>, cx: &mut Context<Self>) {
-        self.run("Discarding…", move |top| git::discard(top, &files), cx);
+    pub fn discard(
+        &mut self,
+        files: Vec<FileStatus>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        self.run("Discarding…", move |top| git::discard(top, &files), cx)
     }
 
     /// Commit what is staged; with `stage_all`, every change (in the scope)
@@ -397,7 +462,7 @@ impl Repo {
         amend: bool,
         stage_all: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Result<(), &'static str> {
         let scope = self.scope();
         self.run(
             "Committing…",
@@ -410,34 +475,42 @@ impl Repo {
                 git::commit(top, &message, amend)
             },
             cx,
-        );
+        )
     }
 
-    pub fn fetch(&mut self, cx: &mut Context<Self>) {
-        self.run("Fetching…", git::fetch, cx);
+    pub fn fetch(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        self.run("Fetching…", git::fetch, cx)
     }
 
-    pub fn pull(&mut self, cx: &mut Context<Self>) {
-        self.run("Pulling…", git::pull, cx);
+    pub fn pull(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        self.sync("Pulling…", git::pull, cx)
     }
 
-    pub fn push(&mut self, cx: &mut Context<Self>) {
+    pub fn push(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
         let Some(branch) = self.status().map(|s| s.branch.clone()) else {
-            return;
+            return Ok(());
         };
-        self.run("Pushing…", move |top| git::push(top, &branch), cx);
+        self.sync("Pushing…", move |top| git::push(top, &branch), cx)
     }
 
-    pub fn switch(&mut self, branch: BranchRef, cx: &mut Context<Self>) {
-        self.run("Checking out…", move |top| git::switch(top, &branch), cx);
+    pub fn switch(
+        &mut self,
+        branch: BranchRef,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        self.run("Checking out…", move |top| git::switch(top, &branch), cx)
     }
 
-    pub fn create_branch(&mut self, name: String, cx: &mut Context<Self>) {
+    pub fn create_branch(
+        &mut self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         self.run(
             "Creating branch…",
             move |top| git::create_branch(top, &name),
             cx,
-        );
+        )
     }
 
     /// Push after the commit that is running now.
@@ -445,7 +518,7 @@ impl Repo {
         if self.busy.is_some() {
             self.push_next = true;
         } else {
-            self.push(cx);
+            _ = self.push(cx);
         }
     }
 
@@ -478,6 +551,11 @@ impl Repo {
         self.error = None;
         cx.notify();
     }
+
+    pub fn clear_notice(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
+        cx.notify();
+    }
 }
 
 /// `root` relative to `top` with `/` separators, when it is strictly inside
@@ -496,6 +574,28 @@ pub fn subdir_of(top: &Path, root: &Path) -> Option<String> {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
     Some(parts.into_iter().rev().collect::<Vec<_>>().join("/"))
+}
+
+/// Narrow the status to a folder (given as its [`key`]): the files in it
+/// and, wherever they are, those the next commit depends on, since a
+/// conflict blocks it and whatever is staged goes into it. Of a file outside
+/// the folder only the staged half shows: the filter never offers to stage
+/// or discard changes it claims to hide.
+fn scope_to(files: &mut Vec<FileStatus>, under: &str) {
+    files.retain(|f| f.conflict || f.staged() || under_key(under, &f.path));
+    for file in files.iter_mut() {
+        if !file.conflict && !under_key(under, &file.path) {
+            file.worktree = '.';
+        }
+    }
+}
+
+fn staged_outside(files: &[FileStatus], root: &Path) -> usize {
+    let under = key(root);
+    files
+        .iter()
+        .filter(|f| f.staged() && !under_key(&under, &f.path))
+        .count()
 }
 
 /// `path` is `dir` (given as its [`key`]) or inside it.
@@ -580,9 +680,50 @@ fn lay_out(status: &Status, commits: &[Commit]) -> (git_graph::Layout, Option<us
 
 #[cfg(test)]
 mod tests {
-    use super::{ignored_under, index, key, subdir_of, under_key};
-    use crate::backend::git::{FileStatus, Status};
+    use super::{ignored_under, index, key, scope_to, staged_outside, subdir_of, under_key};
+    use crate::backend::git::{FileStatus, Status, parse_status};
     use std::{collections::HashSet, path::Path};
+
+    #[test]
+    fn a_folder_filter_keeps_what_the_next_commit_depends_on() {
+        let raw = [
+            "1 .M N... 100644 100644 100644 aaa bbb apps/a/edited",
+            "1 M. N... 100644 100644 100644 aaa bbb apps/a/staged",
+            "1 .M N... 100644 100644 100644 aaa bbb apps/b/edited",
+            "1 M. N... 100644 100644 100644 aaa bbb apps/b/staged",
+            "1 MM N... 100644 100644 100644 aaa bbb apps/b/both",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc apps/b/conflict",
+            "? apps/b/untracked",
+            "",
+        ]
+        .join("\0");
+        let top = Path::new(if cfg!(windows) { r"C:\mono" } else { "/mono" });
+        let mut files = parse_status(&raw, top).files;
+        let root = top.join("apps").join("a");
+        assert_eq!(staged_outside(&files, &root), 2);
+        assert_eq!(staged_outside(&files, &top.join("apps").join("b")), 1);
+
+        scope_to(&mut files, &key(&root));
+
+        let mut shown: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        shown.sort();
+        assert_eq!(
+            shown,
+            [
+                "apps/a/edited",
+                "apps/a/staged",
+                "apps/b/both",
+                "apps/b/conflict",
+                "apps/b/staged"
+            ]
+        );
+        // Outside the folder, a file's unstaged changes stay hidden.
+        let both = files.iter().find(|f| f.rel == "apps/b/both").unwrap();
+        assert!(both.staged() && !both.changed());
+        assert_eq!(both.letter(), 'M');
+        let edited = files.iter().find(|f| f.rel == "apps/a/edited").unwrap();
+        assert!(edited.changed());
+    }
 
     #[test]
     fn subdir_is_the_root_inside_the_top() {
