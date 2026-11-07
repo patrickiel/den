@@ -694,6 +694,7 @@ fn main() {
             settings::init(cx);
             file_icon::init(cx);
             panels::init(cx);
+            frame::init(cx);
             terminal::init(cx);
             diff::init(cx);
             extensions::init(cx);

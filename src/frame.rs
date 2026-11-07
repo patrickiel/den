@@ -15,8 +15,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+    input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp},
+    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    popover::Popover,
+    scroll::ScrollableElement as _,
     tooltip::Tooltip,
+    v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
@@ -41,6 +45,23 @@ const CLOSE_ROOM: f32 = 20. + 6.;
 const TAB_GAP: f32 = 4.;
 /// The menu button at the end of the tabs, and the gap before it.
 const MENU_ROOM: f32 = 28. + 4.;
+/// The tallest the menu gets.
+const MENU_MAX_HEIGHT: f32 = 480.;
+/// What the menu leaves of a short window, to stay under its button with its
+/// footer on screen: the title bar over it and the popover's margin under it.
+const MENU_WINDOW_MARGIN: f32 = 84.;
+const MENU_ROW_HEIGHT: f32 = 26.;
+/// The last rows of the menu, kept in view under the ones that scroll.
+const MENU_FOOTER_ROWS: usize = 2;
+/// The key context of the menu.
+const MENU_CONTEXT: &str = "WorkspacesMenu";
+
+/// To be called before `keymap::init`, which keeps what is bound by then.
+pub fn init(cx: &mut App) {
+    // The popover around the menu takes a space as a click, and the filter
+    // needs it as a space.
+    cx.bind_keys([KeyBinding::new("space", NoAction, Some(MENU_CONTEXT))]);
+}
 
 pub struct Frame {
     /// The tabs, in their order, and each one's folder (kept here too: the
@@ -54,6 +75,8 @@ pub struct Frame {
     label_widths: RefCell<HashMap<String, Pixels>>,
     /// The tabs the last paint had no room for, listed in the menu.
     overflowed: Vec<usize>,
+    /// The menu at the end of the tabs.
+    tabs_menu: Entity<TabsMenu>,
     /// The window's title as last set.
     title: String,
     _subscriptions: Vec<Subscription>,
@@ -213,12 +236,15 @@ impl Frame {
                 cx.notify();
             }),
         ];
+        let frame = cx.weak_entity();
+        let tabs_menu = cx.new(|cx| TabsMenu::new(frame, window, cx));
         let mut this = Self {
             workspaces: Vec::new(),
             roots: Vec::new(),
             active: 0,
             label_widths: RefCell::default(),
             overflowed: Vec::new(),
+            tabs_menu,
             title: String::new(),
             _subscriptions,
         };
@@ -606,7 +632,6 @@ impl Frame {
         let shown = fit(widths, self.active, available);
         self.overflowed = (0..tabs.len()).filter(|ix| !shown.contains(ix)).collect();
         let overflow = self.overflowed.len();
-        let frame = cx.weak_entity();
         let menu_button = Button::new("workspaces")
             .ghost()
             .small()
@@ -620,8 +645,23 @@ impl Frame {
             .tooltip(match crate::keymap::keys_for(&crate::OpenFolder, cx) {
                 Some(keys) => format!("Workspaces ({keys} opens a folder)"),
                 None => "Workspaces".to_string(),
+            });
+        let menu = self.tabs_menu.clone();
+        let (menu_open, menu_focus) = {
+            let menu = menu.read(cx);
+            (menu.open, menu.filter.read(cx).focus_handle(cx))
+        };
+        let menu_popover = Popover::new("workspaces-menu")
+            .anchor(Anchor::TopLeft)
+            .p_0()
+            .trigger(menu_button)
+            .track_focus(&menu_focus)
+            .open(menu_open)
+            .on_open_change({
+                let menu = menu.clone();
+                move |open, window, cx| menu.update(cx, |menu, cx| menu.set_open(*open, window, cx))
             })
-            .dropdown_menu(move |menu, _, cx| tabs_menu(frame.clone(), None, menu, cx));
+            .content(move |_, _, _| menu.clone());
         let mut elements = Vec::with_capacity(shown.len());
         for &ix in &shown {
             elements.push(self.render_tab(ix, tabs[ix].clone(), cx));
@@ -632,7 +672,7 @@ impl Frame {
             // Not a place to drag the window from.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children(elements)
-            .child(menu_button)
+            .child(menu_popover)
             .into_any_element()
     }
 
@@ -937,218 +977,546 @@ fn tab_menu(
     )
 }
 
-/// The menu at the end of the tabs: the open folders the strip had no
-/// room for, the recent folders (each with its colour, and an x to forget
-/// it), and opening another.
-fn tabs_menu(
+/// A row of the menu at the end of the tabs.
+enum MenuRow {
+    Heading(&'static str),
+    Separator,
+    /// Says why a section is empty.
+    Note(&'static str),
+    /// An open folder the strip had no room for.
+    Tab {
+        id: EntityId,
+        root: PathBuf,
+        label: SharedString,
+        attention: bool,
+    },
+    Recent {
+        path: PathBuf,
+        label: SharedString,
+    },
+    /// The swatches under the recent folder being given a color.
+    Colors(PathBuf),
+    OpenFolder {
+        new_window: bool,
+    },
+}
+
+impl MenuRow {
+    fn is_folder(&self) -> bool {
+        matches!(self, MenuRow::Tab { .. } | MenuRow::Recent { .. })
+    }
+
+    /// Whether the keyboard stops on it.
+    fn selectable(&self) -> bool {
+        self.is_folder() || matches!(self, MenuRow::OpenFolder { .. })
+    }
+}
+
+/// The row of the one folder listed, if just one is.
+fn only_folder(rows: &[MenuRow]) -> Option<usize> {
+    let mut folders = (0..rows.len()).filter(|&ix| rows[ix].is_folder());
+    let first = folders.next()?;
+    folders.next().is_none().then_some(first)
+}
+
+/// The row the arrow keys go to from `from`, round at the ends; with none
+/// selected yet, the first going down and the last going up.
+fn step(selectable: &[bool], from: Option<usize>, down: bool) -> Option<usize> {
+    let len = selectable.len();
+    let from = from.unwrap_or(if down { len.saturating_sub(1) } else { 0 });
+    (1..=len)
+        .map(|n| {
+            if down {
+                (from + n) % len
+            } else {
+                (from + len - n) % len
+            }
+        })
+        .find(|&ix| selectable[ix])
+}
+
+/// The menu at the end of the tabs: a filter, which has the keyboard, over
+/// the open folders the strip had no room for and the recent folders (each
+/// with its colour, and an x to forget it), which scroll, over the rows
+/// opening another. Only the folders move: the filter and those rows stay in
+/// view, which a `PopupMenu` cannot do, as it scrolls all its items together.
+struct TabsMenu {
     frame: WeakEntity<Frame>,
+    open: bool,
+    filter: Entity<InputState>,
+    /// What the filter holds, lowercase and trimmed.
+    query: String,
+    /// As they were when the menu opened or the filter last changed, the
+    /// footer's last.
+    rows: Vec<MenuRow>,
+    selected: Option<usize>,
+    /// The recent folder whose swatches are showing.
     color_for: Option<PathBuf>,
-    menu: PopupMenu,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let Some(strong) = frame.upgrade() else {
-        return menu;
-    };
-    let (open, overflowed) = {
-        let frame = strong.read(cx);
-        let open: Vec<(EntityId, PathBuf, bool)> = frame
-            .workspaces
-            .iter()
-            .zip(&frame.roots)
-            .map(|(workspace, root)| {
-                (
-                    workspace.entity_id(),
-                    root.clone(),
-                    workspace.read(cx).has_attention(),
-                )
-            })
-            .collect();
-        (open, frame.overflowed.clone())
-    };
-    let roots: Vec<PathBuf> = open.iter().map(|(_, root, _)| root.clone()).collect();
-    let (labels, recent) = names(&roots, cx);
-    let dark = cx.theme().is_dark();
-    let own = cx.weak_entity();
-    let mut menu = menu.max_h(px(480.)).scrollable(true);
-    if !overflowed.is_empty() {
-        menu = menu.label("OPEN");
-        for ix in overflowed {
-            let (id, root, attention) = open[ix].clone();
-            let label = SharedString::from(labels[ix].clone());
-            let color = AppState::get(cx)
-                .workspace_color(&root)
-                .map(|color| color.foreground(dark));
-            let frame = frame.clone();
-            let item = PopupMenuItem::element(move |_, cx| {
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .when_some(color, |this, color| this.text_color(color))
-                            .child(label.clone()),
+    scroll: ScrollHandle,
+    _filter_changes: Subscription,
+}
+
+impl TabsMenu {
+    fn new(frame: WeakEntity<Frame>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter folders…"));
+        let _filter_changes = cx.subscribe_in(
+            &filter,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.filter_changed(window, cx);
+                }
+            },
+        );
+        Self {
+            frame,
+            open: false,
+            filter,
+            query: String::new(),
+            rows: Vec::new(),
+            selected: None,
+            color_for: None,
+            scroll: ScrollHandle::new(),
+            _filter_changes,
+        }
+    }
+
+    fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = open;
+        if open {
+            self.color_for = None;
+            self.query.clear();
+            self.filter
+                .update(cx, |filter, cx| filter.set_value("", window, cx));
+            self.scroll.set_offset(point(px(0.), px(0.)));
+            self.rebuild(cx);
+        }
+        cx.notify();
+    }
+
+    /// List what now matches. Typing down to one folder opens it; deleting
+    /// down to one does not, as that is on the way to typing something else.
+    fn filter_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.filter.read(cx).value().trim().to_lowercase();
+        let narrowed = query.len() > self.query.len();
+        self.query = query;
+        self.color_for = None;
+        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.rebuild(cx);
+        cx.notify();
+        if narrowed && let Some(ix) = only_folder(&self.rows) {
+            self.activate(ix, window, cx);
+        }
+    }
+
+    /// Close it. The popover follows the next time the tabs are drawn, which
+    /// is from the workspace in front, not from this view.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_open(false, window, cx);
+        window.refresh();
+    }
+
+    fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.rows.clear();
+        let Some(frame) = self.frame.upgrade() else {
+            return;
+        };
+        let (open, overflowed) = {
+            let frame = frame.read(cx);
+            let open: Vec<(EntityId, PathBuf, bool)> = frame
+                .workspaces
+                .iter()
+                .zip(&frame.roots)
+                .map(|(workspace, root)| {
+                    (
+                        workspace.entity_id(),
+                        root.clone(),
+                        workspace.read(cx).has_attention(),
                     )
-                    .when(attention, |this| {
-                        this.child(
-                            div()
-                                .flex_none()
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(cx.theme().warning),
-                        )
-                    })
-            });
-            menu = menu.item(item.icon(Icon::new(IconName::AppWindow)).on_click(
-                move |_, window, cx| {
-                    _ = frame.update(cx, |frame, cx| frame.activate_entity(id, window, cx));
-                },
-            ));
-        }
-        menu = menu.separator();
-    }
-    menu = menu.label("RECENT FOLDERS");
-    if recent.is_empty() {
-        menu = menu.item(PopupMenuItem::new("No other folders yet").disabled(true));
-    }
-    for (ix, (path, label)) in recent.into_iter().enumerate() {
-        let (label, full) = (
-            SharedString::from(label),
-            SharedString::from(path.display().to_string()),
-        );
-        let picking_color = color_for.as_ref() == Some(&path);
-        let rebuild = (frame.clone(), own.clone(), path.clone());
-        let item = PopupMenuItem::element(move |_, cx| {
-            let full = full.clone();
-            let (frame, own, path) = rebuild.clone();
-            let color = AppState::get(cx)
-                .workspace_color(&path)
-                .map(|color| color.foreground(cx.theme().is_dark()));
-            let (color_frame, color_own, color_path) = (frame.clone(), own.clone(), path.clone());
-            h_flex()
-                .id(("recent", ix))
-                .group(SharedString::from(format!("recent-{ix}")))
-                .w_full()
-                .gap_2()
-                .child(
-                    div()
-                        .id(("recent-name", ix))
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .when_some(color, |this, color| this.text_color(color))
-                        .child(label.clone())
-                        .tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx)),
-                )
-                .child(
-                    h_flex()
-                        .id(("color-recent", ix))
-                        .flex_none()
-                        .size(px(16.))
-                        .justify_center()
-                        .when(!picking_color, |this| {
-                            this.invisible()
-                                .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
-                                    this.visible()
-                                })
-                        })
-                        .rounded(px(3.))
-                        .cursor_pointer()
-                        .text_color(color.unwrap_or(cx.theme().muted_foreground))
-                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                        .child(Icon::new(IconName::Palette).xsmall())
-                        .tooltip(|window, cx| Tooltip::new("Workspace color").build(window, cx))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            let color_for = (!picking_color).then(|| color_path.clone());
-                            let frame = color_frame.clone();
-                            _ = color_own.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    tabs_menu(frame, color_for, menu, cx)
-                                })
-                            });
-                        }),
-                )
-                // The x takes the folder off the list (its saved session stays).
-                .child(
-                    div()
-                        .id(("forget-recent", ix))
-                        .flex_none()
-                        .invisible()
-                        .group_hover(SharedString::from(format!("recent-{ix}")), |this| {
-                            this.visible()
-                        })
-                        .rounded(px(3.))
-                        .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
-                        .child(Icon::new(IconName::X).xsmall())
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            AppState::update(cx, |state| {
-                                let key = crate::repo::key(&path);
-                                state.recent.retain(|p| crate::repo::key(p) != key);
-                            });
-                            workspace::sync_jump_list(cx);
-                            let frame = frame.clone();
-                            _ = own.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    tabs_menu(frame, None, menu, cx)
-                                })
-                            });
-                            window.refresh();
-                        }),
-                )
-        });
-        let open_path = path.clone();
-        // Opens the folder as a tab here.
-        menu = menu.item(
-            item.icon(Icon::new(IconName::Folder))
-                .on_click(move |_, _, cx| crate::open_workspace(open_path.clone(), cx)),
-        );
-        if picking_color {
-            let (frame, own) = (frame.clone(), own.clone());
-            menu = menu.item(PopupMenuItem::element(move |_, cx| {
-                color_picker(path.clone(), frame.clone(), own.clone(), cx)
-            }));
-        }
-    }
-    let prompt = |new_window: bool| {
-        let frame = frame.clone();
-        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let workspace = frame
-                .upgrade()
-                .and_then(|frame| frame.read(cx).active_workspace());
-            if let Some(workspace) = workspace {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.prompt_open_folder(new_window, window, cx)
+                })
+                .collect();
+            (open, frame.overflowed.clone())
+        };
+        let roots: Vec<PathBuf> = open.iter().map(|(_, root, _)| root.clone()).collect();
+        let (labels, recent) = names(&roots, cx);
+        let filtering = !self.query.is_empty();
+        let matches = |label: &str| label.to_lowercase().contains(&self.query);
+        // Filtering looks through every open folder, those on the strip too.
+        let tabs: Vec<usize> = if filtering {
+            (0..open.len()).filter(|&ix| matches(&labels[ix])).collect()
+        } else {
+            overflowed
+        };
+        let recent: Vec<(PathBuf, String)> = recent
+            .into_iter()
+            .filter(|(_, label)| matches(label))
+            .collect();
+        let mut rows = Vec::new();
+        if !tabs.is_empty() {
+            rows.push(MenuRow::Heading("OPEN"));
+            for ix in tabs.iter().copied() {
+                let (id, root, attention) = open[ix].clone();
+                rows.push(MenuRow::Tab {
+                    id,
+                    root,
+                    label: labels[ix].clone().into(),
+                    attention,
                 });
             }
+            if !filtering || !recent.is_empty() {
+                rows.push(MenuRow::Separator);
+            }
         }
-    };
-    menu.separator()
-        .item(
-            PopupMenuItem::new("Open Folder…")
-                .icon(Icon::new(IconName::FolderOpen))
-                .on_click(prompt(false)),
-        )
-        .item(
-            PopupMenuItem::new("Open Folder in New Window…")
-                .icon(Icon::new(IconName::AppWindow))
-                .on_click(prompt(true)),
-        )
+        if !filtering || !recent.is_empty() {
+            rows.push(MenuRow::Heading("RECENT FOLDERS"));
+        }
+        if !filtering && recent.is_empty() {
+            rows.push(MenuRow::Note("No other folders yet"));
+        }
+        if filtering && tabs.is_empty() && recent.is_empty() {
+            rows.push(MenuRow::Note("No matching folders"));
+        }
+        for (path, label) in recent {
+            let picking_color = self.color_for.as_ref() == Some(&path);
+            rows.push(MenuRow::Recent {
+                path: path.clone(),
+                label: label.into(),
+            });
+            if picking_color {
+                rows.push(MenuRow::Colors(path));
+            }
+        }
+        rows.push(MenuRow::OpenFolder { new_window: false });
+        rows.push(MenuRow::OpenFolder { new_window: true });
+        self.rows = rows;
+    }
+
+    /// Show the swatches of this recent folder, or of none.
+    fn pick_color(&mut self, color_for: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.color_for = color_for;
+        self.rebuild(cx);
+        cx.notify();
+    }
+
+    fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.selected = Some(ix);
+        // The footer is always in view, and not in the scrolling list. The
+        // first folder brings the heading over it along.
+        if self.rows.iter().position(MenuRow::selectable) == Some(ix) {
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        } else if ix + MENU_FOOTER_ROWS < self.rows.len() {
+            self.scroll.scroll_to_item(ix);
+        }
+        cx.notify();
+    }
+
+    /// Do what row `ix` is for, closing the menu.
+    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.rows.get(ix) {
+            Some(MenuRow::Tab { id, .. }) => {
+                let id = *id;
+                _ = self
+                    .frame
+                    .update(cx, |frame, cx| frame.activate_entity(id, window, cx));
+            }
+            Some(MenuRow::Recent { path, .. }) => crate::open_workspace(path.clone(), cx),
+            Some(MenuRow::OpenFolder { new_window }) => {
+                let new_window = *new_window;
+                let workspace = self
+                    .frame
+                    .upgrade()
+                    .and_then(|frame| frame.read(cx).active_workspace());
+                if let Some(workspace) = workspace {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.prompt_open_folder(new_window, window, cx)
+                    });
+                }
+            }
+            _ => return,
+        }
+        self.close(window, cx);
+    }
+
+    /// An arrow key, while the filter keeps the keyboard for more typing.
+    fn arrow(&mut self, down: bool, cx: &mut Context<Self>) {
+        let selectable: Vec<bool> = self.rows.iter().map(MenuRow::selectable).collect();
+        if let Some(ix) = step(&selectable, self.selected, down) {
+            self.select(ix, cx);
+        }
+        cx.stop_propagation();
+    }
+
+    /// A row that lights up under the mouse or the keyboard and acts when
+    /// clicked; `MenuRow`'s kinds fill it in.
+    fn clickable_row(&self, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = cx.theme();
+        let (accent, on_accent) = (theme.tokens.accent, theme.accent_foreground);
+        h_flex()
+            .id(("menu-row", ix))
+            .group(row_group(ix))
+            .flex_none()
+            .w_full()
+            .min_h(px(MENU_ROW_HEIGHT))
+            .px_2()
+            .gap_x_1()
+            .rounded(theme.radius.min(px(8.)))
+            .text_sm()
+            .text_color(theme.foreground)
+            .hover(move |this| this.bg(accent).text_color(on_accent))
+            .when(self.selected == Some(ix), |this| {
+                this.bg(accent).text_color(on_accent)
+            })
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                if *hovered {
+                    this.selected = Some(ix);
+                } else if this.selected == Some(ix) {
+                    this.selected = None;
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| this.activate(ix, window, cx)))
+    }
+
+    fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let (muted, border, dark) = {
+            let theme = cx.theme();
+            (theme.muted_foreground, theme.border, theme.is_dark())
+        };
+        // Lines up with the rows that have an icon.
+        let text_row = |text: &'static str| {
+            h_flex()
+                .flex_none()
+                .px_2()
+                .gap_x_1()
+                .text_sm()
+                .text_color(muted)
+                .child(Icon::empty().xsmall())
+                .child(text)
+        };
+        let color_of = |path: &PathBuf, cx: &App| {
+            AppState::get(cx)
+                .workspace_color(path)
+                .map(|color| color.foreground(dark))
+        };
+        match &self.rows[ix] {
+            MenuRow::Heading(text) => text_row(text).into_any_element(),
+            MenuRow::Note(text) => text_row(text).min_h(px(MENU_ROW_HEIGHT)).into_any_element(),
+            MenuRow::Separator => div()
+                .flex_none()
+                .my_0p5()
+                .mx_neg_1()
+                .border_b(px(2.))
+                .border_color(border)
+                .into_any_element(),
+            MenuRow::Tab {
+                root,
+                label,
+                attention,
+                ..
+            } => {
+                let color = color_of(root, cx);
+                let warning = cx.theme().warning;
+                self.clickable_row(ix, cx)
+                    .child(Icon::new(IconName::AppWindow).xsmall())
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when_some(color, |this, color| this.text_color(color))
+                                    .child(label.clone()),
+                            )
+                            .when(*attention, |this| {
+                                this.child(
+                                    div().flex_none().size(px(7.)).rounded_full().bg(warning),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            }
+            MenuRow::Recent { path, label } => {
+                let color = color_of(path, cx);
+                let full = SharedString::from(path.display().to_string());
+                let picking_color = self.color_for.as_ref() == Some(path);
+                let (color_path, forget_path) = (path.clone(), path.clone());
+                let color_icon = color.unwrap_or(muted);
+                self.clickable_row(ix, cx)
+                    .child(Icon::new(IconName::Folder).xsmall())
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id(("recent-name", ix))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when_some(color, |this, color| this.text_color(color))
+                                    .child(label.clone())
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(full.clone()).build(window, cx)
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .id(("color-recent", ix))
+                                    .flex_none()
+                                    .size(px(16.))
+                                    .justify_center()
+                                    .when(!picking_color, |this| {
+                                        this.invisible()
+                                            .group_hover(row_group(ix), |this| this.visible())
+                                    })
+                                    .rounded(px(3.))
+                                    .cursor_pointer()
+                                    .text_color(color_icon)
+                                    .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                                    .child(Icon::new(IconName::Palette).xsmall())
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Workspace color").build(window, cx)
+                                    })
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        let color_for =
+                                            (!picking_color).then(|| color_path.clone());
+                                        this.pick_color(color_for, cx);
+                                    })),
+                            )
+                            // The x takes the folder off the list (its saved
+                            // session stays).
+                            .child(
+                                div()
+                                    .id(("forget-recent", ix))
+                                    .flex_none()
+                                    .invisible()
+                                    .group_hover(row_group(ix), |this| this.visible())
+                                    .rounded(px(3.))
+                                    .hover(|this| this.bg(gpui_kit::hsla(0., 0., 0.5, 0.25)))
+                                    .child(Icon::new(IconName::X).xsmall())
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        AppState::update(cx, |state| {
+                                            let key = crate::repo::key(&forget_path);
+                                            state.recent.retain(|p| crate::repo::key(p) != key);
+                                        });
+                                        workspace::sync_jump_list(cx);
+                                        this.pick_color(None, cx);
+                                        window.refresh();
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            MenuRow::Colors(path) => h_flex()
+                .flex_none()
+                .px_2()
+                .gap_x_1()
+                .child(Icon::empty().xsmall())
+                .child(color_picker(path.clone(), cx.weak_entity(), cx))
+                .into_any_element(),
+            MenuRow::OpenFolder { new_window } => {
+                let (icon, label) = if *new_window {
+                    (IconName::AppWindow, "Open Folder in New Window…")
+                } else {
+                    (IconName::FolderOpen, "Open Folder…")
+                };
+                self.clickable_row(ix, cx)
+                    .child(Icon::new(icon).xsmall())
+                    .child(label)
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+/// The hover group of row `ix`, which shows its buttons.
+fn row_group(ix: usize) -> SharedString {
+    format!("menu-row-{ix}").into()
+}
+
+impl Render for TabsMenu {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut rows: Vec<AnyElement> = (0..self.rows.len())
+            .map(|ix| self.render_row(ix, cx))
+            .collect();
+        let footer = rows.split_off(rows.len().saturating_sub(MENU_FOOTER_ROWS));
+        // A short window takes from the list, never the footer.
+        let room = window.viewport_size().height - px(MENU_WINDOW_MARGIN);
+        v_flex()
+            .id("workspaces-menu")
+            .key_context(MENU_CONTEXT)
+            // Captured: these are the filter's own keys otherwise.
+            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.arrow(true, cx)))
+            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.arrow(false, cx)))
+            .capture_action(cx.listener(|this, _: &Enter, window, cx| {
+                cx.stop_propagation();
+                if let Some(ix) = this.selected {
+                    this.activate(ix, window, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                cx.stop_propagation();
+                this.close(window, cx);
+            }))
+            // A click anywhere in it leaves the keyboard with the filter.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .min_w(rems(8.))
+            .max_w(px(500.))
+            .max_h(px(MENU_MAX_HEIGHT).min(room))
+            .child(
+                div()
+                    .flex_none()
+                    .p_1()
+                    .border_b(px(2.))
+                    .border_color(cx.theme().border)
+                    .child(Input::new(&self.filter).small().appearance(false)),
+            )
+            .child(
+                v_flex()
+                    .relative()
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("workspaces-menu-rows")
+                            .min_h_0()
+                            .p_1()
+                            .gap_y_0p5()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .children(rows),
+                    )
+                    .vertical_scrollbar(&self.scroll),
+            )
+            .child(
+                v_flex()
+                    .flex_none()
+                    .p_1()
+                    .gap_y_0p5()
+                    .border_t(px(2.))
+                    .border_color(cx.theme().border)
+                    .children(footer),
+            )
+    }
 }
 
 /// A single row of distinct swatches under the folder being edited. Keeping
 /// it inside the menu also keeps choosing a color from opening the folder.
-fn color_picker(
-    path: PathBuf,
-    frame: WeakEntity<Frame>,
-    menu: WeakEntity<PopupMenu>,
-    cx: &App,
-) -> AnyElement {
+fn color_picker(path: PathBuf, menu: WeakEntity<TabsMenu>, cx: &App) -> AnyElement {
     let selected = AppState::get(cx).workspace_color(&path);
     let theme = cx.theme();
     let (dark, foreground, hover) = (theme.is_dark(), theme.foreground, theme.accent);
@@ -1164,7 +1532,7 @@ fn color_picker(
                 .chain(WorkspaceColor::ALL.map(Some))
                 .enumerate()
                 .map(move |(ix, color)| {
-                    let (path, frame, menu) = (path.clone(), frame.clone(), menu.clone());
+                    let (path, menu) = (path.clone(), menu.clone());
                     div()
                         .id(("workspace-color", ix))
                         .flex_none()
@@ -1195,12 +1563,7 @@ fn color_picker(
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             AppState::update(cx, |state| state.session_mut(&path).color = color);
-                            let frame = frame.clone();
-                            _ = menu.update(cx, |menu, cx| {
-                                menu.rebuild(window, cx, |menu, _, cx| {
-                                    tabs_menu(frame, None, menu, cx)
-                                })
-                            });
+                            _ = menu.update(cx, |menu, cx| menu.pick_color(None, cx));
                             window.refresh();
                         })
                 }),
@@ -1313,4 +1676,56 @@ pub fn target_window(cx: &mut App) -> Option<AnyWindowHandle> {
         }
     }
     Frames::front(cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{MenuRow, only_folder, step};
+
+    /// A heading, two rows, a heading, a row: the shape of the menu.
+    const ROWS: [bool; 5] = [false, true, true, false, true];
+
+    #[test]
+    fn arrows_start_from_the_ends_of_the_menu() {
+        assert_eq!(step(&ROWS, None, true), Some(1));
+        assert_eq!(step(&ROWS, None, false), Some(4));
+    }
+
+    #[test]
+    fn arrows_skip_rows_that_cannot_be_picked() {
+        assert_eq!(step(&ROWS, Some(2), true), Some(4));
+        assert_eq!(step(&ROWS, Some(4), false), Some(2));
+    }
+
+    #[test]
+    fn arrows_go_round_at_the_ends() {
+        assert_eq!(step(&ROWS, Some(4), true), Some(1));
+        assert_eq!(step(&ROWS, Some(1), false), Some(4));
+    }
+
+    fn recent(name: &str) -> MenuRow {
+        MenuRow::Recent {
+            path: PathBuf::from(name),
+            label: name.to_string().into(),
+        }
+    }
+
+    #[test]
+    fn only_a_single_folder_is_the_only_folder() {
+        let footer = || MenuRow::OpenFolder { new_window: false };
+        let one = [MenuRow::Heading("RECENT FOLDERS"), recent("den"), footer()];
+        assert_eq!(only_folder(&one), Some(1));
+        let two = [recent("den"), recent("finta"), footer()];
+        assert_eq!(only_folder(&two), None);
+        let none = [MenuRow::Note("No matching folders"), footer()];
+        assert_eq!(only_folder(&none), None);
+    }
+
+    #[test]
+    fn arrows_find_nothing_in_an_empty_menu() {
+        assert_eq!(step(&[], None, true), None);
+        assert_eq!(step(&[false], None, false), None);
+    }
 }
