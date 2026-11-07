@@ -744,10 +744,13 @@ impl ExtensionView {
             let row_id = row.id.clone();
             let open_id = row.id.clone();
             let menu = (!row.menu.is_empty()).then(|| row.menu.clone());
+            let details_open = placed.is_some_and(|p| p.row == row_ix);
             line = line.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.focus_handle.focus(window, cx);
                 if event.click_count() >= 2 {
                     this.send(actions::OPEN, Some(&open_id), None, None, cx);
+                } else if details_open {
+                    this.select(None, cx);
                 } else {
                     this.select(Some(row_id.clone()), cx);
                 }
