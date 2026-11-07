@@ -94,12 +94,19 @@ pub struct Repo {
     push_next: bool,
     /// A pull or push runs, which may rebase with the uncommitted changes
     /// set aside: nothing else may touch the repository until it is done.
-    syncing: bool,
+    pub syncing: Option<SyncKind>,
     /// A refresh runs; `again` is the one asked for meanwhile, run after it.
     refreshing: bool,
     again: Option<Refresh>,
     _refresh: Option<Task<()>>,
     _operation: Option<Task<()>>,
+}
+
+/// Which way a running sync goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SyncKind {
+    Pull,
+    Push,
 }
 
 /// The status as the Explorer asks for it row by row, by [`key`].
@@ -142,7 +149,7 @@ impl Repo {
             index: Index::default(),
             commit_count: 50,
             push_next: false,
-            syncing: false,
+            syncing: None,
             refreshing: false,
             again: None,
             _refresh: None,
@@ -365,7 +372,7 @@ impl Repo {
         op: impl FnOnce(&Path) -> Result<(), Error> + Send + 'static,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        if self.syncing {
+        if self.syncing.is_some() {
             return Err("Wait for the pull or push to finish first.");
         }
         self.start(label, move |top| op(top).map(|()| None), cx);
@@ -377,6 +384,7 @@ impl Repo {
     /// notice for the user.
     fn sync(
         &mut self,
+        kind: SyncKind,
         label: &'static str,
         op: impl FnOnce(&Path) -> Result<Option<String>, Error> + Send + 'static,
         cx: &mut Context<Self>,
@@ -384,7 +392,7 @@ impl Repo {
         if self.busy.is_some() {
             return Err("Wait for the running operation to finish first.");
         }
-        self.syncing = self.top().is_some();
+        self.syncing = self.top().map(|_| kind);
         self.start(label, op, cx);
         Ok(())
     }
@@ -409,7 +417,7 @@ impl Repo {
                 .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
-                this.syncing = false;
+                this.syncing = None;
                 match result {
                     Err(err) => {
                         this.error = Some(err.to_string());
@@ -483,14 +491,19 @@ impl Repo {
     }
 
     pub fn pull(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
-        self.sync("Pulling…", git::pull, cx)
+        self.sync(SyncKind::Pull, "Pulling…", git::pull, cx)
     }
 
     pub fn push(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
         let Some(branch) = self.status().map(|s| s.branch.clone()) else {
             return Ok(());
         };
-        self.sync("Pushing…", move |top| git::push(top, &branch), cx)
+        self.sync(
+            SyncKind::Push,
+            "Pushing…",
+            move |top| git::push(top, &branch),
+            cx,
+        )
     }
 
     pub fn switch(

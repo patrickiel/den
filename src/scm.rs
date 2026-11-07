@@ -11,7 +11,7 @@ use std::{
 use den_extension::view::Graph;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     avatar::Avatar,
     badge::Badge,
     button::{Button, ButtonVariants as _},
@@ -20,6 +20,7 @@ use gpui_kit::component::{
     input::{Input, InputState, Textarea, TextareaState},
     menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
     scroll::{ScrollableElement as _, Scrollbar},
+    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -30,7 +31,7 @@ use crate::{
         git::{self, FileStatus, RefKind},
     },
     git_graph,
-    repo::{Repo, RepoState},
+    repo::{Repo, RepoState, SyncKind},
     ui::menu_action,
 };
 
@@ -736,6 +737,7 @@ impl ScmView {
         let branch = repo.status().map(|s| s.branch.clone()).unwrap_or_default();
         let top = repo.top().map(|p| p.to_path_buf());
         let busy = repo.busy;
+        let syncing = repo.syncing;
         let subdir = repo.subdir();
         let scoped = repo.scoped();
         let handle = self.repo.clone();
@@ -806,7 +808,34 @@ impl ScmView {
             "Publish Branch"
         };
         // What there is to pull or push, on those buttons; hidden at zero.
-        let count = |n: u32| Badge::new().count(n as usize).xsmall().color(theme.blue);
+        // While that runs, a spinner takes the number's place in the circle.
+        let counted = |n: u32, kind: SyncKind, button: Button| {
+            let button = button.disabled(syncing.is_some());
+            if n > 0 && syncing == Some(kind) {
+                div()
+                    .relative()
+                    .child(button)
+                    .child(
+                        h_flex()
+                            .absolute()
+                            .top(px(-4.))
+                            .right(px(-4.))
+                            .size_3p5()
+                            .justify_center()
+                            .rounded(theme.radius_full())
+                            .bg(theme.blue)
+                            .child(Spinner::new().with_size(px(10.)).color(white())),
+                    )
+                    .into_any_element()
+            } else {
+                Badge::new()
+                    .count(n as usize)
+                    .xsmall()
+                    .color(theme.blue)
+                    .child(button)
+                    .into_any_element()
+            }
+        };
 
         v_flex()
             .child(
@@ -832,20 +861,22 @@ impl ScmView {
                                 |r, cx| r.fetch(cx),
                                 cx,
                             ))
-                            .child(count(branch.behind).child(action(
-                                "pull",
-                                IconName::ArrowDown,
-                                "Pull",
-                                |r, cx| r.pull(cx),
-                                cx,
-                            )))
-                            .child(count(branch.ahead).child(action(
-                                "push",
-                                IconName::ArrowUp,
-                                push_tooltip,
-                                |r, cx| r.push(cx),
-                                cx,
-                            )))
+                            .child(counted(
+                                branch.behind,
+                                SyncKind::Pull,
+                                action("pull", IconName::ArrowDown, "Pull", |r, cx| r.pull(cx), cx),
+                            ))
+                            .child(counted(
+                                branch.ahead,
+                                SyncKind::Push,
+                                action(
+                                    "push",
+                                    IconName::ArrowUp,
+                                    push_tooltip,
+                                    |r, cx| r.push(cx),
+                                    cx,
+                                ),
+                            ))
                             .child(action(
                                 "refresh",
                                 IconName::RotateCw,
