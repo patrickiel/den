@@ -1616,13 +1616,14 @@ impl ScmView {
             .collect()
     }
 
-    /// A commit's row: its graph, subject, branch and tag badges, author and
-    /// age, with a hover card and a menu.
+    /// A commit's row: its graph, subject, author (when there are several)
+    /// and branch and tag badges, with a hover card and a menu.
     fn render_commit(
         &self,
         ix: usize,
         commit: &git::Commit,
         graph_w: Pixels,
+        show_author: bool,
         now: i64,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1661,15 +1662,17 @@ impl ScmView {
                     .min_w_0()
                     .gap_2()
                     .child(div().min_w_0().truncate().child(commit.subject.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(90.))
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(commit.author.clone()),
-                    ),
+                    .when(show_author, |this| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(90.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(commit.author.clone()),
+                        )
+                    }),
             )
             .children(commit.refs.iter().map(|r| ref_badge(r, lane_color)))
             .when(commit.detached_head, |this| {
@@ -1821,6 +1824,8 @@ impl ScmView {
         let commits = &repo.commits;
         let uncommitted = repo.uncommitted.zip(repo.graph.first().cloned());
         let more = !commits.is_empty() && commits.len().is_multiple_of(50);
+        // One name on every row says nothing.
+        let show_author = commits.windows(2).any(|c| c[0].author != c[1].author);
         v_flex()
             .when_some(uncommitted, |this, (count, graph)| {
                 this.child(
@@ -1851,10 +1856,9 @@ impl ScmView {
                 )
             })
             .children(
-                commits
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, commit)| self.render_commit(ix, commit, graph_w, now, cx)),
+                commits.iter().enumerate().map(|(ix, commit)| {
+                    self.render_commit(ix, commit, graph_w, show_author, now, cx)
+                }),
             )
             .when(more, |this| {
                 this.child(
