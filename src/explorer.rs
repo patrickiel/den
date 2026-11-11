@@ -2,6 +2,9 @@
 //!
 //! Folders are read when first expanded and cached until Refresh. Which
 //! folders are expanded is remembered per session by the workspace.
+//!
+//! A folder on a server is listed off the UI thread: its rows come when the
+//! server has answered, and what was listed before stays until then.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,7 +23,12 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
-use crate::{repo::Repo, scm::letter_color, ui::menu_action};
+use crate::{
+    backend::{fs, remote},
+    repo::Repo,
+    scm::letter_color,
+    ui::menu_action,
+};
 
 pub enum ExplorerEvent {
     /// `preview` is a single click: open it, keep focus in the tree.
@@ -50,6 +58,14 @@ pub struct Explorer {
     repo: Entity<Repo>,
     expanded: HashSet<PathBuf>,
     children: HashMap<PathBuf, Vec<Entry>>,
+    /// The root is on a server: its folders are listed off the UI thread.
+    remote: bool,
+    /// Folders the rows need and no listing is there for yet.
+    wanted: Vec<PathBuf>,
+    /// Folders being listed on the server, and those to list once more when
+    /// that is done (they changed meanwhile).
+    loading: HashSet<PathBuf>,
+    again: HashSet<PathBuf>,
     rows: Vec<Row>,
     selected: Option<usize>,
     focus_handle: FocusHandle,
@@ -68,8 +84,13 @@ impl Focusable for Explorer {
 }
 
 /// A folder's entries as the Explorer lists them: folders first, then by
-/// name regardless of case, `.git` left out.
+/// name regardless of case, `.git` left out. For a folder on this machine;
+/// one on a server has none here (`list` asks the server, off the UI
+/// thread).
 pub(crate) fn read_dir(dir: &Path) -> Vec<Entry> {
+    if remote::split(dir).is_some() {
+        return Vec::new();
+    }
     let mut entries: Vec<Entry> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -87,12 +108,41 @@ pub(crate) fn read_dir(dir: &Path) -> Vec<Entry> {
             })
         })
         .collect();
+    sort(&mut entries);
+    entries
+}
+
+fn sort(entries: &mut [Entry]) {
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    entries
+}
+
+/// A folder's entries as `read_dir` gives them, wherever the folder is. It
+/// waits for the disk or the server: not for the UI thread.
+pub(crate) fn list(dir: &Path) -> std::io::Result<Vec<Entry>> {
+    let mut entries: Vec<Entry> = fs::read_dir(dir)?
+        .into_iter()
+        .filter(|entry| entry.name != ".git")
+        .map(|entry| Entry {
+            path: child(dir, &entry.name),
+            name: entry.name.into(),
+            is_dir: entry.is_dir,
+        })
+        .collect();
+    sort(&mut entries);
+    Ok(entries)
+}
+
+/// `name` in `dir`, as the machine `dir` is on reads the name.
+fn child(dir: &Path, name: &str) -> PathBuf {
+    if remote::split(dir).is_some() {
+        remote::resolve(dir, name)
+    } else {
+        dir.join(name)
+    }
 }
 
 impl Explorer {
@@ -104,18 +154,22 @@ impl Explorer {
     ) -> Self {
         let _subscriptions = vec![cx.observe(&repo, |_, _, cx| cx.notify())];
         let mut this = Self {
+            remote: remote::split(&root).is_some(),
             root,
             repo,
             _subscriptions,
             expanded: expanded.into_iter().collect(),
             children: HashMap::new(),
+            wanted: Vec::new(),
+            loading: HashSet::new(),
+            again: HashSet::new(),
             rows: Vec::new(),
             selected: None,
             focus_handle: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             error: None,
         };
-        this.rebuild();
+        this.rebuild(cx);
         this
     }
 
@@ -129,13 +183,83 @@ impl Explorer {
         if let Some(entries) = self.children.get(dir) {
             return entries.clone();
         }
+        if self.remote {
+            self.wanted.push(dir.to_path_buf());
+            return Vec::new();
+        }
         let entries = read_dir(dir);
         self.children.insert(dir.to_path_buf(), entries.clone());
         entries
     }
 
-    /// Flatten the expanded part of the tree into the rows the list draws.
-    fn rebuild(&mut self) {
+    /// Flatten the expanded part of the tree into the rows the list draws,
+    /// and ask the server for the folders they still need.
+    fn rebuild(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_rows();
+        for dir in std::mem::take(&mut self.wanted) {
+            self.load(dir, cx);
+        }
+    }
+
+    /// List `dir` on the server; its rows follow when the answer is here.
+    fn load(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if !self.loading.insert(dir.clone()) {
+            self.again.insert(dir);
+            return;
+        }
+        let task = crate::remote::spawn(&dir, cx, {
+            let dir = dir.clone();
+            move || list(&dir)
+        });
+        cx.spawn(async move |this, cx| {
+            let listed = task.await;
+            _ = this.update(cx, |this, cx| this.loaded(dir, listed, cx));
+        })
+        .detach();
+    }
+
+    fn loaded(
+        &mut self,
+        dir: PathBuf,
+        listed: std::io::Result<Vec<Entry>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.loading.remove(&dir);
+        match listed {
+            Ok(entries) => {
+                // Folders that are gone from it are expanded no longer.
+                self.expanded.retain(|path| {
+                    path.parent() != Some(dir.as_path())
+                        || entries
+                            .iter()
+                            .any(|entry| entry.is_dir && entry.path == *path)
+                });
+                if dir == self.root {
+                    self.error = None;
+                }
+                self.children.insert(dir.clone(), entries);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && dir != self.root => {
+                self.expanded.remove(&dir);
+                self.children.remove(&dir);
+            }
+            // Out of reach, or not to be read: what was listed stays, and
+            // which folders are open is kept for when it is back.
+            Err(e) => {
+                if dir == self.root {
+                    self.error = Some(e.to_string().into());
+                }
+                self.children.entry(dir.clone()).or_default();
+            }
+        }
+        if self.again.remove(&dir) {
+            self.load(dir, cx);
+        }
+        self.rebuild(cx);
+        cx.notify();
+    }
+
+    fn rebuild_rows(&mut self) {
         let selected = self.selected_path();
         let mut rows = Vec::new();
         let mut stack: Vec<(Entry, usize)> = self
@@ -167,7 +291,7 @@ impl Explorer {
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_path_buf());
         }
-        self.rebuild();
+        self.rebuild(cx);
         cx.emit(ExplorerEvent::ExpandedChanged);
         cx.notify();
     }
@@ -187,15 +311,37 @@ impl Explorer {
         cx.notify();
     }
 
-    fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.remote {
+            // What is listed stays until the server's answer replaces it.
+            let (root, expanded) = (&self.root, &self.expanded);
+            self.children
+                .retain(|dir, _| dir == root || expanded.contains(dir));
+            let dirs: Vec<PathBuf> = self.children.keys().cloned().collect();
+            for dir in dirs {
+                self.load(dir, cx);
+            }
+            self.rebuild(cx);
+            return cx.notify();
+        }
         self.children.clear();
         self.expanded.retain(|path| path.is_dir());
-        self.rebuild();
+        self.rebuild(cx);
         cx.notify();
     }
 
     /// Files and folders changed on disk: read their folders again.
     pub fn paths_changed(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if self.remote {
+            for path in paths {
+                for dir in [Some(path.as_path()), path.parent()].into_iter().flatten() {
+                    if self.children.contains_key(dir) {
+                        self.load(dir.to_path_buf(), cx);
+                    }
+                }
+            }
+            return;
+        }
         let mut stale = false;
         for path in paths {
             for dir in [Some(path.as_path()), path.parent()].into_iter().flatten() {
@@ -204,7 +350,7 @@ impl Explorer {
         }
         if stale {
             self.expanded.retain(|path| path.is_dir());
-            self.rebuild();
+            self.rebuild(cx);
             cx.notify();
         }
     }
@@ -218,7 +364,7 @@ impl Explorer {
         for dir in path.ancestors().skip(1).take_while(|dir| *dir != self.root) {
             self.expanded.insert(dir.to_path_buf());
         }
-        self.rebuild();
+        self.rebuild(cx);
         if let Some(ix) = self.rows.iter().position(|row| row.entry.path == path) {
             self.select(ix, cx);
         }
@@ -228,7 +374,7 @@ impl Explorer {
 
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
         self.expanded.clear();
-        self.rebuild();
+        self.rebuild(cx);
         cx.emit(ExplorerEvent::ExpandedChanged);
         cx.notify();
     }
@@ -337,14 +483,17 @@ impl Explorer {
             })
             .icon(Icon::new(IconName::SquareTerminal)),
         )
-        .item(
-            menu_action(&this, crate::ui::REVEAL, move |_, _, cx| reveal(&p1, cx))
-                .icon(Icon::new(IconName::FolderOpen)),
-        )
+        // This machine's file manager shows this machine's files.
+        .when(remote::split(&p1).is_none(), |menu| {
+            menu.item(
+                menu_action(&this, crate::ui::REVEAL, move |_, _, cx| reveal(&p1, cx))
+                    .icon(Icon::new(IconName::FolderOpen)),
+            )
+        })
         .separator()
         .item(
             menu_action(&this, "Copy Path", move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(p2.display().to_string()))
+                cx.write_to_clipboard(ClipboardItem::new_string(crate::remote::plain(&p2)))
             })
             .icon(Icon::new(IconName::Copy)),
         )
@@ -372,6 +521,22 @@ impl Explorer {
             })
             .icon(Icon::new(IconName::Trash)),
         )
+    }
+
+    /// Do `work` at `at` off the UI thread (the disk, or the server `at` is
+    /// on), then `then` with what came of it.
+    fn run<R: Send + 'static>(
+        at: &Path,
+        work: impl FnOnce() -> R + Send + 'static,
+        then: impl FnOnce(&mut Self, R, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let task = crate::remote::spawn(at, cx, work);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            _ = this.update(cx, |this, cx| then(this, result, cx));
+        })
+        .detach();
     }
 
     /// Ask for a name, then run `then` with it.
@@ -423,36 +588,42 @@ impl Explorer {
         self.prompt_name(
             title,
             String::new(),
-            move |explorer, name, cx| {
-                let path = dir.join(&name);
-                let result = if folder {
-                    std::fs::create_dir_all(&path)
-                } else {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        .map(drop)
-                };
-                match result {
-                    Ok(()) => {
-                        explorer.expanded.insert(dir.clone());
-                        explorer.paths_changed(&[path.clone()], cx);
-                        if !folder {
-                            cx.emit(ExplorerEvent::Open {
-                                path,
-                                preview: false,
-                            });
+            move |_, name, cx| {
+                let path = child(&dir, &name);
+                let (dir, at) = (dir.clone(), path.clone());
+                let create = {
+                    let path = path.clone();
+                    move || {
+                        if folder {
+                            fs::create_dir_all(&path)
+                        } else {
+                            if let Some(parent) = path.parent() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                            fs::create_file(&path)
                         }
                     }
-                    Err(err) => {
-                        explorer.error = Some(format!("Could not create {name}: {err}").into())
+                };
+                let created = move |explorer: &mut Explorer, result, cx: &mut Context<Explorer>| {
+                    match result {
+                        Ok(()) => {
+                            explorer.expanded.insert(dir.clone());
+                            explorer.paths_changed(&[path.clone()], cx);
+                            if !folder {
+                                cx.emit(ExplorerEvent::Open {
+                                    path,
+                                    preview: false,
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            let err: std::io::Error = err;
+                            explorer.error = Some(format!("Could not create {name}: {err}").into())
+                        }
                     }
-                }
-                cx.notify();
+                    cx.notify();
+                };
+                Self::run(&at, create, created, cx);
             },
             window,
             cx,
@@ -467,44 +638,71 @@ impl Explorer {
         self.prompt_name(
             "Rename",
             initial,
-            move |explorer, name, cx| {
-                let target = path.with_file_name(&name);
-                match std::fs::rename(&path, &target) {
-                    Ok(()) => explorer.paths_changed(&[path.clone(), target], cx),
-                    Err(err) => explorer.error = Some(format!("Could not rename: {err}").into()),
-                }
-                cx.notify();
+            move |_, name, cx| {
+                let (path, target) = (path.clone(), path.with_file_name(&name));
+                let at = path.clone();
+                let rename = {
+                    let (path, target) = (path.clone(), target.clone());
+                    move || fs::rename(&path, &target)
+                };
+                let renamed = move |explorer: &mut Explorer, result, cx: &mut Context<Explorer>| {
+                    match result {
+                        Ok(()) => explorer.paths_changed(&[path.clone(), target], cx),
+                        Err(err) => {
+                            let err: std::io::Error = err;
+                            explorer.error = Some(format!("Could not rename: {err}").into())
+                        }
+                    }
+                    cx.notify();
+                };
+                Self::run(&at, rename, renamed, cx);
             },
             window,
             cx,
         );
     }
 
-    /// Delete moves to the Recycle Bin, after asking.
+    /// Delete moves to the Recycle Bin (for a file on a server, the trash of
+    /// the user there), after asking.
     fn confirm_delete(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        let question = match remote::split(&path) {
+            Some((host, _)) => format!("Move {name} to the trash on {host}?"),
+            None => format!("Move {name} to the Recycle Bin?"),
+        };
         let this = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let this = this.clone();
             let path = path.clone();
             dialog
                 .title("Delete")
-                .description(format!("Move {name} to the Recycle Bin?"))
+                .description(question.clone())
                 .ok_text("Delete")
                 .show_cancel(true)
                 .on_ok(move |_, _, cx| {
                     let path = path.clone();
-                    _ = this.update(cx, |explorer, cx| {
-                        match trash::delete(&path) {
-                            Ok(()) => explorer.paths_changed(&[path], cx),
-                            Err(err) => {
-                                explorer.error = Some(format!("Could not delete: {err}").into())
-                            }
-                        }
-                        cx.notify();
+                    _ = this.update(cx, |_, cx| {
+                        let delete = {
+                            let path = path.clone();
+                            move || fs::trash(&[path])
+                        };
+                        let at = path.clone();
+                        let deleted =
+                            move |explorer: &mut Explorer, result, cx: &mut Context<Explorer>| {
+                                match result {
+                                    Ok(()) => explorer.paths_changed(&[path], cx),
+                                    Err(err) => {
+                                        let err: String = err;
+                                        explorer.error =
+                                            Some(format!("Could not delete: {err}").into())
+                                    }
+                                }
+                                cx.notify();
+                            };
+                        Self::run(&at, delete, deleted, cx);
                     });
                     true
                 })

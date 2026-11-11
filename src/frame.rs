@@ -999,6 +999,8 @@ enum MenuRow {
     OpenFolder {
         new_window: bool,
     },
+    /// A folder on a server, over SSH.
+    OpenRemote,
 }
 
 impl MenuRow {
@@ -1008,7 +1010,7 @@ impl MenuRow {
 
     /// Whether the keyboard stops on it.
     fn selectable(&self) -> bool {
-        self.is_folder() || matches!(self, MenuRow::OpenFolder { .. })
+        self.is_folder() || matches!(self, MenuRow::OpenFolder { .. } | MenuRow::OpenRemote)
     }
 }
 
@@ -1189,6 +1191,9 @@ impl TabsMenu {
         }
         rows.push(MenuRow::OpenFolder { new_window: false });
         rows.push(MenuRow::OpenFolder { new_window: true });
+        if crate::remote::enabled() {
+            rows.push(MenuRow::OpenRemote);
+        }
         self.rows = rows;
     }
 
@@ -1231,6 +1236,15 @@ impl TabsMenu {
                     workspace.update(cx, |workspace, cx| {
                         workspace.prompt_open_folder(new_window, window, cx)
                     });
+                }
+            }
+            Some(MenuRow::OpenRemote) => {
+                let workspace = self
+                    .frame
+                    .upgrade()
+                    .and_then(|frame| frame.read(cx).active_workspace());
+                if let Some(workspace) = workspace {
+                    workspace.update(cx, |workspace, cx| workspace.prompt_open_remote(window, cx));
                 }
             }
             _ => return,
@@ -1440,6 +1454,11 @@ impl TabsMenu {
                     .child(label)
                     .into_any_element()
             }
+            MenuRow::OpenRemote => self
+                .clickable_row(ix, cx)
+                .child(Icon::new(IconName::Globe).xsmall())
+                .child("Open Remote Folder…")
+                .into_any_element(),
         }
     }
 }

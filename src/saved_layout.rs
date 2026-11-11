@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 /// Keys of a pane's data that are this machine's, not the arrangement's.
-const MACHINE_KEYS: &[&str] = &["scrollback"];
+const MACHINE_KEYS: &[&str] = &["scrollback", "term"];
 /// Keys of a pane's data that hold paths.
 const PATH_KEYS: &[&str] = &["path", "cwd", "top"];
 
@@ -69,7 +69,7 @@ fn keep_inside(data: &mut serde_json::Map<String, Value>, root: &Path) {
         return;
     };
     let outside = relative(&cwd, root).is_none();
-    if outside || !cwd.is_dir() {
+    if outside || !crate::remote::is_dir_now(&cwd) {
         data.insert(
             "cwd".into(),
             Value::String(root.to_string_lossy().into_owned()),

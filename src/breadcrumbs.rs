@@ -5,7 +5,7 @@
 //! tree whose folders unfold in place, where picking a file opens it.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
 };
 
@@ -15,6 +15,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 
+use crate::backend::remote;
 use crate::explorer::{Entry, read_dir};
 
 pub enum BreadcrumbsEvent {
@@ -39,6 +40,10 @@ pub struct Breadcrumbs {
     /// The open dropdown's tree, flattened.
     rows: Vec<Row>,
     selected: Option<usize>,
+    /// Folders on a server as it listed them, for the open dropdown: asked
+    /// for off the UI thread, shown when they are here.
+    listed: HashMap<PathBuf, Vec<Entry>>,
+    asked: HashSet<PathBuf>,
     focus_handle: FocusHandle,
     scroll: ScrollHandle,
 }
@@ -48,9 +53,17 @@ impl EventEmitter<BreadcrumbsEvent> for Breadcrumbs {}
 /// The parts of `path` shown, each with its own full path: those under
 /// `root` when it holds the file, else every one down from the disk's top.
 fn segments(path: &Path, root: Option<&Path>) -> Vec<(SharedString, PathBuf)> {
+    let there;
     let (mut at, rest) = match root.and_then(|root| Some((root, path.strip_prefix(root).ok()?))) {
         Some((root, rest)) if !rest.as_os_str().is_empty() => (root.to_path_buf(), rest),
-        _ => (PathBuf::new(), path),
+        _ => match remote::split(path) {
+            // On a server: from the top of its disk, not of this one.
+            Some((host, posix)) => {
+                there = PathBuf::from(posix.trim_start_matches('/'));
+                (remote::join(&host, "/"), there.as_path())
+            }
+            None => (PathBuf::new(), path),
+        },
     };
     let mut parts = Vec::new();
     for component in rest.components() {
@@ -75,6 +88,8 @@ impl Breadcrumbs {
             expanded: HashSet::new(),
             rows: Vec::new(),
             selected: None,
+            listed: HashMap::new(),
+            asked: HashSet::new(),
             focus_handle: cx.focus_handle(),
             scroll: ScrollHandle::new(),
         }
@@ -110,7 +125,10 @@ impl Breadcrumbs {
         };
         self.open = Some(ix);
         self.expanded.clear();
-        self.rebuild();
+        // A server's folders are listed anew each time the dropdown opens.
+        self.listed.clear();
+        self.asked.clear();
+        self.rebuild(cx);
         let selected = self.rows.iter().position(|row| row.entry.path == path);
         self.select(selected.unwrap_or(0), cx);
     }
@@ -127,18 +145,63 @@ impl Breadcrumbs {
         path.parent().map(Path::to_path_buf)
     }
 
-    fn rebuild(&mut self) {
+    /// What is in `dir`. A folder on a server is asked for and empty until
+    /// the answer is here (`listed_there` then builds the rows again).
+    fn entries(&mut self, dir: &Path, cx: &mut Context<Self>) -> Vec<Entry> {
+        if !crate::remote::is_remote(dir) {
+            return read_dir(dir);
+        }
+        if let Some(entries) = self.listed.get(dir) {
+            return entries.clone();
+        }
+        if self.asked.insert(dir.to_path_buf()) {
+            let task = crate::remote::spawn(dir, cx, {
+                let dir = dir.to_path_buf();
+                move || crate::explorer::list(&dir)
+            });
+            let (dir, open) = (dir.to_path_buf(), self.open);
+            cx.spawn(async move |this, cx| {
+                let entries = task.await.unwrap_or_default();
+                _ = this.update(cx, |this, cx| {
+                    // Closed, or open on another part, meanwhile.
+                    if this.open == open && this.asked.contains(&dir) {
+                        this.listed_there(dir, entries, cx);
+                    }
+                });
+            })
+            .detach();
+        }
+        Vec::new()
+    }
+
+    fn listed_there(&mut self, dir: PathBuf, entries: Vec<Entry>, cx: &mut Context<Self>) {
+        self.listed.insert(dir, entries);
+        self.rebuild(cx);
+        if self.selected.is_none() {
+            // The dropdown's own folder arrived: its part is the one selected.
+            let part = self.open.and_then(|ix| self.segments().into_iter().nth(ix));
+            let at = part.and_then(|(_, path)| self.rows.iter().position(|r| r.entry.path == path));
+            self.select(at.unwrap_or(0), cx);
+        }
+        cx.notify();
+    }
+
+    fn rebuild(&mut self, cx: &mut Context<Self>) {
         let selected = self
             .selected
             .and_then(|ix| self.rows.get(ix))
             .map(|row| row.entry.path.clone());
         let mut rows = Vec::new();
         if let Some(dir) = self.dir() {
-            let mut stack: Vec<(Entry, usize)> =
-                read_dir(&dir).into_iter().rev().map(|e| (e, 0)).collect();
+            let mut stack: Vec<(Entry, usize)> = self
+                .entries(&dir, cx)
+                .into_iter()
+                .rev()
+                .map(|e| (e, 0))
+                .collect();
             while let Some((entry, depth)) = stack.pop() {
                 if entry.is_dir && self.expanded.contains(&entry.path) {
-                    for child in read_dir(&entry.path).into_iter().rev() {
+                    for child in self.entries(&entry.path, cx).into_iter().rev() {
                         stack.push((child, depth + 1));
                     }
                 }
@@ -165,7 +228,7 @@ impl Breadcrumbs {
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_path_buf());
         }
-        self.rebuild();
+        self.rebuild(cx);
         cx.notify();
     }
 
@@ -446,6 +509,21 @@ mod tests {
         );
         assert_eq!(names(&parts), ["home", "me", ".config", "app", "app.log"]);
         assert_eq!(parts[0].1.parent(), Some(Path::new("/")));
+    }
+
+    #[test]
+    fn a_file_on_a_server_starts_at_the_top_of_its_disk() {
+        use crate::backend::remote;
+        let host = remote::HostId::new("box").unwrap();
+        let (root, file) = (
+            remote::join(&host, "/home/me/proj"),
+            remote::join(&host, "/etc/hosts"),
+        );
+        let parts = segments(&file, Some(&root));
+        assert_eq!(names(&parts), ["etc", "hosts"]);
+        assert_eq!(parts[1].1, file);
+        let inside = remote::join(&host, "/home/me/proj/src/a.rs");
+        assert_eq!(names(&segments(&inside, Some(&root))), ["src", "a.rs"]);
     }
 
     #[cfg(windows)]

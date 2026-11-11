@@ -33,13 +33,18 @@ pub enum RepoState {
     },
 }
 
-/// A path as a map key: case-insensitive where the file system is.
+/// A path as a map key: case-insensitive where the file system is. A path
+/// on a server keeps its case, as servers tell files apart by it.
 pub fn key(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) {
-        text.replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_lowercase()
+        let text = text.replace('/', "\\");
+        let text = text.trim_end_matches('\\');
+        if crate::backend::remote::split(path).is_some() {
+            text.to_string()
+        } else {
+            text.to_lowercase()
+        }
     } else {
         // macOS file systems are usually case-insensitive too, but git and
         // the shell are not; paths are compared as they are.
@@ -258,9 +263,10 @@ impl Repo {
             self.commits.clone(),
         );
         self._refresh = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
+            let result = crate::remote::spawn_on(
+                crate::remote::is_remote(&root),
+                cx.background_executor(),
+                move || {
                     let reload = known.is_none();
                     let top = match known {
                         Some(top) => top,
@@ -306,8 +312,9 @@ impl Repo {
                         uncommitted,
                         index,
                     }))
-                })
-                .await;
+                },
+            )
+            .await;
             _ = this.update(cx, |this, cx| {
                 this.refreshing = false;
                 match result {
@@ -411,10 +418,12 @@ impl Repo {
         self.notice = None;
         cx.notify();
         self._operation = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { op(&top) })
-                .await;
+            let result = crate::remote::spawn_on(
+                crate::remote::is_remote(&top),
+                cx.background_executor(),
+                move || op(&top),
+            )
+            .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 this.syncing = None;
@@ -541,10 +550,12 @@ impl Repo {
         self.busy = Some("Initializing…");
         cx.notify();
         self._operation = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { git::check(&root, &["init"], None) })
-                .await;
+            let result = crate::remote::spawn_on(
+                crate::remote::is_remote(&root),
+                cx.background_executor(),
+                move || git::check(&root, &["init"], None),
+            )
+            .await;
             _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 if let Err(err) = result {

@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "crates/den-extension", "examples/hello-extension"]
+members = [
+    ".",
+    "crates/den-core",
+    "crates/den-extension",
+    "crates/den-server",
+    "examples/hello-extension",
+]
 
 [package]
 name = "den"
@@ -31,10 +37,6 @@ portable-pty = "0.9.0"
 alacritty_terminal = "0.26.0"
 futures = "0.3"
 regex = "1"
-ignore = "0.4"
-globset = "0.4"
-notify = "8"
-trash = "5"
 similar = "2"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
@@ -51,6 +53,9 @@ symphonia-adapter-libopus = "0.3.0"
 cpal = "0.18.2"
 # The version gpui builds; its frames carry a PDF's drawn pages.
 image = { version = "0.25", default-features = false }
+den-core = { path = "crates/den-core" }
+# Unpacks the den-server a release carries (`build.rs`, `remote.rs`).
+flate2 = "1"
 den-extension = { path = "crates/den-extension" }
 
 [target.'cfg(windows)'.dependencies]
@@ -74,6 +79,14 @@ embed-resource = "3"
 
 [profile.dev]
 opt-level = 1
+
+# den-server as releases carry it (`cargo build -p den-server --profile
+# server`): one program with nothing to look up on the server it lands on.
+[profile.server]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true
 
 # gpui is unbearably slow unoptimised; keep this crate debuggable, optimise deps.
 [profile.dev.package."*"]

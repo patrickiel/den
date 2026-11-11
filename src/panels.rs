@@ -169,6 +169,13 @@ pub struct FilePanel {
     error: Option<SharedString>,
     /// The cursor's line (from 0) the extensions were last told of.
     cursor_line: Option<u32>,
+    /// The file is on a server: read and saved off the UI thread.
+    remote: bool,
+    /// Not read yet (on its way from the server, or the server out of
+    /// reach): the tab is empty and must not be saved over the file.
+    unread: bool,
+    /// Where the cursor goes once the file is read.
+    pending_go_to: Option<(u32, u32, bool)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -187,6 +194,14 @@ struct PreviewFind {
 impl FilePanel {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let look = Look::of(&path);
+        if crate::remote::is_remote(&path) {
+            // Empty until the server has sent it.
+            let (text, encoding) = (String::new(), "utf8".to_string());
+            let mut this = Self::with_text(path, look, text, encoding, None, window, cx);
+            this.unread = true;
+            this.load(None, window, cx);
+            return this;
+        }
         let (text, encoding, error) = if look.binary() {
             (
                 String::new(),
@@ -315,9 +330,11 @@ impl FilePanel {
             }));
         }
 
-        let pdf =
-            (look == Look::Pdf).then(|| cx.new(|cx| crate::pdf::PdfView::new(path.clone(), cx)));
-        let audio = (look == Look::Audio)
+        // Both read the file from this machine's disk.
+        let remote = crate::remote::is_remote(&path);
+        let pdf = (look == Look::Pdf && !remote)
+            .then(|| cx.new(|cx| crate::pdf::PdfView::new(path.clone(), cx)));
+        let audio = (look == Look::Audio && !remote)
             .then(|| cx.new(|cx| crate::audio::AudioView::new(path.clone(), cx)));
 
         cx.defer_in(window, |this, _, cx| this.refresh_git_base(cx));
@@ -343,8 +360,73 @@ impl FilePanel {
             dirty: false,
             error,
             cursor_line: None,
+            remote,
+            unread: false,
+            pending_go_to: None,
             _subscriptions,
         }
+    }
+
+    /// Read a file on a server (in `encoding`, or by what its bytes say),
+    /// off the UI thread; the tab takes the text when it is here.
+    fn load(&mut self, encoding: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.look.binary() {
+            self.error = Some(
+                "Pictures, PDFs and audio in a folder on a server cannot be shown yet.".into(),
+            );
+            return;
+        }
+        let task = crate::remote::spawn(&self.path, cx, {
+            let path = self.path.clone();
+            move || crate::encoding::read(&path, encoding.as_deref())
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let read = task.await;
+            _ = this.update_in(cx, |this, window, cx| this.loaded(read, window, cx));
+        })
+        .detach();
+    }
+
+    fn loaded(
+        &mut self,
+        read: Result<(String, String), String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match read {
+            Ok((text, encoding)) => {
+                let first = std::mem::take(&mut self.unread);
+                self.encoding = encoding;
+                self.error = None;
+                if first {
+                    let (hard_tabs, size) =
+                        crate::encoding::detect_indent(&text).unwrap_or((false, 4));
+                    self.set_indent(hard_tabs, size, cx);
+                }
+                self.saved = text.clone().into();
+                self.crlf = text.contains("\r\n");
+                self.dirty = false;
+                if let Some(markdown) = &self.markdown {
+                    markdown.update(cx, |markdown, cx| markdown.set_text(&text, cx));
+                }
+                self.editor
+                    .update(cx, |editor, cx| editor.set_value(text, window, cx));
+                // Setting the value is no edit, so the marks are not told of it.
+                let text = self.saved.clone();
+                self.update_marks(&text, cx);
+                self.refresh_git_base(cx);
+                if let Some((line, column, focus)) = self.pending_go_to.take() {
+                    self.go_to(line, column, focus, window, cx);
+                }
+                cx.emit(PaneEvent::Changed);
+            }
+            // Read before: the tab keeps what it has.
+            Err(err) if !self.unread => {
+                crate::toast::push(window, format!("Could not reopen: {err}"), cx)
+            }
+            Err(err) => self.error = Some(err.into()),
+        }
+        cx.notify();
     }
 
     /// The file on disk; none while untitled.
@@ -375,11 +457,12 @@ impl FilePanel {
         if self.look.binary() || self.untitled {
             return;
         }
-        let path = self.path.clone();
+        let task = crate::remote::spawn(&self.path, cx, {
+            let path = self.path.clone();
+            move || crate::dirty_diff::index_text(&path)
+        });
         cx.spawn(async move |this, cx| {
-            let base = cx
-                .background_spawn(async move { crate::dirty_diff::index_text(&path) })
-                .await;
+            let base = task.await;
             _ = this.update(cx, |this, cx| {
                 if this.git_base != base {
                     this.git_base = base;
@@ -412,6 +495,10 @@ impl FilePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.unread {
+            self.pending_go_to = Some((line, column, focus));
+            return;
+        }
         let position = Position::new(line.saturating_sub(1), column.saturating_sub(1));
         self.editor.update(cx, |editor, cx| {
             editor.set_cursor_position(position, window, cx);
@@ -465,6 +552,31 @@ impl FilePanel {
         if self.look.binary() || self.untitled {
             return cx.notify();
         }
+        if self.remote {
+            // Never read (the server was out of reach): read it now.
+            if self.unread {
+                return self.load(None, window, cx);
+            }
+            self.refresh_git_base(cx);
+            if self.dirty {
+                return;
+            }
+            let task = crate::remote::spawn(&self.path, cx, {
+                let (path, encoding) = (self.path.clone(), self.encoding.clone());
+                move || crate::encoding::read(&path, Some(&encoding))
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok((text, _)) = task.await else { return };
+                _ = this.update_in(cx, |this, window, cx| {
+                    // Edited while it was on its way: the edits stay.
+                    if !this.dirty {
+                        this.take_from_disk(text, window, cx)
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         self.refresh_git_base(cx);
         if self.dirty {
             return;
@@ -472,6 +584,11 @@ impl FilePanel {
         let Ok((text, _)) = crate::encoding::read(&self.path, Some(&self.encoding)) else {
             return;
         };
+        self.take_from_disk(text, window, cx);
+    }
+
+    /// Show `text`, the file as it is on disk now, keeping the cursor.
+    fn take_from_disk(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         if text.as_str() == self.saved.as_ref() {
             return;
         }
@@ -497,7 +614,8 @@ impl FilePanel {
             return self.save_as(window, cx);
         }
         // Format on save, when the file has a formatter; saved either way.
-        if Settings::get(cx).format_on_save {
+        // (Not a file on a server: its formatter is there, not here.)
+        if Settings::get(cx).format_on_save && !self.remote {
             return self.format(true, window, cx);
         }
         self.write(window, cx);
@@ -506,6 +624,14 @@ impl FilePanel {
     /// Format Document: the buffer through the file's formatter, as one step
     /// to undo. With `then_save`, the file is saved after (also on failure).
     pub fn format(&mut self, then_save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote {
+            let message = "Format Document is not there for files on a server yet.";
+            crate::toast::push(window, message, cx);
+            if then_save {
+                self.write(window, cx);
+            }
+            return;
+        }
         let tool = match crate::backend::format::tool_for(&self.path) {
             Ok(tool) => tool,
             Err(err) => {
@@ -610,6 +736,9 @@ impl FilePanel {
 
     /// Ask where to save an untitled tab, then save it there as that file.
     fn save_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote {
+            return self.save_as_on_server(window, cx);
+        }
         let dir = self
             .path
             .parent()
@@ -621,16 +750,79 @@ impl FilePanel {
             let Some(path) = picked.await.ok().and_then(Result::ok).flatten() else {
                 return;
             };
-            _ = this.update_in(cx, |this, window, cx| {
-                // Text it stays, whatever the name; a picture would not save.
-                this.look = match Look::of(&path) {
-                    look if look.binary() => Look::Text,
-                    look => look,
-                };
-                this.set_language(&language_of(&path), cx);
-                this.path = path;
-                this.untitled = false;
-                this.save(&SaveFile, window, cx);
+            _ = this.update_in(cx, |this, window, cx| this.save_at(path, window, cx));
+        })
+        .detach();
+    }
+
+    /// The untitled tab becomes the file `path`, and is saved there.
+    fn save_at(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // Text it stays, whatever the name; a picture would not save.
+        self.look = match Look::of(&path) {
+            look if look.binary() => Look::Text,
+            look => look,
+        };
+        self.set_language(&language_of(&path), cx);
+        self.path = path;
+        self.untitled = false;
+        self.save(&SaveFile, window, cx);
+    }
+
+    /// Save As for a folder on a server: the system's dialog shows this
+    /// machine's folders, so the path is typed, as the server writes it.
+    fn save_as_on_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_kit::component::WindowExt as _;
+        let Some((host, _)) = crate::backend::remote::split(&self.path) else {
+            return;
+        };
+        let dir = self
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let suggested = crate::remote::plain(&self.path);
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(suggested));
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, {
+            let input = input.clone();
+            move |dialog, _, _| {
+                let (input, this, dir) = (input.clone(), this.clone(), dir.clone());
+                dialog
+                    .title(format!("Save As, on {host}"))
+                    .show_cancel(true)
+                    .child(Input::new(&input))
+                    .on_ok(move |_, window, cx| {
+                        let text = input.read(cx).value().trim().to_string();
+                        if text.is_empty() || text.ends_with('/') {
+                            return false;
+                        }
+                        let path = crate::backend::remote::resolve(&dir, &text);
+                        _ = this.update(cx, |this, cx| this.claim(path, window, cx));
+                        true
+                    })
+            }
+        });
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
+    }
+
+    /// Make the new file `path` on its server, then save the untitled tab
+    /// there: a file that is there already is never written over.
+    fn claim(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let task = crate::remote::spawn(&path, cx, {
+            let path = path.clone();
+            move || crate::backend::fs::create_file(&path)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let made = task.await;
+            _ = this.update_in(cx, |this, window, cx| match made {
+                Ok(()) if this.untitled => this.save_at(path, window, cx),
+                Ok(()) => {}
+                Err(err) => {
+                    let name = crate::backend::remote::display(&path);
+                    crate::toast::push(window, format!("Could not save as {name}: {err}"), cx)
+                }
             });
         })
         .detach();
@@ -641,10 +833,42 @@ impl FilePanel {
             return self.save_as(window, cx);
         }
         let text = self.editor.read(cx).value();
-        match crate::encoding::write(&self.path, &text, &self.encoding) {
+        if self.remote {
+            if self.unread {
+                let message = "The file has not been read from the server: nothing to save.";
+                return crate::toast::push(window, message, cx);
+            }
+            let task = crate::remote::spawn(&self.path, cx, {
+                let (path, text, encoding) =
+                    (self.path.clone(), text.clone(), self.encoding.clone());
+                move || crate::encoding::write(&path, &text, &encoding)
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                let result = task.await;
+                _ = this.update_in(cx, |this, window, cx| {
+                    this.written(text, result, window, cx)
+                });
+            })
+            .detach();
+            return;
+        }
+        let result = crate::encoding::write(&self.path, &text, &self.encoding);
+        self.written(text, result, window, cx);
+    }
+
+    /// `text` was saved, or could not be.
+    fn written(
+        &mut self,
+        text: SharedString,
+        result: Result<(), String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
             Ok(()) => {
+                // Typed on while a server took the file: still unsaved.
+                self.dirty = self.remote && self.editor.read(cx).value() != text;
                 self.saved = text;
-                self.dirty = false;
                 self.error = None;
                 self.refresh_git_base(cx);
                 cx.emit(PaneEvent::Changed);
@@ -1193,6 +1417,9 @@ impl FilePanel {
             );
             return;
         }
+        if self.remote {
+            return self.load(Some(encoding.to_string()), window, cx);
+        }
         match crate::encoding::read(&self.path, Some(encoding)) {
             Ok((text, encoding)) => {
                 self.encoding = encoding;
@@ -1216,7 +1443,13 @@ impl FilePanel {
         }
         let previous = std::mem::replace(&mut self.encoding, encoding.to_string());
         let text = self.editor.read(cx).value();
-        if let Err(err) = crate::encoding::write(&self.path, &text, encoding) {
+        // On a server the one write comes below, off this thread; here only
+        // whether the encoding can hold the text.
+        let tried = match self.remote {
+            true => crate::encoding::encode(&text, encoding).map(drop),
+            false => crate::encoding::write(&self.path, &text, encoding),
+        };
+        if let Err(err) = tried {
             self.encoding = previous;
             crate::toast::push(
                 window,

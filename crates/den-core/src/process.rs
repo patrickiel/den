@@ -42,7 +42,7 @@ pub fn output_with_input(mut cmd: Command, stdin: Option<&str>) -> std::io::Resu
 /// Unpack `archive` into the new folder `into` with the system tar (bsdtar on
 /// Windows 10+ and macOS reads zip too; Linux's GNU tar does not, so a zip
 /// goes to unzip there); `what` names it in the error.
-pub(crate) fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
+pub fn unpack(archive: &Path, into: &Path, what: &str) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
     let zip = archive

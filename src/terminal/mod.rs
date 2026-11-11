@@ -5,18 +5,16 @@
 //! thread reads its output into alacritty_terminal's parser, which keeps the
 //! screen grid; `element.rs` paints the grid cell by cell, `keys.rs` turns
 //! keystrokes into the bytes a terminal sends, `links.rs` finds URLs and file
-//! paths for Ctrl+click (Cmd+click on macOS), and `unix.rs` holds the zsh
-//! and bash integration.
+//! paths for Ctrl+click (Cmd+click on macOS). The zsh and bash integration
+//! and the shell's own reports (`osc`) are in den-core.
 
 pub mod colors;
 mod element;
 mod glyphs;
 mod keys;
 mod links;
-mod osc;
-mod unix;
 
-pub use osc::encode_powershell;
+pub use den_core::osc::encode_powershell;
 
 use std::{
     io::{Read, Write},
@@ -34,6 +32,7 @@ use alacritty_terminal::{
     term::{Config, TermMode, cell::Flags},
     vte::ansi::Processor,
 };
+use den_core::{osc, shell as unix};
 use futures::{StreamExt as _, channel::mpsc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme as _, v_flex};
@@ -43,7 +42,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    backend::{agent, wsl},
+    backend::{
+        agent,
+        remote::{self, term},
+        wsl,
+    },
     pane::{AlertKind, Pane, PaneEvent},
     settings::Settings,
 };
@@ -96,7 +99,7 @@ pub fn init(cx: &mut App) {
         let cwd = data["cwd"]
             .as_str()
             .map(PathBuf::from)
-            .filter(|dir| dir.is_dir())
+            .filter(|dir| crate::remote::is_dir_now(dir))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let program = data["program"].as_str().map(str::to_string);
         let agent = data["agent"].as_bool().unwrap_or_else(|| {
@@ -112,6 +115,7 @@ pub fn init(cx: &mut App) {
             command,
             history,
             agent,
+            server: data["term"].as_u64(),
         };
         std::rc::Rc::new(cx.new(|cx| TerminalPanel::new(launch, window, cx)))
     });
@@ -154,6 +158,9 @@ pub struct Launch {
     pub history: Option<String>,
     /// A coding agent, for default groups (Agents rather than Terminals).
     pub agent: bool,
+    /// For a folder on a server: the terminal there this tab showed last
+    /// time, which may run still.
+    pub server: Option<u64>,
 }
 
 /// The program a terminal runs, by its preset's name when there is one.
@@ -300,10 +307,37 @@ impl Dimensions for GridSize {
 }
 
 /// The live half of a terminal; absent when the shell could not start.
-struct Pty {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+enum Pty {
+    Local {
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        child: Box<dyn Child + Send + Sync>,
+    },
+    /// On a server, which keeps it running; den is attached to it.
+    Remote(term::Session),
+}
+
+/// A terminal on a server, as this tab knows it.
+struct Served {
+    /// Its name there.
+    id: u64,
+    /// The offset of the output shown so far.
+    shown: u64,
+    /// Output before this offset is old news: no alert, no answer for it.
+    old_until: Option<u64>,
+    /// Not started yet (a new tab), or found gone: to be started.
+    fresh: bool,
+    /// Attached once before: what was missed since is asked for.
+    seen: bool,
+    /// The shell to run in place of the user's own there, and what it runs
+    /// first.
+    shell: Option<String>,
+    command: Option<String>,
+    /// Asking the server, or waiting to.
+    connecting: bool,
+    /// The next reset keeps what is shown (a terminal just started, under
+    /// the last session's text).
+    keep_screen: bool,
 }
 
 pub struct TerminalPanel {
@@ -319,6 +353,10 @@ pub struct TerminalPanel {
     parser: Processor,
     events: Listener,
     pty: Option<Pty>,
+    /// For a folder on a server: the terminal there.
+    served: Option<Served>,
+    /// Feeding old news: the screen follows, nothing answers or alerts.
+    quiet: bool,
     error: Option<SharedString>,
     title: Option<SharedString>,
     exited: bool,
@@ -375,7 +413,9 @@ impl TerminalPanel {
             command,
             history,
             agent,
+            server,
         } = launch;
+        let remote = crate::remote::is_remote(&cwd);
         let (columns, lines) = (100, 30);
         let events = Listener::default();
         let settings = Settings::get(cx).clone();
@@ -391,16 +431,32 @@ impl TerminalPanel {
             Some(program) if own_shell => program.trim().to_string(),
             _ => shell(&settings.shell),
         };
-        let wsl = wsl_target(
-            if own_shell { &shell } else { &settings.shell },
-            &shell,
-            &cwd,
-        );
+        let wsl = match remote {
+            true => None,
+            false => wsl_target(
+                if own_shell { &shell } else { &settings.shell },
+                &shell,
+                &cwd,
+            ),
+        };
         let command = command.filter(|_| !own_shell);
         let shell_name = match &wsl {
             Some(distro) => distro.clone().unwrap_or_else(|| "wsl".into()),
+            // The user's own shell on the server, whichever that is.
+            None if remote && !own_shell => "shell".into(),
             None => exe_name(&shell),
         };
+        let served = remote.then(|| Served {
+            id: server.unwrap_or_else(term::new_id),
+            shown: 0,
+            old_until: None,
+            fresh: server.is_none(),
+            seen: false,
+            shell: own_shell.then(|| shell.clone()),
+            command: command.clone(),
+            connecting: false,
+            keep_screen: false,
+        });
         let program_is_set = program.is_some() && !own_shell;
         let codex_resume = command
             .as_ref()
@@ -417,6 +473,8 @@ impl TerminalPanel {
             parser: Processor::new(),
             events,
             pty: None,
+            served,
+            quiet: false,
             error: None,
             title: None,
             exited: false,
@@ -454,7 +512,9 @@ impl TerminalPanel {
         }
         let weak = cx.weak_entity();
         cx.global_mut::<Terminals>().0.insert(this.hook_id, weak);
-        if let Err(err) = this.spawn(&shell, command, columns, lines, cx) {
+        if remote {
+            this.connect(cx);
+        } else if let Err(err) = this.spawn(&shell, command, columns, lines, cx) {
             this.error = Some(format!("Could not start the shell: {err}").into());
         }
         this.watch_focus(window, cx);
@@ -583,12 +643,195 @@ impl TerminalPanel {
                 cx.notify();
             });
         }));
-        self.pty = Some(Pty {
+        self.pty = Some(Pty::Local {
             master: pair.master,
             writer,
             child,
         });
         Ok(())
+    }
+
+    /// Attach to this tab's terminal on its server, starting it there when
+    /// it does not run (a new tab; one whose terminal ended with the
+    /// server): off the UI thread, and again whenever the server is back in
+    /// reach (`Workspace::link_changed`).
+    pub(crate) fn connect(&mut self, cx: &mut Context<Self>) {
+        let size = (self.columns as u16, self.lines as u16);
+        let Some(served) = &mut self.served else {
+            return;
+        };
+        if self.pty.is_some() || served.connecting || self.exited {
+            return;
+        }
+        served.connecting = true;
+        let (id, fresh) = (served.id, served.fresh);
+        let have = served.seen.then_some(served.shown);
+        let (shell, command) = (served.shell.clone(), served.command.clone());
+        let cwd = self.cwd.clone();
+        let asked = crate::remote::spawn(&self.cwd, cx, move || {
+            if !fresh {
+                match term::attach(&cwd, id, have) {
+                    Ok((session, events)) => return Ok((session, events, false)),
+                    // Not running any more: started anew, below.
+                    Err(remote::Error::Failed(fault))
+                        if fault.kind == remote::FaultKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            term::spawn(&cwd, &cwd, id, shell.as_deref(), command.as_deref(), size)?;
+            let (session, events) = term::attach(&cwd, id, None)?;
+            Ok((session, events, true))
+        });
+        self._reader = Some(cx.spawn(async move |this, cx| {
+            let (session, mut events, anew) = match asked.await {
+                Ok(attached) => attached,
+                Err(error) => {
+                    _ = this.update(cx, |this, cx| {
+                        if let Some(served) = &mut this.served {
+                            served.connecting = false;
+                        }
+                        this.error = Some(error.to_string().into());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let attached = this.update(cx, |this, cx| {
+                let Some(served) = &mut this.served else {
+                    return;
+                };
+                served.connecting = false;
+                // Started anew under the last session's text: that stays.
+                served.keep_screen = anew && !served.seen;
+                served.fresh = false;
+                served.seen = true;
+                if anew {
+                    served.shown = 0;
+                }
+                this.error = None;
+                session.resize(this.columns as u16, this.lines as u16);
+                this.pty = Some(Pty::Remote(session));
+                // Saved with the tab: which terminal to come back to.
+                cx.emit(PaneEvent::SessionChanged);
+                cx.notify();
+            });
+            if attached.is_err() {
+                return;
+            }
+            while let Some(event) = events.next().await {
+                // Take whatever else has arrived, so a burst draws once.
+                let mut burst = vec![event];
+                while let Ok(more) = events.try_recv() {
+                    burst.push(more);
+                }
+                let told = this.update(cx, |this, cx| {
+                    for event in burst {
+                        this.told(event, cx);
+                    }
+                });
+                if told.is_err() {
+                    return;
+                }
+            }
+            // The terminal ended, or the connection: that one runs on, and
+            // is come back to.
+            _ = this.update(cx, |this, cx| {
+                this.pty = None;
+                if !this.exited {
+                    this.error = Some("The connection to the server was lost.".into());
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    /// The terminal on the server said something.
+    fn told(&mut self, event: term::Event, cx: &mut Context<Self>) {
+        let Some(served) = &mut self.served else {
+            return;
+        };
+        match event {
+            term::Event::Reset {
+                from,
+                live,
+                cols,
+                rows,
+            } => {
+                served.shown = from;
+                served.old_until = Some(live);
+                if std::mem::take(&mut served.keep_screen) {
+                    return;
+                }
+                // What is shown goes; what comes is laid out at the size it
+                // was printed at (`fit` then makes it this view's again).
+                self.parser = Processor::new();
+                self.osc = osc::OscScanner::default();
+                self.parser.advance(&mut self.term, b"\x1bc");
+                (self.columns, self.lines) = (cols as usize, rows as usize);
+                let (columns, lines) = (self.columns, self.lines);
+                self.term.resize(GridSize { columns, lines });
+                self.forget_links();
+                self.forget_events();
+                cx.notify();
+            }
+            term::Event::Resumed => {}
+            term::Event::Output { offset, bytes } => {
+                let end = offset + bytes.len() as u64;
+                if end <= served.shown {
+                    return;
+                }
+                served.shown = end;
+                self.quiet = served.old_until.is_some_and(|live| offset < live);
+                if served.old_until.is_some_and(|live| end >= live) {
+                    served.old_until = None;
+                }
+                self.feed(&bytes, cx);
+                self.quiet = false;
+                if let Some(Pty::Remote(session)) = &self.pty {
+                    session.ack(end);
+                }
+            }
+            term::Event::Modes(bytes) => {
+                served.old_until = None;
+                self.parser.advance(&mut self.term, &bytes);
+                self.forget_events();
+                cx.notify();
+            }
+            term::Event::Hook { agent, kind, body } => {
+                let event = agent::AgentEvent {
+                    agent,
+                    pane: self.hook_id,
+                    kind,
+                    body,
+                };
+                self.agent_event(&event, cx);
+            }
+            term::Event::Exited => {
+                self.exited = true;
+                cx.emit(PaneEvent::SessionChanged);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Drop what the terminal asked for while it was fed.
+    fn forget_events(&mut self) {
+        if let Ok(mut events) = self.events.0.lock() {
+            events.clear();
+        }
+    }
+
+    /// The tab was closed: its terminal on a server ends with it (one den
+    /// only went away from runs on).
+    pub(crate) fn closed(&self) {
+        match (&self.pty, &self.served) {
+            (Some(Pty::Remote(session)), _) => session.kill(),
+            // Out of reach now: ended when the server is back.
+            (None, Some(served)) if !served.fresh && !self.exited => {
+                crate::remote::kill_later(&self.cwd, served.id)
+            }
+            _ => {}
+        }
     }
 
     fn feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -605,10 +848,17 @@ impl TerminalPanel {
                     Some(distro) if dir.to_string_lossy().starts_with('/') => {
                         wsl::to_windows(distro.as_deref(), &dir.to_string_lossy()).or(cwd)
                     }
+                    // A shell on a server names a folder there.
+                    _ if self.served.is_some() => {
+                        Some(remote::resolve(&self.cwd, &dir.to_string_lossy()))
+                    }
                     _ => Some(dir),
                 };
             } else if let Some(message) = osc::notification_of(number, &body) {
-                messages.push(message);
+                // (Not for old news.)
+                if !self.quiet {
+                    messages.push(message);
+                }
             }
         }
         if let Some(cwd) = cwd {
@@ -655,6 +905,9 @@ impl TerminalPanel {
             .unwrap_or_default();
         for event in events {
             match event {
+                // Old news: its questions were answered, its bell has rung.
+                _ if self.quiet
+                    && !matches!(event, TermEvent::Title(_) | TermEvent::ResetTitle) => {}
                 TermEvent::PtyWrite(text) => self.write(text.as_bytes()),
                 TermEvent::Title(title) => {
                     self.title = Some(title.into());
@@ -770,9 +1023,13 @@ impl TerminalPanel {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        if let Some(pty) = &mut self.pty {
-            _ = pty.writer.write_all(bytes);
-            _ = pty.writer.flush();
+        match &mut self.pty {
+            Some(Pty::Local { writer, .. }) => {
+                _ = writer.write_all(bytes);
+                _ = writer.flush();
+            }
+            Some(Pty::Remote(session)) => session.write(bytes),
+            None => {}
         }
     }
 
@@ -977,7 +1234,9 @@ impl TerminalPanel {
             return None;
         }
         let text = self.row_text(row);
-        let found = links::find(&text, col, &self.cwd, |path| path.is_file())
+        // (A path on a server cannot be asked about from here.)
+        let remote = self.served.is_some();
+        let found = links::find(&text, col, &self.cwd, |path| !remote && path.is_file())
             .map(|(range, link)| (row, range, link));
         match &found {
             Some(hit) => self.link_cache = Some(hit.clone()),
@@ -1024,13 +1283,17 @@ impl TerminalPanel {
             self.lines = lines;
             self.term.resize(GridSize { columns, lines });
             self.forget_links();
-            if let Some(pty) = &self.pty {
-                _ = pty.master.resize(PtySize {
-                    rows: lines as u16,
-                    cols: columns as u16,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+            match &self.pty {
+                Some(Pty::Local { master, .. }) => {
+                    _ = master.resize(PtySize {
+                        rows: lines as u16,
+                        cols: columns as u16,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+                Some(Pty::Remote(session)) => session.resize(columns as u16, lines as u16),
+                None => {}
             }
             cx.notify();
         }
@@ -1091,8 +1354,9 @@ impl TerminalPanel {
 
 impl Drop for TerminalPanel {
     fn drop(&mut self) {
-        if let Some(pty) = &mut self.pty {
-            _ = pty.child.kill();
+        // (One on a server runs on: den only lets go of it.)
+        if let Some(Pty::Local { child, .. }) = &mut self.pty {
+            _ = child.kill();
         }
         agent::forget(self.hook_id);
     }
@@ -1263,6 +1527,8 @@ impl Pane for TerminalPanel {
             "cwd": self.cwd.to_string_lossy(),
             "program": self.program,
             "agent": self.agent,
+            // On a server, the terminal to come back to while it runs.
+            "term": self.served.as_ref().filter(|_| !self.exited).map(|served| served.id),
             // A shell brings its last screens back; a program redraws itself.
             "scrollback": if self.program.as_deref().is_none_or(is_shell) && self.claude_session.is_none() && self.codex_resume.is_none() { self.scrollback(500) } else { String::new() },
             "resume": self.codex_resume.clone().or_else(|| self.claude_session.as_ref().map(|session| agent::claude_resume(self.program.as_deref(), session.as_deref(), session.is_none()))),

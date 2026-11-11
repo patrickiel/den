@@ -515,16 +515,25 @@ impl ScmView {
             return;
         };
         let path = top.join(".gitignore");
-        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        for file in files {
-            text.push_str(&format!("/{}\n", file.rel));
-        }
-        if std::fs::write(&path, text).is_ok() {
-            self.repo.update(cx, |repo, cx| repo.refresh(cx));
-        }
+        // Where the repository is: off the UI thread for one on a server.
+        let written = crate::remote::spawn(&top, cx, move || {
+            let mut text = crate::backend::fs::read_to_string(&path).unwrap_or_default();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            for file in files {
+                text.push_str(&format!("/{}\n", file.rel));
+            }
+            crate::backend::fs::write(&path, text.into_bytes())
+        });
+        cx.spawn(async move |this, cx| {
+            if written.await.is_ok() {
+                _ = this.update(cx, |this, cx| {
+                    this.repo.update(cx, |repo, cx| repo.refresh(cx))
+                });
+            }
+        })
+        .detach();
     }
 
     /// The right-click menu of a row: on the selection when the row is in it.
@@ -1445,14 +1454,15 @@ impl ScmView {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let key = hash.clone();
-            let files = cx
-                .background_spawn({
+            let files = crate::remote::spawn_on(
+                crate::remote::is_remote(&top),
+                cx.background_executor(),
+                {
                     let parent = parent.clone();
-                    async move {
-                        git::commit_files(&top, &hash, parent.as_deref(), scope.as_deref())
-                    }
-                })
-                .await;
+                    move || git::commit_files(&top, &hash, parent.as_deref(), scope.as_deref())
+                },
+            )
+            .await;
             _ = this.update(cx, |this, cx| {
                 if let Some(slot) = this.expanded.get_mut(&key) {
                     *slot = Some((parent, files.unwrap_or_default()));
@@ -1478,11 +1488,12 @@ impl ScmView {
             let parent = commit.parents.first().cloned();
             let scope = self.repo.read(cx).scope();
             cx.spawn(async move |this, cx| {
-                let stat = cx
-                    .background_spawn(async move {
-                        git::commit_stat(&top, &hash, parent.as_deref(), scope.as_deref())
-                    })
-                    .await;
+                let stat = crate::remote::spawn_on(
+                    crate::remote::is_remote(&top),
+                    cx.background_executor(),
+                    move || git::commit_stat(&top, &hash, parent.as_deref(), scope.as_deref()),
+                )
+                .await;
                 _ = this.update(cx, |this, cx| {
                     match stat {
                         Ok(stat) => _ = this.stats.insert(key, Some(stat)),

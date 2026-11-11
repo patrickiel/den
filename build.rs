@@ -1,8 +1,37 @@
-//! Embeds the app icon in the exe as resource 1, where GPUI loads the window
+//! Tells the build which den-server den carries, and embeds the app icon.
+//!
+//! With `DEN_SERVER_DIR` set (releases), den carries the den-server programs
+//! in that folder, `den-server-linux-x86_64.gz` and
+//! `den-server-linux-aarch64.gz`, and puts the fitting one on a server it
+//! opens a folder on (`remote.rs`). Without it, den uses the one built
+//! beside it (`cargo build -p den-server`).
+//!
+//! The app icon goes in the exe as resource 1, where GPUI loads the window
 //! and taskbar icon from. Dev builds get den's amber icon, so they are easy to
 //! tell apart from the installed app.
 
+/// The den-server programs a release carries, as `remote.rs` includes them.
+const SERVERS: &[&str] = &[
+    "den-server-linux-x86_64.gz",
+    "den-server-linux-aarch64.gz",
+];
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=DEN_SERVER_DIR");
+    println!("cargo::rustc-check-cfg=cfg(den_server_embedded)");
+    if let Some(dir) = std::env::var_os("DEN_SERVER_DIR").filter(|dir| !dir.is_empty()) {
+        let dir = std::fs::canonicalize(&dir).expect("DEN_SERVER_DIR is a folder");
+        for name in SERVERS {
+            let file = dir.join(name);
+            assert!(file.is_file(), "DEN_SERVER_DIR has no {name}");
+            println!("cargo:rerun-if-changed={}", file.display());
+        }
+        // Forward slashes: the path goes into `include_bytes!`.
+        let dir = dir.to_string_lossy().replace('\\', "/");
+        let dir = dir.trim_start_matches("//?/");
+        println!("cargo:rustc-env=DEN_SERVER_EMBEDDED={dir}");
+        println!("cargo:rustc-cfg=den_server_embedded");
+    }
     println!("cargo:rerun-if-changed=assets/icons");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;

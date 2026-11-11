@@ -1,0 +1,12 @@
+[package]
+name = "den-server"
+version = "0.1.0"
+edition = "2024"
+description = "den's work on a folder, run on a server: den starts it over SSH and opens the folder from there"
+
+[dependencies]
+den-core = { path = "../den-core" }
+
+[dev-dependencies]
+futures = "0.3"
+serde_json = "1"

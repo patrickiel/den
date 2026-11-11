@@ -244,10 +244,12 @@ pub(crate) fn load_sides(
     if staged {
         return Ok((side("HEAD", rel)?, side("", rel)?));
     }
-    let new = match std::fs::read_to_string(path) {
+    let new = match crate::backend::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(format!("{}: {err}", path.display())),
+        Err(err) => {
+            return Err(format!("{}: {err}", crate::backend::remote::display(path)));
+        }
     };
     Ok((side("", rel)?, new))
 }
@@ -401,26 +403,25 @@ impl DiffPanel {
         );
         let theme = cx.theme().highlight_theme.clone();
         self._reload = Some(cx.spawn(async move |this, cx| {
-            let loaded = cx
-                .background_spawn(async move {
-                    let (old, new) = load_sides(&top, &rel, &path, staged, commit.as_ref())?;
-                    let rows = rows(&old, &new);
-                    let language = crate::panels::language_of(&path);
-                    let styles = [&old, &new].map(|text| {
-                        highlight_lines(&text.replace("\r\n", "\n"), &language, &theme)
-                    });
-                    let width = |line: &Option<(usize, String)>| {
-                        line.as_ref().map_or(0, |(_, t)| {
-                            t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
-                        })
-                    };
-                    let widest = [
-                        rows.iter().map(|r| width(&r.left)).max().unwrap_or(0),
-                        rows.iter().map(|r| width(&r.right)).max().unwrap_or(0),
-                    ];
-                    Ok::<_, String>((rows, styles, widest))
-                })
-                .await;
+            let remote = crate::remote::is_remote(&top);
+            let loaded = crate::remote::spawn_on(remote, cx.background_executor(), move || {
+                let (old, new) = load_sides(&top, &rel, &path, staged, commit.as_ref())?;
+                let rows = rows(&old, &new);
+                let language = crate::panels::language_of(&path);
+                let styles = [&old, &new]
+                    .map(|text| highlight_lines(&text.replace("\r\n", "\n"), &language, &theme));
+                let width = |line: &Option<(usize, String)>| {
+                    line.as_ref().map_or(0, |(_, t)| {
+                        t.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum()
+                    })
+                };
+                let widest = [
+                    rows.iter().map(|r| width(&r.left)).max().unwrap_or(0),
+                    rows.iter().map(|r| width(&r.right)).max().unwrap_or(0),
+                ];
+                Ok::<_, String>((rows, styles, widest))
+            })
+            .await;
             _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;

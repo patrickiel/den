@@ -13,6 +13,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use crate::remote::{
+    self, Connection, Route,
+    proto::{Item, Request, Response},
+};
+
 /// Larger files are skipped: the editor refuses them too, so nothing could be replaced in them.
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 /// A NUL in the first chunk marks a binary file.
@@ -54,7 +59,7 @@ pub struct Query {
     pub max_results: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileMatch {
     pub path: String,
@@ -63,7 +68,7 @@ pub struct FileMatch {
     pub matches: Vec<LineMatch>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LineMatch {
     /// 1-based.
     pub line: usize,
@@ -76,7 +81,7 @@ pub struct LineMatch {
     pub after: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Done {
     /// There were more matches than `max_results`; the search stopped there.
@@ -91,12 +96,73 @@ pub fn search(
     cancel: &AtomicBool,
     on_files: impl FnMut(Vec<FileMatch>) -> bool,
 ) -> Result<Done, String> {
+    match remote::route(root) {
+        Route::Local => {}
+        Route::Remote(connection, root) => {
+            return search_there(&connection, root, query, cancel, on_files);
+        }
+        Route::Offline(host) => return Err(remote::Error::Offline(host).to_string()),
+    }
     let search = Search::new(&root.to_string_lossy(), query)?;
     let budget = Budget::new(query.max_results);
     search.run(query.paths.as_deref(), &budget, cancel, on_files);
     Ok(Done {
         limit_hit: budget.spent(),
     })
+}
+
+/// `search` for a folder on a server: den-server searches there and sends the batches, which
+/// come out with den's paths for the files.
+fn search_there(
+    connection: &Arc<Connection>,
+    root: String,
+    query: &Query,
+    cancel: &AtomicBool,
+    mut on_files: impl FnMut(Vec<FileMatch>) -> bool,
+) -> Result<Done, String> {
+    let mut query = query.clone();
+    for path in query.paths.iter_mut().flatten() {
+        if let Some((_, there)) = remote::split(Path::new(path)) {
+            *path = there;
+        }
+    }
+    let (tx, rx) = mpsc::channel();
+    let mut stream = connection
+        .stream(&Request::Search { root, query }, move |item, _| {
+            if let Item::Matches { files } = item {
+                let _ = tx.send(files);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    // Dropping `stream` on the way out tells the server to stop.
+    let mut hand_over = |rx: &mpsc::Receiver<Vec<FileMatch>>| {
+        while let Ok(mut files) = rx.try_recv() {
+            for file in &mut files {
+                file.path = connection.path(&file.path).to_string_lossy().into_owned();
+            }
+            if cancel.load(Ordering::Relaxed) || !on_files(files) {
+                return false;
+            }
+        }
+        !cancel.load(Ordering::Relaxed)
+    };
+    loop {
+        if !hand_over(&rx) {
+            return Ok(Done::default());
+        }
+        let Some(answer) = stream.wait_for(BATCH_INTERVAL) else {
+            continue;
+        };
+        // The batches sent before the answer are all here by now.
+        if !hand_over(&rx) {
+            return Ok(Done::default());
+        }
+        return match answer {
+            Ok((Response::Searched { limit_hit }, _)) => Ok(Done { limit_hit }),
+            Ok(_) => Err("The server answered something else than was asked.".into()),
+            Err(e) => Err(e.to_string()),
+        };
+    }
 }
 
 /// The matches in `text` (an editor's unsaved buffer), as `search` reports them for a file.
@@ -265,6 +331,20 @@ fn walker(root: &Path, ignore: bool, filter: Arc<Filter>) -> WalkBuilder {
 /// The files under `root` that a search would look at, relative with `/` separators (for Quick
 /// Open); at most `max`, in no particular order.
 pub fn files(root: &Path, max: usize) -> Vec<String> {
+    match remote::route(root) {
+        Route::Local => {}
+        Route::Remote(connection, root) => {
+            let Ok((_, names)) = connection.call(&Request::Files { root, max }, Vec::new()) else {
+                return Vec::new();
+            };
+            return String::from_utf8_lossy(&names)
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        Route::Offline(_) => return Vec::new(),
+    }
     let query = Query {
         use_ignore_files: true,
         ..Query::default()

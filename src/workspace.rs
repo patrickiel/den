@@ -30,8 +30,8 @@ use crate::pane::AlertKind;
 use crate::{
     CheckForUpdates, CloseGroup, CloseTab, FocusDown, FocusExplorer, FocusExtensions, FocusLeft,
     FocusRight, FocusScm, FocusSearch, FocusUp, FormatDocument, NewAgent, NewTerminal, NextTab,
-    OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenSettings, PrevTab,
-    ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight, ToggleSoftWrap,
+    OpenDevServer, OpenFiles, OpenFolder, OpenFolderInNewWindow, OpenRemoteFolder, OpenSettings,
+    PrevTab, ReplaceInFiles, ResetLayout, SaveLayout, SplitDown, SplitRight, ToggleSoftWrap,
     backend::watch,
     defaults::{Defaults, GroupDefault, Kind},
     diff::DiffPanel,
@@ -348,6 +348,9 @@ pub struct Workspace {
     _dev_server_task: Option<Task<()>>,
     _watcher: Option<watch::Watcher>,
     _watch_task: Option<Task<()>>,
+    /// For a folder on a server, den's link to the server as last seen:
+    /// when it comes up, everything reads the folder again.
+    link: Option<crate::remote::Link>,
     _save_task: Option<Task<()>>,
     /// The main window as last seen settled, kept with the session.
     window_state: Option<WindowState>,
@@ -377,6 +380,11 @@ impl Workspace {
         AppState::update(cx, |state| state.opened(&root));
         sync_jump_list(cx);
         let session = AppState::get(cx).session(&root);
+        // A folder on a server: the connection every part of it asks
+        // through, made (or shared) before any of them starts.
+        if let Some((host, _)) = crate::backend::remote::split(&root) {
+            crate::remote::Remotes::connect(&host, cx);
+        }
         let repo = cx.new(|cx| Repo::new(root.clone(), !session.scm_whole_repo, cx));
         let explorer =
             cx.new(|cx| Explorer::new(root.clone(), session.expanded.clone(), repo.clone(), cx));
@@ -459,6 +467,9 @@ impl Workspace {
             ),
             cx.observe_window_bounds(window, |this, window, cx| this.window_changed(window, cx)),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            cx.observe_global_in::<crate::remote::Remotes>(window, |this, window, cx| {
+                this.link_changed(window, cx)
+            }),
             // The recent folders decide how much of the path the title shows.
             cx.observe_global::<AppState>(|this, cx| {
                 this.session_name = session_name(&this.root, cx);
@@ -481,6 +492,7 @@ impl Workspace {
         let session_name = session_name(&root, cx);
         let mut this = Self {
             _folder_lock: crate::settings::FolderLock::new(&root),
+            link: crate::remote::Remotes::link(&root, cx).map(|(_, link)| link),
             root,
             tree,
             panes: HashMap::new(),
@@ -760,7 +772,7 @@ impl Workspace {
     fn navigate(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.history.step(back, |entry| match entry {
             Entry::Pane(pane) => self.panes.contains_key(pane),
-            Entry::File(path) => path.is_file(),
+            Entry::File(path) => crate::remote::is_file_now(path),
         }) else {
             return;
         };
@@ -869,6 +881,9 @@ impl Workspace {
         let file = self
             .pane_as::<FilePanel>(pane)
             .and_then(|file| file.read(cx).path().map(std::path::Path::to_path_buf));
+        if let Some(terminal) = self.pane_as::<TerminalPanel>(pane) {
+            terminal.read(cx).closed();
+        }
         self.panes.remove(&pane);
         self.pane_subscriptions.remove(&pane);
         self.shown.retain(|p| *p != pane);
@@ -1808,6 +1823,77 @@ impl Workspace {
             .is_some_and(|file| file.read(cx).is_dirty(cx))
     }
 
+    // -- A folder on a server -----------------------------------------------
+
+    /// den's link to this folder's server changed: connected, the folder is
+    /// read again, as none of it could be before.
+    fn link_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let link = crate::remote::Remotes::link(&self.root, cx).map(|(_, link)| link);
+        if link == self.link {
+            return;
+        }
+        self.link = link;
+        if self.link == Some(crate::remote::Link::Connected) {
+            self.start_watching(window, cx);
+            self.explorer
+                .update(cx, |explorer, cx| explorer.refresh(cx));
+            self.repo
+                .update(cx, |repo, cx| repo.request(Refresh::Reload, cx));
+            // Its terminals, which ran on there meanwhile.
+            let terminals: Vec<_> = self.panes_of::<TerminalPanel>().map(|(_, t)| t).collect();
+            for terminal in terminals {
+                terminal.update(cx, |terminal, cx| terminal.connect(cx));
+            }
+            // Open files: the ones never read, and what changed meanwhile.
+            let files: Vec<_> = self.panes_of::<FilePanel>().map(|(_, f)| f).collect();
+            for file in files {
+                file.update(cx, |file, cx| file.reload_from_disk(window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// What to say of the server while the folder is out of reach.
+    fn render_link(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::remote::Link;
+        let (host, _) = crate::backend::remote::split(&self.root)?;
+        let (text, down) = match self.link.as_ref()? {
+            Link::Connected => return None,
+            Link::Connecting => (format!("Connecting to {host}\u{2026}"), false),
+            Link::Down(why) => (format!("{host}: {why}"), true),
+        };
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .flex_none()
+                .w_full()
+                .px_3()
+                .py_1()
+                .gap_3()
+                .text_xs()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_color(if down {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .child(div().flex_1().min_w_0().child(text))
+                .when(down, |this| {
+                    this.child(
+                        Button::new("reconnect")
+                            .ghost()
+                            .xsmall()
+                            .label("Retry")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                crate::remote::Remotes::connect(&host, cx)
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     // -- Following the disk -------------------------------------------------
 
     /// Watch the session root: the Explorer, git status and open files follow
@@ -1895,7 +1981,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         // No text to compare: the file itself, as it is now.
-        if !staged && crate::panels::is_media(&path) && path.is_file() {
+        if !staged && crate::panels::is_media(&path) && crate::remote::is_file_now(&path) {
             return self.open_file(path, false, window, cx);
         }
         let Some(top) = self.repo.read(cx).top().map(|p| p.to_path_buf()) else {
@@ -2066,6 +2152,7 @@ impl Workspace {
             command: program,
             history: None,
             agent,
+            server: None,
         };
         self.add_terminal(launch, group, window, cx);
     }
@@ -2084,6 +2171,11 @@ impl Workspace {
     /// Find the project's dev servers again (at start, and when a file that
     /// decides them changed).
     fn detect_dev_servers(&mut self, cx: &mut Context<Self>) {
+        // A dev server on a server answers there, not on this machine: not
+        // offered until its port is brought over.
+        if crate::remote::is_remote(&self.root) {
+            return;
+        }
         let root = self.root.clone();
         self._dev_server_task = Some(cx.spawn(async move |this, cx| {
             let found = cx
@@ -2102,6 +2194,11 @@ impl Workspace {
     /// Open Dev Server: the project's dev server in the system's browser.
     /// The one answering now when several were found; a toast when none was.
     pub(crate) fn open_dev_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::remote::is_remote(&self.root) {
+            let message = "The dev server of a folder on a server cannot be opened yet.";
+            crate::toast::push(window, message, cx);
+            return;
+        }
         let found = if self.dev_servers.is_empty() {
             crate::backend::dev_server::detect(&self.root)
         } else {
@@ -2304,6 +2401,7 @@ impl Workspace {
             command: Some(command),
             history: None,
             agent: false,
+            server: None,
         };
         self.add_terminal(launch, group, window, cx);
     }
@@ -2322,6 +2420,7 @@ impl Workspace {
             command: None,
             history: None,
             agent: false,
+            server: None,
         };
         self.add_terminal(launch, group, window, cx);
     }
@@ -2348,6 +2447,7 @@ impl Workspace {
             command: program,
             history: None,
             agent: terminal.is_agent(),
+            server: None,
         };
         self.add_terminal(launch, group, window, cx);
     }
@@ -2570,7 +2670,7 @@ impl Workspace {
     /// Open `root` as a tab here, or in a window of its own; one open
     /// already, wherever it is, comes to the front instead.
     fn open_session(&mut self, root: PathBuf, new_window: bool, cx: &mut Context<Self>) {
-        let root = crate::settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root));
+        let root = crate::settings::local_root(root);
         if new_window && crate::extensions::workspace_on(&root, cx).is_none() {
             crate::open_in_new_window(vec![root], 0, cx);
         } else {
@@ -2601,6 +2701,96 @@ impl Workspace {
                 return;
             };
             _ = this.update_in(cx, |this, _, cx| this.open_session(path, new_window, cx));
+        })
+        .detach();
+    }
+
+    /// Ask for a server and a folder on it, then open that folder.
+    pub(crate) fn prompt_open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let server = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Server: me@host, or a Host of ~/.ssh/config")
+        });
+        let folder = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Folder there: ~/proj, /srv/app")
+                .default_value("~")
+        });
+        let hosts = crate::backend::remote::ssh::hosts();
+        let this = cx.weak_entity();
+        window.open_alert_dialog(cx, {
+            let (server, folder) = (server.clone(), folder.clone());
+            move |dialog, _, cx| {
+                let theme = cx.theme().clone();
+                let (typed, there, this) = (server.clone(), folder.clone(), this.clone());
+                // The servers ssh knows by name: a click types one.
+                let known = hosts.iter().take(12).enumerate().map(|(ix, host)| {
+                    let (server, host) = (server.clone(), host.clone());
+                    div()
+                        .id(("known-server", ix))
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .text_xs()
+                        .border_1()
+                        .border_color(theme.border)
+                        .hover(|chip| chip.bg(theme.accent))
+                        .child(host.clone())
+                        .on_click(move |_, window, cx| {
+                            server.update(cx, |input, cx| input.set_value(host.clone(), window, cx))
+                        })
+                });
+                dialog
+                    .title("Open Remote Folder")
+                    .show_cancel(true)
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(Input::new(&server))
+                            .child(Input::new(&folder))
+                            .child(h_flex().flex_wrap().gap_1().children(known))
+                            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                                "den connects with your own ssh: its config, keys and agent.",
+                            )),
+                    )
+                    .on_ok(move |_, window, cx| {
+                        let (server, folder) = (typed.read(cx).value(), there.read(cx).value());
+                        match crate::remote::destination(&server, &folder) {
+                            Ok((host, path)) => {
+                                _ = this.update(cx, |this, cx| {
+                                    this.open_remote(host, path, window, cx)
+                                });
+                                true
+                            }
+                            Err(message) => {
+                                crate::toast::push(window, message, cx);
+                                false
+                            }
+                        }
+                    })
+            }
+        });
+        window.defer(cx, move |window, cx| {
+            server.update(cx, |input, cx| input.focus(window, cx))
+        });
+    }
+
+    /// Open the folder `path` on `host` as a tab, once the server has said
+    /// which folder that is; it says why not otherwise.
+    fn open_remote(
+        &mut self,
+        host: crate::backend::remote::HostId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        crate::toast::push(window, format!("Connecting to {host}…"), cx);
+        let found = crate::remote::find_folder(&host, &path, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let found = found.await;
+            _ = this.update_in(cx, |this, window, cx| match found {
+                Ok(root) => this.open_session(root, false, cx),
+                Err(message) => crate::toast::push(window, message, cx),
+            });
         })
         .detach();
     }
@@ -3330,6 +3520,15 @@ impl Workspace {
                         |this, window, cx| this.prompt_open_folder(true, window, cx),
                         cx,
                     ))
+                    .when(crate::remote::enabled(), |menu| {
+                        menu.item(item(
+                            this,
+                            "Open Remote Folder…",
+                            &OpenRemoteFolder,
+                            |this, window, cx| this.prompt_open_remote(window, cx),
+                            cx,
+                        ))
+                    })
                     .item(item(
                         this,
                         "Open Files…",
@@ -3987,11 +4186,15 @@ impl Render for Workspace {
             .text_color(cx.theme().foreground)
             // Without size, so no click lands on it: a focus target only.
             .child(div().track_focus(&self.focus_handle))
+            .children(self.render_link(cx))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.prompt_open_folder(false, window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenFolderInNewWindow, window, cx| {
                 this.prompt_open_folder(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenRemoteFolder, window, cx| {
+                this.prompt_open_remote(window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &SaveLayout, window, cx| this.prompt_save_preset(window, cx)),

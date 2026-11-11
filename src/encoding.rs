@@ -67,15 +67,17 @@ fn lookup(label: &str) -> Result<&'static encoding_rs::Encoding, String> {
 /// Read a file: in `encoding`, else by its BOM (UTF-8, UTF-16 LE/BE), else
 /// UTF-8, else Windows-1252 (which decodes any bytes and so saves them back
 /// unchanged). The text and the encoding it was read in.
+///
+/// The file is read where it is, this machine's disk or a server
+/// (`backend::fs`): for one on a server, not on the UI thread.
 pub fn read(path: &Path, encoding: Option<&str>) -> Result<(String, String), String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() > MAX_BYTES {
-        return Err(format!(
-            "The file is larger than {} MB.",
-            MAX_BYTES / 1024 / 1024
-        ));
-    }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = crate::backend::fs::read(path, MAX_BYTES).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::FileTooLarge {
+            format!("The file is larger than {} MB.", MAX_BYTES / 1024 / 1024)
+        } else {
+            e.to_string()
+        }
+    })?;
     let encoding = match encoding {
         Some(e) => e.to_string(),
         None => match bytes.as_slice() {
@@ -101,6 +103,12 @@ pub fn read(path: &Path, encoding: Option<&str>) -> Result<(String, String), Str
 /// Write `text` in `encoding`; UTF-16 gets a BOM, as in VS Code. Fails,
 /// writing nothing, when the encoding cannot represent the text.
 pub fn write(path: &Path, text: &str, encoding: &str) -> Result<(), String> {
+    crate::backend::fs::write(path, encode(text, encoding)?).map_err(|e| e.to_string())
+}
+
+/// `text` as the bytes of a file in `encoding`; an error when the encoding
+/// cannot represent it.
+pub fn encode(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
     let bytes: Vec<u8> = match encoding {
         "utf8" => text.as_bytes().to_vec(),
         "utf8bom" => [&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat(),
@@ -126,7 +134,7 @@ pub fn write(path: &Path, text: &str, encoding: &str) -> Result<(), String> {
             bytes.into_owned()
         }
     };
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    Ok(bytes)
 }
 
 /// The indentation `text` uses: tabs, or spaces and how many per level.

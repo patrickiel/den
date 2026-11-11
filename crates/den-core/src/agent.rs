@@ -24,8 +24,23 @@ pub struct AgentEvent {
     pub body: String,
 }
 
-/// The listener's port, once bound.
-static PORT: OnceLock<u16> = OnceLock::new();
+/// How a CLI's hooks reach den.
+enum Reporter {
+    /// den's listener on this machine, by its port.
+    Http(u16),
+    /// den-server, run as `<program> hook <agent> <pane> <kind>`: it hands
+    /// the report to the terminal's host, and that to den.
+    Command(String),
+}
+
+/// Set once: the listener bound, or den-server said how.
+static REPORTER: OnceLock<Reporter> = OnceLock::new();
+
+/// Hooks run `program hook …` from now on (den-server, for the terminals of
+/// a server).
+pub fn report_through(program: &std::path::Path) {
+    let _ = REPORTER.set(Reporter::Command(program.to_string_lossy().into_owned()));
+}
 
 const MAX_BODY: usize = 64 * 1024;
 
@@ -34,7 +49,7 @@ const MAX_BODY: usize = 64 * 1024;
 pub fn start() -> Option<mpsc::UnboundedReceiver<AgentEvent>> {
     let listener = TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
-    PORT.set(port).ok()?;
+    REPORTER.set(Reporter::Http(port)).ok()?;
     let (tx, rx) = mpsc::unbounded();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -88,18 +103,23 @@ fn parse_path(path: &str, body: String) -> Option<AgentEvent> {
 }
 
 fn hooks_dir() -> PathBuf {
-    crate::settings::data_dir().join("hooks")
+    crate::dirs::data_dir().join("hooks")
 }
 
 /// Write terminal `pane`'s Claude Code hooks file; its path with forward
 /// slashes (shell-safe), or `None` while the listener is down.
 pub fn claude_hooks(pane: u64) -> Option<String> {
-    let port = *PORT.get()?;
+    let reporter = REPORTER.get()?;
     // `curl.exe`, not `curl`: in PowerShell that is an alias of Invoke-WebRequest.
     let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
     let hook = |kind: &str| {
-        let url = format!("http://127.0.0.1:{port}/claude/{pane}/{kind}");
-        serde_json::json!([{ "type": "command", "command": format!("{curl} -s -m 2 -d @- {url}") }])
+        let command = match reporter {
+            Reporter::Http(port) => {
+                format!("{curl} -s -m 2 -d @- http://127.0.0.1:{port}/claude/{pane}/{kind}")
+            }
+            Reporter::Command(program) => format!("'{program}' hook claude {pane} {kind}"),
+        };
+        serde_json::json!([{ "type": "command", "command": command }])
     };
     let settings = serde_json::json!({
         "hooks": {
@@ -120,7 +140,14 @@ pub fn claude_hooks(pane: u64) -> Option<String> {
 /// Codex appends its notification JSON as the last argument. Sending it
 /// directly with curl avoids a script and keeps each tab's session separate.
 pub fn codex_notify(pane: u64) -> Option<String> {
-    Some(codex_notify_at(pane, *PORT.get()?))
+    Some(match REPORTER.get()? {
+        Reporter::Http(port) => codex_notify_at(pane, *port),
+        // Codex puts its JSON after these.
+        Reporter::Command(program) => {
+            serde_json::json!([program, "hook", "codex", pane.to_string(), "done", "--body"])
+                .to_string()
+        }
+    })
 }
 
 fn codex_notify_at(pane: u64, port: u16) -> String {
@@ -151,7 +178,7 @@ pub fn inject(pane: u64, command: &str, wrapped: bool) -> String {
             None => return command.into(),
         },
         // Its "auto" method picks a bell for a terminal it does not know; OSC 9 carries the text.
-        "codex" if !(wrapped && head == "codex" && PORT.get().is_some()) => {
+        "codex" if !(wrapped && head == "codex" && REPORTER.get().is_some()) => {
             let mut extra = "-c tui.notifications=true -c tui.notification_method=osc9".to_string();
             if let Some(notify) = codex_notify(pane) {
                 extra.push_str(&format!(" -c 'notify={notify}'"));

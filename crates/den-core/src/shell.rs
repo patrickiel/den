@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use portable_pty::CommandBuilder;
 
-use crate::backend::agent;
+use crate::agent;
 
 const ZSHENV: &str = r#"# den's shell integration. Your own files load from $DEN_USER_ZDOTDIR.
 if [[ -f "$DEN_USER_ZDOTDIR/.zshenv" ]]; then
@@ -130,7 +130,7 @@ pub fn configure(cmd: &mut CommandBuilder, shell: &str, pane: u64, command: Opti
         return false;
     };
     // The files first: `cmd` is left alone unless they are there.
-    let dir = crate::settings::data_dir().join("shell").join(name);
+    let dir = crate::dirs::data_dir().join("shell").join(name);
     match name {
         "zsh" => {
             if !write(&dir, ZSH_FILES) {
@@ -185,7 +185,7 @@ exec "$s" -l
 /// `configure` does a local zsh or bash: the rc files, the Claude Code hooks
 /// file and the first command, carried over by `WSLENV`.
 pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>) {
-    let dir = crate::settings::data_dir().join("shell");
+    let dir = crate::dirs::data_dir().join("shell");
     let (zsh, bash) = (dir.join("zsh"), dir.join("bash"));
     if write(&zsh, ZSH_FILES) {
         cmd.env("DEN_ZSH", &zsh);
@@ -212,7 +212,7 @@ pub fn configure_wsl(cmd: &mut CommandBuilder, pane: u64, command: Option<&str>)
         "TERM",
         "COLORTERM",
     ];
-    cmd.env("WSLENV", crate::backend::wsl::wslenv(&names));
+    cmd.env("WSLENV", crate::wsl::wslenv(&names));
 }
 
 /// Write `files` into `dir`, each only when it differs.

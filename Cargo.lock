@@ -1478,18 +1478,17 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "cpal",
+ "den-core",
  "den-extension",
  "embed-resource",
  "encoding_rs",
+ "flate2",
  "futures",
- "globset",
  "gpui-component",
  "gpui-kit",
- "ignore",
  "image",
  "libloading",
  "minisign-verify",
- "notify 8.2.0",
  "pdfium-render",
  "portable-pty",
  "regex",
@@ -1500,9 +1499,26 @@ dependencies = [
  "smallvec",
  "symphonia",
  "symphonia-adapter-libopus",
- "trash",
  "ureq",
  "windows 0.62.2",
+ "windows-registry 0.6.1",
+]
+
+[[package]]
+name = "den-core"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "futures",
+ "globset",
+ "ignore",
+ "libc",
+ "notify 8.2.0",
+ "portable-pty",
+ "regex",
+ "serde",
+ "serde_json",
+ "trash",
  "windows-registry 0.6.1",
 ]
 
@@ -1511,6 +1527,15 @@ name = "den-extension"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "den-server"
+version = "0.1.0"
+dependencies = [
+ "den-core",
+ "futures",
  "serde_json",
 ]
 

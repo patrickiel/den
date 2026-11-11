@@ -30,7 +30,41 @@ env:
   TAG: ${{ inputs.tag }}
 
 jobs:
+  # den-server, which den puts on a server to open a folder there: one
+  # program per kind of Linux server, with nothing to look up where it lands
+  # (musl, linked in whole). Every den carries both, whatever it runs on.
+  server:
+    runs-on: ubuntu-22.04
+    env:
+      # Rust's own linker links for both: no cross compiler to install.
+      RUSTFLAGS: -C linker=rust-lld -C link-self-contained=yes
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server
+          cache-on-failure: true
+      - name: Build
+        run: |
+          mkdir server
+          for arch in x86_64 aarch64; do
+            cargo build -p den-server --profile server --target "$arch-unknown-linux-musl"
+            gzip -9 -c "target/$arch-unknown-linux-musl/server/den-server" > "server/den-server-linux-$arch.gz"
+          done
+          # The one this machine can run says it is whole.
+          target/x86_64-unknown-linux-musl/server/den-server --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server
+          path: server/*
+
   build:
+    needs: server
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +95,14 @@ jobs:
       - name: Linux libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libfontconfig1-dev libfreetype-dev libwayland-dev libasound2-dev cmake
+      - uses: actions/download-artifact@v8
+        with:
+          name: server
+          path: server
       - run: cargo build --release
+        env:
+          # den carries the den-server programs in this folder (build.rs).
+          DEN_SERVER_DIR: ${{ github.workspace }}/server
       - name: Package
         shell: pwsh
         run: |
@@ -113,6 +154,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          # The three apps; `server` is in them already.
+          pattern: "*-*"
           path: dist
           merge-multiple: true
       - name: Manifest

@@ -11,7 +11,14 @@ use std::{
     process::Command,
 };
 
-use super::{process, wsl};
+use crate::{
+    process,
+    remote::{
+        self, Connection, FaultKind, Route,
+        proto::{Request, Response},
+    },
+    wsl,
+};
 
 /// A git run that started: its exit code and output.
 #[derive(Clone, Debug)]
@@ -47,8 +54,16 @@ impl std::fmt::Display for Error {
 /// Run `git <args>` in `cwd`, feeding `stdin` if given. Ok even on a non-zero
 /// exit (the caller reads `code`); Err only when git could not start. A
 /// folder inside WSL gets the distribution's own git, with its config,
-/// hooks and credentials (Windows git there is slow and not trusted).
+/// hooks and credentials (Windows git there is slow and not trusted). A
+/// folder on a server gets the server's git, run by den-server there.
 pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Error> {
+    match remote::route(cwd) {
+        Route::Local => {}
+        Route::Remote(connection, cwd) => return run_there(&connection, cwd, args, stdin),
+        Route::Offline(host) => {
+            return Err(Error::Failed(remote::Error::Offline(host).to_string()));
+        }
+    }
     let wsl = wsl::split(cwd).filter(|_| cfg!(windows));
     let mut cmd = match &wsl {
         Some((distro, linux)) => {
@@ -90,6 +105,34 @@ pub fn run(cwd: &Path, args: &[&str], stdin: Option<&str>) -> Result<Output, Err
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr,
     })
+}
+
+/// `run` for a folder on a server.
+fn run_there(
+    connection: &Connection,
+    cwd: String,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<Output, Error> {
+    let request = Request::Git {
+        cwd,
+        args: args.iter().map(|arg| arg.to_string()).collect(),
+        stdin: stdin.map(str::to_string),
+    };
+    match connection.call(&request, Vec::new()) {
+        Ok((Response::Git { code, stderr }, stdout)) => Ok(Output {
+            code,
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr,
+        }),
+        Ok(_) => Err(Error::Failed(
+            "The server answered something else than was asked.".into(),
+        )),
+        Err(remote::Error::Failed(fault)) if fault.kind == FaultKind::GitMissing => {
+            Err(Error::NotFound)
+        }
+        Err(e) => Err(Error::Failed(e.to_string())),
+    }
 }
 
 /// Like `run`, but a non-zero exit is an error carrying git's message.
@@ -194,6 +237,10 @@ pub fn toplevel(dir: &Path) -> Result<Option<PathBuf>, Error> {
         return Ok(None);
     }
     let top = out.stdout.trim();
+    // On a server git names the folder as the server does.
+    if let Some((host, _)) = remote::split(dir) {
+        return Ok(Some(remote::join(&host, top)));
+    }
     // Inside WSL git names a Linux folder.
     if let Some((distro, _)) = wsl::split(dir).filter(|_| cfg!(windows)) {
         return Ok(wsl::to_windows(Some(&distro), top));
@@ -350,7 +397,7 @@ pub fn discard(top: &Path, files: &[FileStatus]) -> Result<(), Error> {
         with_pathspec(top, &["checkout", "-q"], &tracked)?;
     }
     if !untracked.is_empty() {
-        trash::delete_all(&untracked)
+        crate::fs::trash(&untracked)
             .map_err(|e| Error::Failed(format!("Could not move to the Recycle Bin: {e}")))?;
     }
     Ok(())

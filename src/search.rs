@@ -212,7 +212,8 @@ impl SearchView {
             });
             let (tx, mut rx) = mpsc::unbounded::<Vec<FileMatch>>();
             let worker_cancel = cancel.clone();
-            let worker = cx.background_executor().spawn(async move {
+            let remote = crate::remote::is_remote(&root);
+            let worker = crate::remote::spawn_on(remote, cx.background_executor(), move || {
                 search::search(&root, &query, &worker_cancel, |batch| {
                     tx.unbounded_send(batch).is_ok()
                 })
@@ -327,37 +328,52 @@ impl SearchView {
         };
         let (dirty, clean): (Vec<PathBuf>, Vec<PathBuf>) =
             paths.into_iter().partition(|p| (self.is_dirty)(p, cx));
-        let mut replaced = 0;
-        let mut failed = Vec::new();
-        for path in &clean {
-            let result = std::fs::read_to_string(path)
-                .map_err(|e| e.to_string())
-                .and_then(|text| {
-                    search::replace(&query, &text, &replacement).map(|done| (text, done))
-                })
-                .and_then(|(text, (new, n))| {
-                    if n > 0 && new != text {
-                        std::fs::write(path, new).map_err(|e| e.to_string())?;
+        // The files are read and written where they are: off the UI thread
+        // for a folder on a server.
+        let files = clean.len();
+        let done = crate::remote::spawn(&self.root, cx, move || {
+            let mut replaced = 0;
+            let mut failed = Vec::new();
+            for path in &clean {
+                let result = crate::backend::fs::read_to_string(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| {
+                        search::replace(&query, &text, &replacement).map(|done| (text, done))
+                    })
+                    .and_then(|(text, (new, n))| {
+                        if n > 0 && new != text {
+                            crate::backend::fs::write(path, new.into_bytes())
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(n)
+                    });
+                match result {
+                    Ok(n) => replaced += n,
+                    Err(err) => {
+                        failed.push(format!("{}: {err}", crate::backend::remote::display(path)))
                     }
-                    Ok(n)
-                });
-            match result {
-                Ok(n) => replaced += n,
-                Err(err) => failed.push(format!("{}: {err}", path.display())),
+                }
             }
-        }
-        let mut note = format!("Replaced {replaced} matches in {} files.", clean.len());
-        if !dirty.is_empty() {
-            note.push_str(&format!(
-                " {} files with unsaved changes were left alone.",
-                dirty.len()
-            ));
-        }
-        if !failed.is_empty() {
-            note.push_str(&format!(" Failed: {}", failed.join("; ")));
-        }
-        crate::toast::push(window, note, cx);
-        self.search(cx);
+            (replaced, failed)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let (replaced, failed) = done.await;
+            let mut note = format!("Replaced {replaced} matches in {files} files.");
+            if !dirty.is_empty() {
+                note.push_str(&format!(
+                    " {} files with unsaved changes were left alone.",
+                    dirty.len()
+                ));
+            }
+            if !failed.is_empty() {
+                note.push_str(&format!(" Failed: {}", failed.join("; ")));
+            }
+            _ = this.update_in(cx, |this, window, cx| {
+                crate::toast::push(window, note, cx);
+                this.search(cx);
+            });
+        })
+        .detach();
     }
 
     fn confirm_replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {

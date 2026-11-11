@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+pub(crate) use den_core::dirs::{data_dir, download_dir};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
@@ -545,8 +546,9 @@ fn apply_theme(cx: &mut App) {
 fn session_key(root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     let path = root.to_string_lossy();
-    // Linux tells paths apart by case; Windows and macOS do not.
-    if cfg!(target_os = "linux") {
+    // Linux tells paths apart by case; Windows and macOS do not. A folder
+    // on a server is told apart as the server does.
+    if cfg!(target_os = "linux") || crate::backend::remote::split(root).is_some() {
         path.hash(&mut hasher);
     } else {
         path.to_lowercase().hash(&mut hasher);
@@ -556,11 +558,24 @@ fn session_key(root: &Path) -> String {
 
 /// Short names for `paths`: each its folder name, with as many parent folders
 /// in front as it takes to tell it from the others (`a\debug`, `b\debug`).
+/// A folder on a server has the server after its name (`proj — box`), and
+/// is told from the others there the same way.
 pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
+    // Each path's server, when it is on one.
+    let hosts: Vec<Option<String>> = paths
+        .iter()
+        .map(|path| crate::backend::remote::split(path).map(|(host, _)| host.to_string()))
+        .collect();
     let parts: Vec<Vec<String>> = paths
         .iter()
-        .map(|path| {
-            path.components()
+        .map(|path| match crate::backend::remote::split(path) {
+            Some((_, there)) => there
+                .rsplit('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => path
+                .components()
                 .rev()
                 .map(|c| {
                     c.as_os_str()
@@ -569,13 +584,17 @@ pub fn unique_names(paths: &[PathBuf]) -> Vec<String> {
                         .to_string()
                 })
                 .filter(|s| !s.is_empty())
-                .collect()
+                .collect(),
         })
         .collect();
     let tail = |ix: usize, depth: usize| -> String {
         let mut names: Vec<&str> = parts[ix].iter().take(depth).map(String::as_str).collect();
         names.reverse();
-        names.join(std::path::MAIN_SEPARATOR_STR)
+        match &hosts[ix] {
+            Some(host) if names.is_empty() => format!("/ \u{2014} {host}"),
+            Some(host) => format!("{} \u{2014} {host}", names.join("/")),
+            None => names.join(std::path::MAIN_SEPARATOR_STR),
+        }
     };
     let mut depth = vec![1; paths.len()];
     // Lengthen every name that clashes with another until none do (or a path
@@ -620,36 +639,21 @@ pub fn strip_verbatim(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Where den keeps its files: `%APPDATA%\den` on Windows,
-/// `~/Library/Application Support/den` on macOS, `~/.config/den` elsewhere.
-/// A debug build keeps its own, `den-dev` beside it, so working on den
-/// neither reads nor changes the installed app's settings and state.
-pub(crate) fn data_dir() -> PathBuf {
-    app_dir(if cfg!(debug_assertions) {
-        "den-dev"
-    } else {
-        "den"
-    })
+/// A folder to open, as den names it: the path with links resolved, for one
+/// on this machine. One on a server is named by the server (when it is
+/// picked), and nothing on this machine's disk is asked about it.
+pub fn local_root(root: PathBuf) -> PathBuf {
+    if crate::backend::remote::split(&root).is_some() {
+        return root;
+    }
+    strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root))
 }
 
-/// The installed app's folder, for downloads a debug build shares with it
-/// (the AI runtime and models, the formatters) rather than fetching again.
-pub(crate) fn download_dir() -> PathBuf {
-    app_dir("den")
-}
-
-fn app_dir(name: &str) -> PathBuf {
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else if cfg!(target_os = "macos") {
-        home().map(|home| home.join("Library").join("Application Support"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home().map(|home| home.join(".config")))
-    };
-    base.unwrap_or_else(|| PathBuf::from(".")).join(name)
+/// Whether `path` is a folder den can open: one on this machine's disk, or
+/// one on a server, which only the server can tell (it opens, connected or
+/// not, and says so).
+fn is_folder(path: &Path) -> bool {
+    crate::backend::remote::split(path).is_some() || path.is_dir()
 }
 
 /// The most recent folder that still exists and no other den has open,
@@ -659,7 +663,7 @@ pub fn last_folder() -> Option<PathBuf> {
     let recent: Vec<PathBuf> = read_json::<AppState>("state.json")?
         .recent
         .into_iter()
-        .filter(|p| p.is_dir())
+        .filter(|p| is_folder(p))
         .collect();
     recent
         .iter()
@@ -684,7 +688,7 @@ pub fn saved_windows() -> Vec<OpenWindow> {
             let roots: Vec<PathBuf> = window
                 .roots
                 .into_iter()
-                .filter(|p| p.is_dir() && !FolderLock::held_elsewhere(p))
+                .filter(|p| is_folder(p) && !FolderLock::held_elsewhere(p))
                 .collect();
             if roots.is_empty() {
                 return None;
@@ -959,6 +963,52 @@ mod tests {
         assert_eq!(
             session_key(Path::new(r"c:\users\ME\project")),
             session_key(Path::new(r"C:\Users\me\project"))
+        );
+    }
+
+    #[test]
+    fn folders_on_a_server_keep_their_case_and_their_own_sessions() {
+        use crate::backend::remote;
+        let host = remote::HostId::new("box").unwrap();
+        let (upper, lower) = (
+            remote::join(&host, "/home/me/Proj"),
+            remote::join(&host, "/home/me/proj"),
+        );
+        assert_ne!(session_key(&upper), session_key(&lower));
+        assert_ne!(session_key(&lower), session_key(Path::new("/home/me/proj")));
+        assert_ne!(crate::repo::key(&upper), crate::repo::key(&lower));
+        let other = remote::join(&remote::HostId::new("box2").unwrap(), "/home/me/proj");
+        assert_ne!(session_key(&lower), session_key(&other));
+        // In state.json, like the keys of the folders on this machine.
+        #[cfg(unix)]
+        assert_eq!(session_key(&lower), "4332a2fa1f0717a2");
+        #[cfg(target_os = "linux")]
+        assert_eq!(session_key(Path::new("/home/me/proj")), "dc6c847de71883f1");
+    }
+
+    #[test]
+    fn folders_on_servers_are_named_with_their_server() {
+        use crate::backend::remote;
+        let (one, two) = (
+            remote::HostId::new("box").unwrap(),
+            remote::HostId::new("me@far").unwrap(),
+        );
+        let names = super::unique_names(&[
+            PathBuf::from("/projects/app"),
+            remote::join(&one, "/home/me/app"),
+            remote::join(&one, "/srv/app"),
+            remote::join(&two, "/home/me/app"),
+            remote::join(&two, "/"),
+        ]);
+        assert_eq!(
+            names,
+            [
+                "app",
+                "me/app \u{2014} box",
+                "srv/app \u{2014} box",
+                "app \u{2014} me@far",
+                "/ \u{2014} me@far"
+            ]
         );
     }
 

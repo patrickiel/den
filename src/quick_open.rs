@@ -197,14 +197,13 @@ pub fn open(
         .spawn(cx, {
             let (root, model, state) = (root.clone(), model.clone(), state.clone());
             async move |cx| {
-                let walked = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let mut files = crate::backend::search::files(&root, MAX_FILES);
-                        files.sort_unstable();
-                        files.into_iter().map(File::new).collect::<Vec<_>>()
-                    })
-                    .await;
+                let remote = crate::remote::is_remote(&root);
+                let walked = crate::remote::spawn_on(remote, cx.background_executor(), move || {
+                    let mut files = crate::backend::search::files(&root, MAX_FILES);
+                    files.sort_unstable();
+                    files.into_iter().map(File::new).collect::<Vec<_>>()
+                })
+                .await;
                 _ = cx.update(|window, cx| {
                     let mut model = model.borrow_mut();
                     model.files = walked;

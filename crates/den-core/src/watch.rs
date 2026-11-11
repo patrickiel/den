@@ -16,13 +16,23 @@ use futures::{
 };
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
 
-use super::{process, wsl};
+use crate::{
+    process,
+    remote::{
+        self, Route,
+        proto::{Item, Request},
+    },
+    wsl,
+};
 
 /// Keeps the watch alive; dropping it stops it.
 pub struct Watcher {
     _native: Option<RecommendedWatcher>,
     /// The watch running inside WSL, for a folder there.
     wsl: Option<Child>,
+    /// The watch den-server keeps, for a folder on a server; dropping it
+    /// tells the server to stop.
+    _remote: Option<remote::Stream>,
 }
 
 impl Drop for Watcher {
@@ -59,6 +69,28 @@ pub fn watch(root: &Path) -> Result<(Watcher, UnboundedReceiver<PathBuf>), Strin
         return Err("A drive root is not watched.".into());
     }
     let (tx, rx) = unbounded();
+    match remote::route(root) {
+        Route::Local => {}
+        Route::Remote(connection, posix) => {
+            let host = connection.host().clone();
+            let stream = connection
+                .stream(&Request::Watch { root: posix }, move |item, _| {
+                    if let Item::Changed { paths } = item {
+                        for path in paths {
+                            let _ = tx.unbounded_send(remote::join(&host, &path));
+                        }
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            let watcher = Watcher {
+                _native: None,
+                wsl: None,
+                _remote: Some(stream),
+            };
+            return Ok((watcher, rx));
+        }
+        Route::Offline(host) => return Err(remote::Error::Offline(host).to_string()),
+    }
     // Windows reports no changes from inside WSL.
     if cfg!(windows)
         && let Some((distro, linux)) = wsl::split(root)
@@ -84,6 +116,7 @@ pub fn watch(root: &Path) -> Result<(Watcher, UnboundedReceiver<PathBuf>), Strin
         Watcher {
             _native: Some(inner),
             wsl: None,
+            _remote: None,
         },
         rx,
     ))
@@ -131,6 +164,7 @@ fn watch_wsl(
     Ok(Watcher {
         _native: None,
         wsl: Some(child),
+        _remote: None,
     })
 }
 

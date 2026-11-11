@@ -1,7 +1,8 @@
 //! The work den does off the UI thread: search, git, watching the disk,
-//! running extensions, downloads.
+//! running extensions, downloads. What a folder needs done where it is
+//! (git, search, watching, its shells) lives in den-core, which den-server
+//! runs on a server too.
 
-pub mod agent;
 pub mod ai;
 pub mod audio;
 pub mod avatars;
@@ -9,13 +10,10 @@ pub mod commit_ai;
 pub mod dev_server;
 pub mod extensions;
 pub mod format;
-pub mod git;
 pub mod http;
 pub mod pdf;
-pub mod process;
-pub mod search;
-pub mod watch;
-pub mod wsl;
+
+pub use den_core::{agent, fs, git, process, remote, search, watch, wsl};
 
 use std::path::{Path, PathBuf};
 

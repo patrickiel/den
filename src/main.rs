@@ -38,6 +38,7 @@ mod panels;
 mod pdf;
 mod preset_icon;
 mod quick_open;
+mod remote;
 mod repo;
 mod saved_layout;
 mod scm;
@@ -83,6 +84,7 @@ actions!(
         FocusUp,
         FocusDown,
         OpenFolderInNewWindow,
+        OpenRemoteFolder,
         SaveLayout,
         ResetLayout,
         CheckForUpdates,
@@ -205,6 +207,24 @@ fn start_folder() -> PathBuf {
         return last;
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// den's path for the folder `url` (`ssh://me@box/srv/app`) names, asking
+/// the server: the shell den was started from waits for it, and reads why
+/// not.
+fn remote_root(url: &str) -> Option<PathBuf> {
+    if !remote::enabled() {
+        eprintln!(
+            "den: folders on servers are not ready yet ({}=1 to try them).",
+            remote::ENABLED_ENV
+        );
+        return None;
+    }
+    let found = remote::destination(url, "").and_then(|(host, path)| {
+        eprintln!("den: connecting to {host}\u{2026}");
+        remote::find_folder_now(&host, &path)
+    });
+    found.map_err(|message| eprintln!("den: {message}")).ok()
 }
 
 /// Whether den was started from a shell (see [`start_folder`]).
@@ -414,6 +434,7 @@ fn on_unfocused_actions(cx: &mut App) {
         forward::<FocusUp>,
         forward::<FocusDown>,
         forward::<OpenFolderInNewWindow>,
+        forward::<OpenRemoteFolder>,
         forward::<SaveLayout>,
         forward::<ResetLayout>,
         forward::<CheckForUpdates>,
@@ -439,108 +460,6 @@ fn on_unfocused_actions(cx: &mut App) {
     ];
     for register in forwarded {
         register(cx);
-    }
-}
-
-/// Started from the Finder or the Dock, a Mac app gets the system's bare
-/// PATH: no Homebrew, no `~/.cargo/bin`, so no `claude`, `pnpm` or `rustfmt`
-/// for Source Control, Format Document and the presets. Started from a Linux
-/// desktop's launcher, den gets the session's PATH, which lacks what
-/// `~/.bashrc` adds (nvm, pnpm, volta). Take the login shell's PATH over, in
-/// front of den's own. Run before anything else starts: it writes the
-/// environment.
-#[cfg(unix)]
-fn inherit_login_path() {
-    use std::{
-        io::Read as _,
-        process::{Command, Stdio},
-        time::{Duration, Instant},
-    };
-    let current: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    // Started from a terminal, PATH is already the shell's: nothing to do.
-    // A Linux session's PATH has more than the system folders in it anyway,
-    // so there the terminal itself tells.
-    let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-    let from_terminal = if cfg!(target_os = "macos") {
-        current
-            .iter()
-            .any(|dir| !system.iter().any(|s| dir.as_os_str() == *s))
-    } else {
-        std::io::IsTerminal::is_terminal(&std::io::stdin())
-    };
-    if from_terminal {
-        return;
-    }
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                "/bin/zsh"
-            } else {
-                "/bin/bash"
-            }
-            .into()
-        });
-    // An interactive login shell, as a terminal starts one, so PATH set in
-    // .zshrc or .bashrc counts too; markers in case the profile prints something.
-    let fish = std::path::Path::new(&shell)
-        .file_name()
-        .is_some_and(|name| name == "fish");
-    let script = if fish {
-        "printf '%s' \"<den-path>\"(string join : $PATH)\"</den-path>\""
-    } else {
-        "printf '%s' \"<den-path>$PATH</den-path>\""
-    };
-    let Ok(mut child) = Command::new(&shell)
-        .args(["-l", "-i", "-c", script])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-    // A profile that waits for a terminal must not hold the app up.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return;
-            }
-        }
-    }
-    let mut text = String::new();
-    if child
-        .stdout
-        .take()
-        .and_then(|mut out| out.read_to_string(&mut text).ok())
-        .is_none()
-    {
-        return;
-    }
-    let Some(login) = text
-        .split("<den-path>")
-        .nth(1)
-        .and_then(|rest| rest.split("</den-path>").next())
-    else {
-        return;
-    };
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(login).collect();
-    for dir in current {
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    }
-    if let Ok(joined) = std::env::join_paths(dirs) {
-        // SAFETY: called first thing in `main`, before any other thread exists.
-        unsafe { std::env::set_var("PATH", joined) };
     }
 }
 
@@ -611,7 +530,7 @@ fn wait_for_exit(pid: u32) -> bool {
 
 fn main() {
     #[cfg(unix)]
-    inherit_login_path();
+    den_core::login_path::inherit();
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     // A restart (see `restart`): once the den before has quit.
     if args.len() >= 2 && args[0] == "--wait-for" {
@@ -646,12 +565,16 @@ fn main() {
                 .into_iter()
                 // Explorer's "Open with den" on a drive passes "C:\", whose trailing
                 // backslash escapes the closing quote: the folder arrives as C:".
-                .map(
-                    |arg| match arg.to_str().and_then(|arg| arg.strip_suffix('"')) {
+                .filter_map(|arg| match arg.to_str() {
+                    // A folder on a server: found there first (den says why
+                    // not, and opens nothing for it).
+                    Some(url) if url.starts_with("ssh://") => remote_root(url),
+                    Some(text) => Some(match text.strip_suffix('"') {
                         Some(drive) => PathBuf::from(format!("{drive}\\")),
-                        None => PathBuf::from(arg),
-                    },
-                )
+                        None => PathBuf::from(text),
+                    }),
+                    None => Some(PathBuf::from(arg)),
+                })
                 .collect();
             vec![(roots, 0)]
         }
@@ -668,10 +591,7 @@ fn main() {
     let windows: Vec<(Vec<PathBuf>, usize)> = windows
         .into_iter()
         .filter_map(|(roots, active)| {
-            let roots: Vec<PathBuf> = roots
-                .into_iter()
-                .map(|root| settings::strip_verbatim(std::fs::canonicalize(&root).unwrap_or(root)))
-                .collect();
+            let roots: Vec<PathBuf> = roots.into_iter().map(settings::local_root).collect();
             let front = roots.get(active).cloned();
             let roots = instance::hand_off(roots);
             if roots.is_empty() {
@@ -692,6 +612,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             settings::init(cx);
+            remote::init(cx);
             file_icon::init(cx);
             panels::init(cx);
             frame::init(cx);

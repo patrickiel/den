@@ -1613,7 +1613,7 @@ impl Workspace {
                     ws.open_file(open.clone(), false, window, cx)
                 })
                 .icon(Icon::new(IconName::File))
-                .disabled(!path.is_file()),
+                .disabled(!crate::remote::is_file_now(&path)),
             );
             menu = path_items(menu, this, &path, &self.root);
         } else if let Ok(terminal) = view.clone().downcast::<TerminalPanel>() {
@@ -1795,13 +1795,16 @@ fn path_items(
     path: &std::path::Path,
     root: &std::path::Path,
 ) -> PopupMenu {
-    let full = path.display().to_string();
+    // A file on a server: its path there; this machine's file manager has
+    // nothing to show of it.
+    let remote = crate::remote::is_remote(path);
+    let full = crate::remote::plain(path);
     let rel = path
         .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/");
-    let (on_disk, inside) = (path.exists(), path.starts_with(root));
+    let (on_disk, inside) = (remote || path.exists(), path.starts_with(root));
     let (reveal, show) = (path.to_path_buf(), path.to_path_buf());
     menu.item(
         menu_action(this, "Copy Path", move |_, _, cx| {
@@ -1820,7 +1823,7 @@ fn path_items(
             crate::explorer::reveal(&reveal, cx)
         })
         .icon(Icon::new(IconName::FolderOpen))
-        .disabled(!on_disk),
+        .disabled(!on_disk || remote),
     )
     .item(
         menu_action(this, "Reveal in Explorer View", move |ws, window, cx| {
