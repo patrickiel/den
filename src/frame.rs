@@ -1191,9 +1191,7 @@ impl TabsMenu {
         }
         rows.push(MenuRow::OpenFolder { new_window: false });
         rows.push(MenuRow::OpenFolder { new_window: true });
-        if crate::remote::enabled() {
-            rows.push(MenuRow::OpenRemote);
-        }
+        rows.push(MenuRow::OpenRemote);
         self.rows = rows;
     }
 

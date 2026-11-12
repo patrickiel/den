@@ -3520,15 +3520,13 @@ impl Workspace {
                         |this, window, cx| this.prompt_open_folder(true, window, cx),
                         cx,
                     ))
-                    .when(crate::remote::enabled(), |menu| {
-                        menu.item(item(
-                            this,
-                            "Open Remote Folder…",
-                            &OpenRemoteFolder,
-                            |this, window, cx| this.prompt_open_remote(window, cx),
-                            cx,
-                        ))
-                    })
+                    .item(item(
+                        this,
+                        "Open Remote Folder…",
+                        &OpenRemoteFolder,
+                        |this, window, cx| this.prompt_open_remote(window, cx),
+                        cx,
+                    ))
                     .item(item(
                         this,
                         "Open Files…",

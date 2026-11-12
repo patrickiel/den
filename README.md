@@ -61,13 +61,13 @@ cd den
 cargo run
 ```
 
-### Folders on a server (in the works)
+### Folders on a server
 
-den can open a folder on a Linux server over SSH: the window stays on your machine, and a small `den-server` that den puts on the server runs the terminals, git, search and file access there. Terminals and agents keep running on the server when den closes or the connection drops, and den comes back to them. It is switched off until it has seen more servers; to try it:
+den can open a folder on a Linux server over SSH: the window stays on your machine, and a small `den-server` that den puts on the server runs the terminals, git, search and file access there. Terminals and agents keep running on the server when den closes or the connection drops, and den comes back to them. From a source build:
 
 ```sh
 cargo build -p den-server
-DEN_REMOTE=1 cargo run -- ssh://me@host/~/project
+cargo run -- ssh://me@host/~/project
 ```
 
-`DEN_REMOTE=1` also adds **Open Remote Folder…** to the folder menu, the File menu and the command palette. den connects with your own `ssh` (its config, keys and agent) and never asks for a password: a server that needs one, or a host key to accept, wants one `ssh host` from a terminal first. A development build puts the `den-server` built beside it on servers of its own kind of machine; releases carry one for x86_64 and one for aarch64 (see `build.rs`).
+**Open Remote Folder…** in the folder menu, the File menu and the command palette does the same. den connects with your own `ssh` (its config, keys and agent) and never asks for a password: a server that needs one, or a host key to accept, wants one `ssh host` from a terminal first. A development build puts the `den-server` built beside it on servers of its own kind of machine; releases carry one for x86_64 and one for aarch64 (see `build.rs`).

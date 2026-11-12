@@ -18,15 +18,8 @@ use gpui_kit::*;
 
 use crate::backend::remote::{self, HostId, ssh};
 
-/// Set, the remote-folder commands show: the work on them is not done.
-pub const ENABLED_ENV: &str = "DEN_REMOTE";
 /// The den-server to put on servers, in place of the one built beside den.
 const SERVER_ENV: &str = "DEN_SERVER_BIN";
-
-/// Whether folders on servers are offered at all.
-pub fn enabled() -> bool {
-    std::env::var_os(ENABLED_ENV).is_some_and(|v| !v.is_empty() && v != "0")
-}
 
 /// Seconds den waits before each try to get a lost connection back; after
 /// the last, the banner's Retry is the way.

@@ -644,15 +644,13 @@ fn den_commands() -> Vec<Command> {
             &[&mac],
         ));
     }
-    if crate::remote::enabled() {
-        list.push(command(
-            "den.openRemoteFolder",
-            "File: Open Remote Folder…",
-            OpenRemoteFolder,
-            &[],
-            &[],
-        ));
-    }
+    list.push(command(
+        "den.openRemoteFolder",
+        "File: Open Remote Folder…",
+        OpenRemoteFolder,
+        &[],
+        &[],
+    ));
     list.push(command(
         "den.openLastTab",
         "View: Open Last Tab",

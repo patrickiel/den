@@ -213,13 +213,6 @@ fn start_folder() -> PathBuf {
 /// the server: the shell den was started from waits for it, and reads why
 /// not.
 fn remote_root(url: &str) -> Option<PathBuf> {
-    if !remote::enabled() {
-        eprintln!(
-            "den: folders on servers are not ready yet ({}=1 to try them).",
-            remote::ENABLED_ENV
-        );
-        return None;
-    }
     let found = remote::destination(url, "").and_then(|(host, path)| {
         eprintln!("den: connecting to {host}\u{2026}");
         remote::find_folder_now(&host, &path)
