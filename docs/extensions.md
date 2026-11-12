@@ -5,7 +5,6 @@ This guide covers writing, testing, publishing and listing an extension for den.
 | Example | What it shows |
 | --- | --- |
 | [`hello-extension`](../examples/hello-extension) | The minimum: a toast, a setting, and a command with a keybinding that uses the active file |
-| [`workspace-stats`](https://github.com/patrickiel/workspace-stats) | A worker thread, settings applied live, state across restarts, saves counted, a clean shutdown |
 | [`task-buttons`](https://github.com/patrickiel/task-buttons) | Title-bar buttons, running commands in a terminal, opening files, a `choice` setting |
 | [`git-graph`](https://github.com/patrickiel/git-graph) | A view (a tab of its own) with a graph column, badges, menus and details; prompts; diffs |
 
@@ -253,7 +252,7 @@ fn config(settings: serde_json::Map<String, Value>) -> Config {
 // In event:     if name == events::SETTINGS_CHANGED { if let Value::Object(s) = data["settings"].take() { self.config = config(s); } }
 ```
 
-Apply a change straight away; the user expects it without a restart. `workspace-stats` shows how to pass a new config to a worker thread.
+Apply a change straight away; the user expects it without a restart. `task-buttons` shows how to pass a new setting to a worker thread.
 
 ## Commands and keybindings
 
@@ -391,14 +390,14 @@ fn deactivate(&mut self) {
 }
 ```
 
-- **Timers and polling:** `recv_timeout` on the worker's channel does double duty. It waits for the next job and for the next tick. `workspace-stats` uses it for break reminders, `task-buttons` to notice edits to `tasks.json`.
-- **Shutdown is short:** den waits about **one second** for all extensions to deactivate, then quits anyway. Make long work check a stop flag (an `Arc<AtomicBool>`) so `deactivate` can join quickly. `workspace-stats` stops a half-done scan this way.
+- **Timers and polling:** `recv_timeout` on the worker's channel does double duty. It waits for the next job and for the next tick. `task-buttons` uses it to notice edits to `tasks.json`, `git-graph` to notice changes in the repository.
+- **Shutdown is short:** den waits about **one second** for all extensions to deactivate, then quits anyway. Make long work check a stop flag (an `Arc<AtomicBool>`) so `deactivate` can join quickly.
 - **State:** keep it in `Context::data_dir`, which survives updates. Write through a temporary file and rename it, so quitting halfway never leaves half a file.
 - **Settings vs state:** what the user chooses belongs in `settings` (den stores it). What the extension learns belongs in `data_dir`.
 
 ## Testing and debugging
 
-**Unit tests.** Keep the logic out of the `Extension` impl, in plain functions you can test without den: parsing, deciding what to show, building command lines. `cargo test` works on a `cdylib`. A test can read your manifest with `den_extension::Manifest::parse(include_str!("../extension.json"))` to check that your defaults agree with it (`workspace-stats` does this).
+**Unit tests.** Keep the logic out of the `Extension` impl, in plain functions you can test without den: parsing, deciding what to show, building command lines. `cargo test` works on a `cdylib`. A test can read your manifest with `den_extension::Manifest::parse(include_str!("../extension.json"))` to check that your defaults agree with it (`git-graph` does this).
 
 **Side-loading.** Build in release and copy the folder in (see the [Quick start](#quick-start)), or in den's repository run:
 
