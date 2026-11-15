@@ -203,6 +203,9 @@ pub struct ScmView {
     selection_group: Option<Group>,
     /// Where a Shift+click range starts, by position in the group.
     anchor: Option<usize>,
+    /// The change row under the pointer, by its element id: only it shows
+    /// its buttons, so the others give that room to the name and folder.
+    hovered_row: Option<SharedString>,
     /// The list's keys: Space stages or unstages, Delete discards.
     list_focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -236,6 +239,7 @@ impl ScmView {
             avatar_pending: Default::default(),
             selection: Vec::new(),
             selection_group: None,
+            hovered_row: None,
             anchor: None,
             list_focus: cx.focus_handle(),
             _subscriptions,
@@ -1099,9 +1103,13 @@ impl ScmView {
             let id = SharedString::from(format!("{title}-{ix}"));
             // The closures keep the path and look the file up when clicked.
             let (rel, path, conflict) = (file.rel.clone(), file.path.clone(), file.conflict);
+            // Only the hovered row has buttons. Toggling display with
+            // group_hover instead panics in gpui when the hover changes
+            // between prepaint and paint.
+            let hovered = self.hovered_row.as_ref() == Some(&id);
             let row_buttons = h_flex()
-                .invisible()
-                .group_hover(id.clone(), |this| this.visible())
+                .flex_none()
+                .when(!hovered, |this| this.hidden())
                 .child({
                     let path = path.clone();
                     Button::new("open")
@@ -1150,7 +1158,6 @@ impl ScmView {
             list = list.child(
                 h_flex()
                     .id(id.clone())
-                    .group(id)
                     .pl(px(24.))
                     .pr(GUTTER)
                     .h(px(22.))
@@ -1159,6 +1166,19 @@ impl ScmView {
                     .when(selected, |this| this.bg(theme.list_active))
                     .when(!selected, |this| {
                         this.hover(|this| this.bg(theme.list_hover))
+                    })
+                    .on_hover({
+                        let id = id.clone();
+                        cx.listener(move |this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                this.hovered_row = Some(id.clone());
+                            } else if this.hovered_row.as_ref() == Some(&id) {
+                                this.hovered_row = None;
+                            } else {
+                                return;
+                            }
+                            cx.notify();
+                        })
                     })
                     .on_click({
                         let rels = rels.clone();
@@ -1186,8 +1206,11 @@ impl ScmView {
                     })
                     .child(crate::file_icon::render(&file.rel, 16., cx))
                     .child(
+                        // Shrinks (after the folder) rather than push the
+                        // status letter out when the buttons show.
                         div()
-                            .flex_none()
+                            .flex_shrink(1.)
+                            .min_w_0()
                             .max_w(relative(0.6))
                             .truncate()
                             .text_color(color)
