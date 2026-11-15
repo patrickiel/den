@@ -1165,7 +1165,7 @@ impl Workspace {
                                 })
                                 .child(
                                     div()
-                                        .max_w(px(220.))
+                                        .max_w(px(160.))
                                         .truncate()
                                         .when(preview, |this| this.italic())
                                         .child(label.clone()),
