@@ -9,7 +9,7 @@ members = [
 
 [package]
 name = "den"
-version = "0.46.1"
+version = "0.46.2"
 edition = "2024"
 description = "A project terminal for Windows, macOS and Linux: split panes, editor, explorer, search and source control"
 
