@@ -19,6 +19,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenu},
+    scroll::{ScrollableElement as _, Scrollbar},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -770,7 +771,8 @@ impl Explorer {
                         .w_full()
                         .h(px(22.))
                         .pl(px(8. + 12. * row.depth as f32))
-                        .pr_2()
+                        // Its git letter clear of the scrollbar, which overlays the rows.
+                        .pr(Scrollbar::width())
                         .gap_1()
                         .text_sm()
                         .border_1()
@@ -939,6 +941,7 @@ impl Render for Explorer {
                     .key_context("Explorer")
                     .track_focus(&self.focus_handle)
                     .on_key_down(cx.listener(Self::on_key_down))
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .child(
@@ -951,7 +954,8 @@ impl Render for Explorer {
                         )
                         .track_scroll(&self.scroll)
                         .size_full(),
-                    ),
+                    )
+                    .vertical_scrollbar(&self.scroll),
             )
     }
 }
