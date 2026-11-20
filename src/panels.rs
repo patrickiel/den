@@ -4,9 +4,10 @@
 //! `dump` saved: the file's here, the others' with their kinds.
 
 use std::{
-    path::{Path, PathBuf},
+    collections::{BTreeSet, HashMap},
+    path::{Component, Path, PathBuf},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use gpui_kit::assets::IconName;
@@ -148,6 +149,8 @@ pub struct FilePanel {
     audio: Option<Entity<crate::audio::AudioView>>,
     /// The last SVG preview and the text it was made from.
     svg: Option<(SharedString, Arc<Image>)>,
+    /// The pictures shown from files: an image's own, a Markdown preview's.
+    pictures: Pictures,
     /// The encoding the file was read in and is saved in.
     encoding: String,
     /// Tabs or spaces, and the width: detected, or picked in the status bar.
@@ -203,11 +206,7 @@ impl FilePanel {
             return this;
         }
         let (text, encoding, error) = if look.binary() {
-            (
-                String::new(),
-                "utf8".to_string(),
-                (!path.is_file()).then(|| SharedString::from("The file is gone")),
-            )
+            (String::new(), "utf8".to_string(), gone(&path))
         } else {
             match crate::encoding::read(&path, None) {
                 Ok((text, encoding)) => (text, encoding, None),
@@ -348,6 +347,7 @@ impl FilePanel {
             pdf,
             audio,
             svg: None,
+            pictures: Pictures::default(),
             encoding,
             indent,
             crlf,
@@ -550,6 +550,9 @@ impl FilePanel {
             audio.update(cx, |audio, cx| audio.reload(cx));
         }
         if self.look.binary() || self.untitled {
+            if self.look.binary() && !self.remote {
+                self.error = gone(&self.path);
+            }
             return cx.notify();
         }
         if self.remote {
@@ -585,6 +588,14 @@ impl FilePanel {
             return;
         };
         self.take_from_disk(text, window, cx);
+    }
+
+    /// Files changed on disk (`changed`: the files, and folders moved or
+    /// removed whole): the pictures this tab shows from them are read again.
+    pub fn pictures_changed(&mut self, changed: &BTreeSet<PathBuf>, cx: &mut Context<Self>) {
+        if self.pictures.changed(changed, cx) {
+            cx.notify();
+        }
     }
 
     /// Show `text`, the file as it is on disk now, keeping the cursor.
@@ -1113,12 +1124,15 @@ impl FilePanel {
                                 .scrollable(true)
                                 .selectable(true)
                                 .size_full()
-                                .image_source(move |url| {
-                                    let url = url.to_string();
-                                    if url.contains("://") || url.starts_with("data:") {
-                                        ImageSource::from(url)
-                                    } else {
-                                        ImageSource::from(dir.join(url.trim_start_matches("./")))
+                                .image_source({
+                                    let pictures = self.pictures.clone();
+                                    move |url| {
+                                        let url = url.to_string();
+                                        if url.contains("://") || url.starts_with("data:") {
+                                            ImageSource::from(url)
+                                        } else {
+                                            pictures.source(&dir.join(url))
+                                        }
                                     }
                                 }),
                         ),
@@ -1147,7 +1161,7 @@ impl FilePanel {
                 .size_full()
                 .children(self.audio.clone())
                 .into_any_element(),
-            _ => picture(img(self.path.clone()), cx),
+            _ => picture(img(self.pictures.source(&self.path)), cx),
         }
     }
 
@@ -1819,6 +1833,81 @@ fn editor_menu(menu: PopupMenu, focus: FocusHandle, this: WeakEntity<FilePanel>)
         )
         .separator()
         .menu("Format Document", Box::new(crate::FormatDocument))
+}
+
+/// What the tab of a picture, PDF or audio file says once its file is gone.
+fn gone(path: &Path) -> Option<SharedString> {
+    (!path.is_file()).then(|| "The file is gone".into())
+}
+
+/// The pictures a tab shows from files on disk, each with what was last
+/// drawn of it. gpui reads a path once and keeps the picture for good, so
+/// that is dropped when a tab first shows the file and whenever the file
+/// changes; the last picture stays on screen until the new one is decoded.
+#[derive(Clone, Default)]
+struct Pictures(Arc<Mutex<HashMap<PathBuf, Shown>>>);
+
+#[derive(Default)]
+struct Shown {
+    /// Read from disk since this tab first showed it.
+    fresh: bool,
+    last: Option<Arc<RenderImage>>,
+}
+
+impl Pictures {
+    /// The picture in the file at `path`, as it is on disk now.
+    fn source(&self, path: &Path) -> ImageSource {
+        // As the watcher names the file.
+        let mut tidy = PathBuf::new();
+        for part in path.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => _ = tidy.pop(),
+                part => tidy.push(part),
+            }
+        }
+        let (pictures, path) = (self.0.clone(), tidy);
+        pictures
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(path.clone())
+            .or_default();
+        let resource = Resource::Path(path.as_path().into());
+        ImageSource::Custom(Arc::new(move |window, cx| {
+            let mut pictures = pictures.lock().unwrap_or_else(PoisonError::into_inner);
+            let shown = pictures.entry(path.clone()).or_default();
+            if !std::mem::replace(&mut shown.fresh, true) {
+                cx.remove_asset::<ImgResourceLoader>(&resource);
+            }
+            let Some(read) = window.use_asset::<ImgResourceLoader>(&resource, cx) else {
+                // Another tab showing this file may drop what is being read
+                // here, and with it the word that it is read: look again.
+                window.request_animation_frame();
+                return shown.last.clone().map(Ok);
+            };
+            let now = read.as_ref().ok();
+            if now.map(|image| image.id) != shown.last.as_ref().map(|image| image.id)
+                && let Some(old) = std::mem::replace(&mut shown.last, now.cloned())
+            {
+                cx.drop_image(old, Some(window));
+            }
+            Some(read)
+        }))
+    }
+
+    /// Have the pictures shown from the files in `changed`, or from under
+    /// its folders, read again; whether there are any.
+    fn changed(&self, changed: &BTreeSet<PathBuf>, cx: &mut App) -> bool {
+        let mut any = false;
+        let pictures = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for path in pictures.keys() {
+            if path.ancestors().any(|at| changed.contains(at)) {
+                cx.remove_asset::<ImgResourceLoader>(&Resource::Path(path.as_path().into()));
+                any = true;
+            }
+        }
+        any
+    }
 }
 
 /// A picture centred in the pane, at most its size.

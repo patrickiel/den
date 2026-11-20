@@ -1947,6 +1947,11 @@ impl Workspace {
                     file.update(cx, |file, cx| file.reload_from_disk(window, cx));
                 }
             }
+            // And the pictures they show: an image's own, a Markdown preview's.
+            let files: Vec<_> = self.panes_of::<FilePanel>().map(|(_, f)| f).collect();
+            for file in files {
+                file.update(cx, |file, cx| file.pictures_changed(&batch, cx));
+            }
         }
         // What git keeps changed (a commit, a checkout, a fetch): the commits
         // too, and everything when a remote may have. Files changed: the
